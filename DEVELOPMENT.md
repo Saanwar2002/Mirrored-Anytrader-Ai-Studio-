@@ -1,5 +1,42 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Task 6: Payment Authority, Escrow Security & Startup Ordering Hardening (October 4, 2026)
+- **1. Server-Authoritative Payment Ledger & Escrow Authority (`src/server/paymentLedger.ts`)**:
+  - **Single Canonical Authority for Escrow Operations**: All milestone escrow funding (`recordEscrowFunding`) and fund releases (`releaseEscrowFunds`) are exclusively executed server-side under strict ACID transactions and double-entry ledger bookkeeping.
+  - **Client Amount Protection & Strict Value Verification**:
+    - `verifiedAmount` in `recordEscrowFunding` is strictly validated to be a positive finite integer in minor units (`pence`). Any negative, zero, `NaN`, `Infinity`, or non-numeric input is rejected with `BadRequestError`.
+    - Persisted milestone amounts in database are validated to be positive finite numbers during release. Non-positive or corrupted database values fail-closed with `BadRequestError`.
+  - **Strong Authorization & Anti-Forgery Defense**:
+    - Authentic non-empty `authUid` is mandatory on all escrow operations; unauthenticated callers are immediately rejected with `ForbiddenError`.
+    - Fund release requires authentic caller ownership (`job.homeownerId === authUid || job.userId === authUid || job.customerId === authUid`), authorized platform admin (`isAdmin: true`), or verified accepted tradesperson on QR handshake (`isQrHandshake && (job.acceptedTradespersonId === authUid || job.acceptedTraderId === authUid)`).
+    - Forged QR handshakes by impostor tradespeople fail-closed with `ForbiddenError`.
+  - **Canonical IDOR / BOLA Validation**:
+    - Cross-job quote binding check: Rejects with `BadRequestError` if quote does not belong to the specified job.
+    - Accepted quote binding check: Rejects with `BadRequestError` if quote is not the job's accepted quote.
+    - Quote tradesperson vs job accepted tradesperson binding check: Rejects on mismatched contractor identity.
+    - Milestone existence check: Rejects with `BadRequestError` if requested `milestoneId` is not present on the quote.
+  - **Crash Recovery & Stale Lock Idempotency Defense**:
+    - Implemented crash-resilient idempotency: If worker or node crashes after Firestore transaction commit but before the idempotency record is updated to `completed`, recovery reads authoritative persisted state (`targetMilestone.releaseOperationId === idempotencyKey`).
+    - Recovers safely without creating duplicate financial effects, without duplicate milestone state transitions, and without duplicate ledger records.
+  - **Sanitized Idempotency Response Payloads**: Response objects stored in `payment_idempotency` are sanitized via JSON serialization to strip `undefined` properties, ensuring native Firestore compatibility across all environments.
+- **2. Fail-Closed Startup & Readiness Ordering Hardening (`server.ts`)**:
+  - **Strict Fail-Closed Firestore Readiness Probe**: Eliminated silent fallback catches in `verifyFirestore`; database connection errors (e.g. `PERMISSION_DENIED`, timeouts) reject fail-closed without allowing background workers or public ingress to start in a broken state.
+  - **Application Readiness State Tracking**: Added global `isApplicationReady` flag and `bootstrapError` tracker.
+  - **Readiness-Gated Health Endpoint (`/api/health`)**: Returns `503 Service Unavailable` with `{ status: "unhealthy", ready: false, error: ... }` whenever bootstrap is in progress or failed. Returns `200 OK` with `{ status: "ok", ready: true }` only when the entire bootstrap lifecycle completes successfully.
+- **3. Testing & Verification**:
+  - **Real Firestore Emulator Concurrency Suite (`tests/unit/task6FirestoreConcurrency.test.ts`)**: **6/6 tests passing (100%)** directly against real Firebase/Firestore emulator (`demo-anytrader` on port 8088):
+    - *Real Test #1*: Simultaneous release requests with different keys (`Promise.allSettled`, exactly 1 succeeds, exactly 1 receives `ConflictError`, 1 ledger entry, 1 domain event).
+    - *Real Test #2*: Simultaneous & sequential release requests with SAME idempotency key (returns cached result without duplicate ledger entries or events).
+    - *Real Test #3*: Release request fails closed on unauthorized caller (unauthenticated, wrong customer, forged QR).
+    - *Real Test #4*: Rejects cross-entity IDOR combinations (Job A with Quote B, bogus milestone IDs).
+    - *Real Test #5*: Strict state-machine enforcement rejects invalid transitions on emulator (unfunded, cancelled).
+    - *Real Test #6*: Crash recovery with stale lock verifies authoritative state and avoids duplicate financial effects.
+  - **Task 6 Payment Authority Test Suite (`tests/unit/task6PaymentAuthority.test.ts`)**: **22/22 tests passing (100%)**.
+  - **Task 6 Startup Ordering Test Suite (`tests/unit/task6StartupOrdering.test.ts`)**: **9/9 tests passing (100%)**.
+  - **Complete Platform-Wide Unit Test Suite (`npm test`)**: **862/862 tests passing** across **52 test files** (100% clean).
+  - **TypeScript & Lint (`npm run lint` / `tsc --noEmit`)**: 0 errors.
+  - **Clean Applet Build (`compile_applet`)**: Succeeded cleanly.
+
 ## 🛡️ AnyTrader — Task 5: Canonical Job Lifecycle & Final Concurrency Verification (October 3, 2026)
 - **1. Server-Authoritative Lifecycle Architecture (`executeJobLifecycleCommand`)**:
   - Implemented single authoritative `executeJobLifecycleCommand` inside `src/server/jobLifecycleCommands.ts` capturing start, complete, cancel, and dispute workflows under a uniform, secure transactional design.

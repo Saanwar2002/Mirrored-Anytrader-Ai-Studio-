@@ -88,18 +88,19 @@ export class PaymentLedgerEngine {
       const result = await executor();
       
       // 3. Record completed result
+      const sanitizedResponse = result !== undefined ? JSON.parse(JSON.stringify(result)) : null;
       if (typeof idempotencyRef.update === "function") {
         await idempotencyRef.update({
           status: "completed",
           completedAt: new Date().toISOString(),
-          response: result ?? null,
+          response: sanitizedResponse,
         });
       } else if (typeof idempotencyRef.set === "function") {
         await idempotencyRef.set({
           operationName,
           status: "completed",
           completedAt: new Date().toISOString(),
-          response: result ?? null,
+          response: sanitizedResponse,
         }, { merge: true });
       }
 
@@ -137,15 +138,16 @@ export class PaymentLedgerEngine {
   ): Promise<LedgerEntry> {
     const { jobId, milestoneId, customerId, traderId, verifiedAmount, currency, paymentIntentId, idempotencyKey } = params;
 
-    if (verifiedAmount <= 0) {
-      throw new BadRequestError("Verified amount must be strictly greater than zero.");
+    if (typeof verifiedAmount !== "number" || !Number.isFinite(verifiedAmount) || verifiedAmount <= 0) {
+      throw new BadRequestError("Verified amount must be a strictly positive finite number in minor units (pence).");
     }
 
     const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "FUND_MILESTONE_ESCROW", async () => {
       const platformFee = Math.round(verifiedAmount * 0.12); // Standard 12% platform fee
       const netPayout = verifiedAmount - platformFee;
 
-      const entryId = `ledg_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const entryHash = crypto.createHash("sha256").update(`${idempotencyKey}:${paymentIntentId}`).digest("hex").substring(0, 16);
+      const entryId = `ledg_fund_${entryHash}`;
       const ledgerEntry: LedgerEntry = {
         entryId,
         transactionId: paymentIntentId,
@@ -211,6 +213,14 @@ export class PaymentLedgerEngine {
   ): Promise<any> {
     const { jobId, quoteId, milestoneId, authUid, idempotencyKey, isQrHandshake, isAdmin } = params;
 
+    if (!authUid || typeof authUid !== "string" || authUid.trim() === "") {
+      throw new ForbiddenError("Unauthorized: authentic caller identity required");
+    }
+
+    if (!jobId || typeof jobId !== "string" || !quoteId || typeof quoteId !== "string") {
+      throw new BadRequestError("jobId and quoteId must be valid strings");
+    }
+
     const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "RELEASE_MILESTONE", async () => {
       if (!db) {
         throw new InternalServerError("Database is required for financial escrow release.");
@@ -223,8 +233,20 @@ export class PaymentLedgerEngine {
         if (!jobDoc.exists) throw new BadRequestError("Job not found");
 
         const jobData = jobDoc.data();
-        const isOwner = jobData?.homeownerId === authUid || jobData?.userId === authUid;
-        const isAcceptedTrader = jobData?.acceptedTradespersonId === authUid || jobData?.acceptedTraderId === authUid;
+        const isOwner = Boolean(
+          authUid && (
+            (jobData?.homeownerId && jobData.homeownerId === authUid) ||
+            (jobData?.userId && jobData.userId === authUid) ||
+            (jobData?.customerId && jobData.customerId === authUid)
+          )
+        );
+        const isAcceptedTrader = Boolean(
+          authUid && (
+            (jobData?.acceptedTradespersonId && jobData.acceptedTradespersonId === authUid) ||
+            (jobData?.acceptedTraderId && jobData.acceptedTraderId === authUid) ||
+            (jobData?.tradespersonId && jobData.tradespersonId === authUid)
+          )
+        );
 
         if (!isOwner && !isAdmin && !(isQrHandshake && isAcceptedTrader)) {
           throw new ForbiddenError("Unauthorized: only the job owner or authorized admin can release milestone funds");
@@ -235,13 +257,50 @@ export class PaymentLedgerEngine {
         if (!quoteDoc.exists) throw new BadRequestError("Quote not found");
 
         const quoteData = quoteDoc.data();
+
+        // Canonical IDOR / BOLA validation:
+        if (quoteData?.jobId && quoteData.jobId !== jobId) {
+          throw new BadRequestError("IDOR rejection: Quote does not belong to the specified job");
+        }
+        if (jobData?.acceptedQuoteId && jobData.acceptedQuoteId !== quoteId) {
+          throw new BadRequestError(`Cannot release funds for quote '${quoteId}': Job has accepted quote '${jobData.acceptedQuoteId}'`);
+        }
+        if (jobData?.acceptedTradespersonId && quoteData?.tradespersonId && jobData.acceptedTradespersonId !== quoteData.tradespersonId) {
+          throw new BadRequestError("IDOR rejection: Quote tradesperson does not match job accepted tradesperson");
+        }
+
         const currentMilestones = quoteData?.milestones || [];
-        
-        const targetMilestone = currentMilestones.find((m: any, idx: number) => m.id === milestoneId || (isQrHandshake && idx === 0));
-        if (!targetMilestone) throw new BadRequestError("Milestone not found");
+        const targetMilestone = milestoneId
+          ? currentMilestones.find((m: any) => m.id === milestoneId)
+          : (isQrHandshake ? currentMilestones[0] : null);
+
+        if (!targetMilestone) {
+          throw new BadRequestError(`Milestone not found: '${milestoneId || "initial"}' does not exist on quote '${quoteId}'`);
+        }
 
         // Transactional Claim Validation
-        // If it's already released with the SAME idempotency key, we allow it (for retry safety)
+        // If it's already released with the SAME idempotency key, authoritative state confirms this release was already committed!
+        if (
+          (targetMilestone.status === "released" || targetMilestone.status === "funds_released" || targetMilestone.releasedAt) &&
+          targetMilestone.releaseOperationId === idempotencyKey
+        ) {
+          const releasedAmount = Number(targetMilestone.amount || targetMilestone.verifiedAmount || 0);
+          const platformFeePence = Math.round(releasedAmount * 100 * 0.12);
+          const netPayoutPence = Math.round(releasedAmount * 100) - platformFeePence;
+          const ledgerEntryId = targetMilestone.escrowReleaseLedgerId || `ledg_rel_${crypto.createHash("sha256").update(idempotencyKey).digest("hex").substring(0, 16)}`;
+          return {
+            jobData,
+            quoteData,
+            releasedAmount,
+            targetMilestoneTitle: targetMilestone.title || "Work Stage",
+            platformFeePence,
+            netPayoutPence,
+            ledgerEntryId,
+            targetMilestone,
+            wasAlreadyCommitted: true
+          };
+        }
+
         if ((targetMilestone.status === "released" || targetMilestone.status === "funds_released" || targetMilestone.releasedAt) && targetMilestone.releaseOperationId !== idempotencyKey) {
           throw new ConflictError("Milestone has already been released by another request");
         }
@@ -253,20 +312,29 @@ export class PaymentLedgerEngine {
         // Business Logic sequence check
         BusinessLogicDefense.validateEscrowReleaseEligibility(targetMilestone, jobData as any);
 
-        let releasedAmount = 0;
-        let targetMilestoneTitle = "Work Stage";
+        const releasedAmount = Number(targetMilestone.amount || targetMilestone.verifiedAmount || 0);
+        if (typeof releasedAmount !== "number" || !Number.isFinite(releasedAmount) || releasedAmount <= 0) {
+          throw new BadRequestError(`Invalid milestone amount in database: '${releasedAmount}'. Must be a positive finite number.`);
+        }
+
+        const platformFeePence = Math.round(releasedAmount * 100 * 0.12);
+        const netPayoutPence = Math.round(releasedAmount * 100) - platformFeePence;
+        const ledgerHash = crypto.createHash("sha256").update(`${idempotencyKey}:${jobId}:${quoteId}:${targetMilestone.id}`).digest("hex").substring(0, 16);
+        const ledgerEntryId = `ledg_rel_${ledgerHash}`;
+
+        let targetMilestoneTitle = targetMilestone.title || "Work Stage";
 
         const updatedMilestones = currentMilestones.map((m: any, idx: number) => {
-          if (m.id === milestoneId || (isQrHandshake && idx === 0)) {
+          if (m.id === targetMilestone.id) {
             // Validation of state jump
             validateMilestoneTransition(m.status || 'funded', 'released');
-            releasedAmount = Number(m.amount || m.verifiedAmount || 0);
             targetMilestoneTitle = m.title || "Work Stage";
             return { 
               ...m, 
               status: 'funds_released', 
               releasedAt: new Date().toISOString(), 
-              releaseOperationId: idempotencyKey 
+              releaseOperationId: idempotencyKey,
+              escrowReleaseLedgerId: ledgerEntryId,
             };
           }
           return m;
@@ -290,10 +358,6 @@ export class PaymentLedgerEngine {
         }
 
         transaction.update(quoteRef, quoteUpdatePayload);
-
-        const platformFeePence = Math.round(releasedAmount * 100 * 0.12);
-        const netPayoutPence = Math.round(releasedAmount * 100) - platformFeePence;
-        const ledgerEntryId = `ledg_rel_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
 
         const releaseEntry: LedgerEntry = {
           entryId: ledgerEntryId,
@@ -322,7 +386,8 @@ export class PaymentLedgerEngine {
           netPayoutPence,
           ledgerEntryId,
           targetMilestone,
-          releaseEntry
+          releaseEntry,
+          wasAlreadyCommitted: false
         };
       });
 
@@ -335,15 +400,18 @@ export class PaymentLedgerEngine {
         netPayoutPence,
         ledgerEntryId,
         targetMilestone,
+        wasAlreadyCommitted
       } = transactionResult;
 
-      // Dispatch domain event (outside transaction but inside idempotency executor)
-      await domainEvents.dispatch("MILESTONE_RELEASED", milestoneId || "m0", authUid, {
-        jobId,
-        quoteId,
-        releasedAmount,
-        isQrHandshake: Boolean(isQrHandshake)
-      }, idempotencyKey, db);
+      // Dispatch domain event only on initial commit, not on crash recovery re-evaluation
+      if (!wasAlreadyCommitted) {
+        await domainEvents.dispatch("MILESTONE_RELEASED", milestoneId || targetMilestone?.id || "m0", authUid, {
+          jobId,
+          quoteId,
+          releasedAmount,
+          isQrHandshake: Boolean(isQrHandshake)
+        }, idempotencyKey, db);
+      }
 
       return {
         success: true,

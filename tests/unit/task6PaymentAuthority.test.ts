@@ -733,4 +733,338 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
       expect(updatedLedgerData.transferStatus).toBe("completed");
     });
   });
+
+  describe("8. CLIENT AMOUNT MANIPULATION & VALUE PROTECTION", () => {
+    it("rejects invalid, negative, zero, NaN, and string amounts in recordEscrowFunding", async () => {
+      // Negative amount
+      await expect(
+        PaymentLedgerEngine.recordEscrowFunding(db, {
+          jobId,
+          milestoneId,
+          customerId: authUid,
+          traderId,
+          verifiedAmount: -5000,
+          currency: "gbp",
+          paymentIntentId: "pi_negative",
+          idempotencyKey: "key_neg_1",
+        })
+      ).rejects.toThrow("Verified amount must be a strictly positive finite number in minor units (pence).");
+
+      // Zero amount
+      await expect(
+        PaymentLedgerEngine.recordEscrowFunding(db, {
+          jobId,
+          milestoneId,
+          customerId: authUid,
+          traderId,
+          verifiedAmount: 0,
+          currency: "gbp",
+          paymentIntentId: "pi_zero",
+          idempotencyKey: "key_zero_1",
+        })
+      ).rejects.toThrow("Verified amount must be a strictly positive finite number in minor units (pence).");
+
+      // NaN amount
+      await expect(
+        PaymentLedgerEngine.recordEscrowFunding(db, {
+          jobId,
+          milestoneId,
+          customerId: authUid,
+          traderId,
+          verifiedAmount: NaN,
+          currency: "gbp",
+          paymentIntentId: "pi_nan",
+          idempotencyKey: "key_nan_1",
+        })
+      ).rejects.toThrow("Verified amount must be a strictly positive finite number in minor units (pence).");
+
+      // Infinity amount
+      await expect(
+        PaymentLedgerEngine.recordEscrowFunding(db, {
+          jobId,
+          milestoneId,
+          customerId: authUid,
+          traderId,
+          verifiedAmount: Infinity,
+          currency: "gbp",
+          paymentIntentId: "pi_inf",
+          idempotencyKey: "key_inf_1",
+        })
+      ).rejects.toThrow("Verified amount must be a strictly positive finite number in minor units (pence).");
+
+      // String amount passed as any
+      await expect(
+        PaymentLedgerEngine.recordEscrowFunding(db, {
+          jobId,
+          milestoneId,
+          customerId: authUid,
+          traderId,
+          verifiedAmount: "5000" as any,
+          currency: "gbp",
+          paymentIntentId: "pi_str",
+          idempotencyKey: "key_str_1",
+        })
+      ).rejects.toThrow("Verified amount must be a strictly positive finite number in minor units (pence).");
+    });
+
+    it("fails closed when persisted milestone in database has non-positive or corrupted amount", async () => {
+      // Corrupt the milestone amount in DB to 0
+      const quoteRef = db.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+      await quoteRef.update({
+        milestones: [
+          { id: "corrupt_milestone", title: "Corrupt", amount: 0, status: "funded" }
+        ]
+      });
+
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId: "corrupt_milestone",
+          authUid,
+          idempotencyKey: "key_corrupt_test",
+        })
+      ).rejects.toThrow("Invalid milestone amount in database");
+    });
+  });
+
+  describe("9. STRONG AUTHORIZATION & FORGERY DEFENSE", () => {
+    it("rejects unauthenticated requests (missing or empty authUid)", async () => {
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId,
+          authUid: "",
+          idempotencyKey: "key_unauth_1",
+        })
+      ).rejects.toThrow("Unauthorized");
+
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId,
+          authUid: null as any,
+          idempotencyKey: "key_unauth_2",
+        })
+      ).rejects.toThrow("Unauthorized");
+    });
+
+    it("rejects unauthorized caller (wrong customer who is neither owner nor admin)", async () => {
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId,
+          authUid: "attacker_charlie",
+          idempotencyKey: "key_wrong_cust",
+        })
+      ).rejects.toThrow(ForbiddenError);
+    });
+
+    it("rejects forged QR handshake when caller is not the accepted tradesperson", async () => {
+      // Trader Dave is accepted; Impostor Bob attempts QR release
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId,
+          authUid: "impostor_bob",
+          idempotencyKey: "key_forged_qr",
+          isQrHandshake: true,
+        })
+      ).rejects.toThrow(ForbiddenError);
+    });
+
+    it("allows QR handshake when caller IS the verified accepted tradesperson", async () => {
+      const result = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: traderId, // trader_dave is acceptedTradespersonId on initialJobData
+        idempotencyKey: "key_valid_trader_qr",
+        isQrHandshake: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.releasedAmount).toBe(500);
+
+      // Verify job marked handshake complete
+      const jobSnap = await db.collection("jobs").doc(jobId).get();
+      expect(jobSnap.data()?.paymentStatus).toBe("handshake_complete");
+      expect(jobSnap.data()?.isPaid).toBe(true);
+    });
+
+    it("allows authorized admin to release milestone", async () => {
+      const result = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: "admin_super_user",
+        idempotencyKey: "key_admin_release",
+        isAdmin: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.releasedAmount).toBe(500);
+    });
+  });
+
+  describe("10. IDOR / BOLA CROSS-ENTITY MANIPULATION DEFENSE", () => {
+    it("rejects release when quote does not belong to specified job (Job A with Quote B)", async () => {
+      // Create second job and quote
+      const jobB = "job_b_999";
+      const quoteB = "quote_b_888";
+      db._store[`jobs/${jobB}`] = { id: jobB, homeownerId: authUid, acceptedQuoteId: quoteB, acceptedTradespersonId: traderId };
+      db._store[`jobs/${jobB}/quotes/${quoteB}`] = { id: quoteB, jobId: jobB, tradespersonId: traderId, milestones: [{ id: "mB", amount: 200, status: "funded" }] };
+
+      // Caller attempts to release Job A with Quote B
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId: quoteB, // Quote B does not exist under Job A
+          milestoneId: "mB",
+          authUid,
+          idempotencyKey: "key_idor_1",
+        })
+      ).rejects.toThrow("Quote not found");
+    });
+
+    it("rejects release for unaccepted quote when job has a different accepted quote", async () => {
+      // Add a competing, unaccepted quote to Job A
+      const competingQuoteId = "quote_competing_unaccepted";
+      db._store[`jobs/${jobId}/quotes/${competingQuoteId}`] = {
+        id: competingQuoteId,
+        jobId,
+        tradespersonId: "trader_other",
+        milestones: [{ id: "m_other", amount: 300, status: "funded" }],
+      };
+
+      // Attacker tries to release funds on the competing quote
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId: competingQuoteId,
+          milestoneId: "m_other",
+          authUid,
+          idempotencyKey: "key_unaccepted_quote",
+        })
+      ).rejects.toThrow("Job has accepted quote");
+    });
+
+    it("rejects release when milestone does not exist on the specified quote", async () => {
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId: "non_existent_milestone_xyz",
+          authUid,
+          idempotencyKey: "key_bogus_m",
+        })
+      ).rejects.toThrow("Milestone not found");
+    });
+  });
+
+  describe("11. STATE-MACHINE ENFORCEMENT & INVALID TRANSITION DEFENSE", () => {
+    it("rejects release on an unfunded (pending) milestone", async () => {
+      const quoteRef = db.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+      await quoteRef.update({
+        milestones: [{ id: milestoneId, title: "Tiling", amount: 500, status: "pending" }]
+      });
+
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId,
+          authUid,
+          idempotencyKey: "key_unfunded_release",
+        })
+      ).rejects.toThrow("Escrow must be actively funded before release");
+    });
+
+    it("rejects release on a cancelled or refunded milestone", async () => {
+      const quoteRef = db.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+      await quoteRef.update({
+        milestones: [{ id: milestoneId, title: "Tiling", amount: 500, status: "cancelled", isRefunded: true }]
+      });
+
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId,
+          authUid,
+          idempotencyKey: "key_cancelled_release",
+        })
+      ).rejects.toThrow(ConflictError);
+    });
+
+    it("rejects release on a disputed milestone", async () => {
+      const quoteRef = db.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+      await quoteRef.update({
+        milestones: [{ id: milestoneId, title: "Tiling", amount: 500, status: "disputed", isDisputed: true }]
+      });
+
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId,
+          authUid,
+          idempotencyKey: "key_disputed_release",
+        })
+      ).rejects.toThrow("Funds are locked under active dispute arbitration");
+    });
+  });
+
+  describe("12. IDEMPOTENCY STALE-LOCK & CRASH RECOVERY DEFENSE", () => {
+    it("proves crash recovery checks authoritative state and does NOT duplicate ledger or state transitions", async () => {
+      // Scenario: Transaction committed in DB, but worker crashed before updating payment_idempotency to completed
+      const crashOpKey = "rel_crash_recovery_key_1";
+
+      // 1. Initial successful release
+      const res1 = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid,
+        idempotencyKey: crashOpKey,
+      });
+      expect(res1.success).toBe(true);
+
+      // Verify ledger has 1 entry
+      const ledgerSnap1 = await db.collection("payment_ledger").get();
+      expect(ledgerSnap1.docs.length).toBe(1);
+
+      // 2. Simulate worker crash: set payment_idempotency to in_progress with stale timestamp (> 5 mins old)
+      const idempRef = db.collection("payment_idempotency").doc(crashOpKey);
+      await idempRef.set({
+        operationName: "RELEASE_MILESTONE",
+        status: "in_progress",
+        startedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
+      });
+
+      // 3. Retry after recovery with the same idempotency key
+      const res2 = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid,
+        idempotencyKey: crashOpKey,
+      });
+
+      expect(res2.success).toBe(true);
+      expect(res2.releasedAmount).toBe(500);
+
+      // VERIFY: Still exactly 1 ledger record, no duplicate financial effect created!
+      const ledgerSnap2 = await db.collection("payment_ledger").get();
+      expect(ledgerSnap2.docs.length).toBe(1);
+
+      // Verify idempotency record is marked completed
+      const idempSnap = await idempRef.get();
+      expect(idempSnap.data()?.status).toBe("completed");
+    });
+  });
 });

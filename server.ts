@@ -143,6 +143,8 @@ const startCategoryRegistrySyncWorker = (firestoreDb: admin.firestore.Firestore)
 
 // Initialize Firebase Admin
 let db: admin.firestore.Firestore | null = null;
+let isApplicationReady = false;
+let bootstrapError: string | null = null;
 
 export async function initializeFirebaseAdminAsync(): Promise<{ app: admin.app.App; db: admin.firestore.Firestore }> {
   let app: admin.app.App;
@@ -2141,7 +2143,14 @@ async function startServer() {
 
   // API Routes
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", message: "TradeQuote UK API is running" });
+    if (!isApplicationReady) {
+      return res.status(503).json({
+        status: "unhealthy",
+        ready: false,
+        error: bootstrapError || "Application bootstrap in progress or failed",
+      });
+    }
+    res.json({ status: "ok", ready: true, message: "TradeQuote UK API is running and ready" });
   });
 
   // Push Notification Dispatcher
@@ -6539,33 +6548,13 @@ export async function bootstrap() {
   const hooks: BootstrapLifecycleHooks = {
     initFirebase: initializeFirebaseAdminAsync,
     verifyFirestore: async (firestoreDb) => {
-      try {
-        const isReady = await verifyFirestoreReadiness(firestoreDb, 3000);
-        return isReady;
-      } catch (err: any) {
-        const errMsg = err?.message || String(err);
-        if (
-          errMsg.includes("PERMISSION_DENIED") ||
-          errMsg.includes("UNAUTHENTICATED") ||
-          errMsg.includes("Could not load the default credentials") ||
-          errMsg.includes("timed out")
-        ) {
-          console.info(
-            "[Bootstrap] Container environment: database operational for client authentication and direct SDK access."
-          );
-          return true;
-        }
-        throw err;
-      }
+      // Strictly fail-closed without swallowing errors
+      return verifyFirestoreReadiness(firestoreDb, 3000);
     },
     queue: intelligenceTaskQueue,
     registerHandlers: registerIntelligenceTaskHandlers,
     startWorker: () => {
-      try {
-        intelligenceTaskQueue.startWorker(5000);
-      } catch (workerErr: any) {
-        console.warn("[Bootstrap] Intelligence worker startup note:", workerErr?.message || workerErr);
-      }
+      intelligenceTaskQueue.startWorker(5000);
     },
     startSyncWorkers: (firestoreDb) => {
       db = firestoreDb;
@@ -6579,14 +6568,28 @@ export async function bootstrap() {
     startHttpServer: () => startServer(),
   };
 
-  return runBootstrapSequence(hooks);
+  try {
+    const result = await runBootstrapSequence(hooks);
+    isApplicationReady = true;
+    bootstrapError = null;
+    return result;
+  } catch (err: any) {
+    isApplicationReady = false;
+    bootstrapError = err?.message || String(err);
+    throw err;
+  }
 }
 
 // Authoritative bootstrap startup
 bootstrap().catch((err) => {
-  console.warn("[Bootstrap] Background intelligence queue notice:", err?.message || err);
-  // Ensure HTTP server is listening on port 3000 so Cloud Run container passes health checks and serves client traffic
-  console.log("[Bootstrap] Starting HTTP server on port 3000 for web application ingress...");
+  console.error("[Fatal] Authoritative application bootstrap failed (Fail-Closed):", err?.message || err);
+  if (process.env.NODE_ENV === "production" && !process.env.K_SERVICE) {
+    // If not in a container platform requiring port binding for diagnostics, exit process fail-closed
+    process.exit(1);
+  }
+  // In container environments (e.g. Cloud Run K_SERVICE), bind port 3000 strictly for health diagnostic probe
+  // returning 503 Unhealthy without worker, without projection sync, and without active readiness.
+  console.log("[Bootstrap] Starting HTTP server on port 3000 for diagnostic ingress (Readiness: UNHEALTHY)...");
   startServer().catch((serverErr) => {
     console.error("[Fatal] Failed to start HTTP server:", serverErr);
   });

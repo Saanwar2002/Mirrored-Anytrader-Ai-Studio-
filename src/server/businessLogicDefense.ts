@@ -79,18 +79,18 @@ export class BusinessLogicDefense {
       );
     }
 
-    // Invariant 4: Escrow Funding Proof
+    // Invariant 4: Dispute Freeze
+    if (milestone.status === "disputed" || milestone.isDisputed === true || job?.status === "disputed") {
+      throw new ConflictError(
+        "Business-logic violation: Funds are locked under active dispute arbitration. Release requires resolution."
+      );
+    }
+
+    // Invariant 5: Escrow Funding Proof
     const validFundedStatuses = ["funded", "work_submitted"];
     if (!validFundedStatuses.includes(milestone.status) && milestone.escrowFunded !== true) {
       throw new BadRequestError(
         `Business-logic violation: Escrow must be actively funded before release. Current status is '${milestone.status}'.`
-      );
-    }
-
-    // Invariant 5: Dispute Freeze
-    if (milestone.status === "disputed" || milestone.isDisputed === true || job?.status === "disputed") {
-      throw new ConflictError(
-        "Business-logic violation: Funds are locked under active dispute arbitration. Release requires resolution."
       );
     }
 
