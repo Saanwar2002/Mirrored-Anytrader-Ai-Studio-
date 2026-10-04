@@ -4031,14 +4031,19 @@ async function startServer() {
         { stripe: stripeClient }
       );
 
-      // Notify Trader (outside transaction)
+      // Notify Trader (outside transaction) with status-aware notification messaging
       if (result.traderId) {
+        const notif = PaymentLedgerEngine.formatReleaseNotification({
+          transferStatus: stripeTransferResult.transferStatus,
+          isQrHandshake: Boolean(isQrHandshake),
+          jobNo: result.jobNo,
+          targetMilestoneTitle: result.targetMilestoneTitle,
+        });
+
         await firestoreDb.collection("notifications").add({
           userId: result.traderId,
-          title: isQrHandshake ? "Work Verified & Funds Released! 🤝" : "Funds Released! 💸",
-          message: isQrHandshake
-            ? `QR Handshake complete for "${result.jobNo || 'Job'}". Funds released to your account.`
-            : `The homeowner has released funds for milestone: "${result.targetMilestoneTitle}".`,
+          title: notif.title,
+          message: notif.message,
           type: "status",
           link: `/job/${jobId}`,
           read: false,

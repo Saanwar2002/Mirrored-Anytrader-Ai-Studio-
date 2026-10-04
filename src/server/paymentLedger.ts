@@ -583,4 +583,52 @@ export class PaymentLedgerEngine {
       };
     }
   }
+
+  /**
+   * Generates accurate, non-misleading trader notification payloads for milestone escrow release.
+   * Tailors title and messaging strictly to the external Stripe transfer status.
+   */
+  public static formatReleaseNotification(params: {
+    transferStatus: "completed" | "failed" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
+    isQrHandshake?: boolean;
+    jobNo?: string;
+    targetMilestoneTitle?: string;
+  }): { title: string; message: string } {
+    const {
+      transferStatus,
+      isQrHandshake,
+      jobNo = "Job",
+      targetMilestoneTitle = "Milestone",
+    } = params;
+
+    if (transferStatus === "completed" || transferStatus === "skipped_destination_charge") {
+      return {
+        title: isQrHandshake ? "Work Verified & Funds Released! 🤝" : "Funds Released! 💸",
+        message: isQrHandshake
+          ? `QR Handshake complete for "${jobNo}". Funds released to your account.`
+          : `The homeowner has released funds for milestone: "${targetMilestoneTitle}". Funds transferred to your Stripe account.`,
+      };
+    }
+
+    if (transferStatus === "failed") {
+      return {
+        title: isQrHandshake
+          ? "Work Verified (Payout Pending) ⚠️"
+          : "Release Recorded (Payout Pending Retry) ⚠️",
+        message: isQrHandshake
+          ? `QR Handshake verified for "${jobNo}". Payout transfer encountered an issue and will be retried.`
+          : `The homeowner approved milestone: "${targetMilestoneTitle}". Escrow release is recorded, but payout transfer is pending retry.`,
+      };
+    }
+
+    // Non-Stripe / Mock / No-Stripe configured
+    return {
+      title: isQrHandshake
+        ? "Work Verified & Escrow Released 🤝"
+        : "Milestone Approved & Escrow Released 📋",
+      message: isQrHandshake
+        ? `QR Handshake complete for "${jobNo}". Escrow released on platform.`
+        : `Milestone "${targetMilestoneTitle}" escrow release recorded on platform.`,
+    };
+  }
 }

@@ -434,4 +434,102 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
     expect(capturedKeys[0]).toBe(expectedKey);
     expect(capturedKeys[1]).toBe(expectedKey);
   });
+
+  it("Contract F: Proves trader notifications accurately reflect Stripe transfer state without misleading titles", () => {
+    // 1. Stripe Success
+    const successNotif = PaymentLedgerEngine.formatReleaseNotification({
+      transferStatus: "completed",
+      jobNo: "JOB-101",
+      targetMilestoneTitle: "Plumbing Stage",
+      isQrHandshake: false,
+    });
+    expect(successNotif.title).toBe("Funds Released! 💸");
+    expect(successNotif.message).toContain("Funds transferred to your Stripe account");
+
+    // 2. Stripe Failure
+    const failedNotif = PaymentLedgerEngine.formatReleaseNotification({
+      transferStatus: "failed",
+      jobNo: "JOB-101",
+      targetMilestoneTitle: "Plumbing Stage",
+      isQrHandshake: false,
+    });
+    expect(failedNotif.title).not.toBe("Funds Released! 💸");
+    expect(failedNotif.title).toBe("Release Recorded (Payout Pending Retry) ⚠️");
+    expect(failedNotif.message).toContain("payout transfer is pending retry");
+
+    // 3. QR Handshake with Stripe Failure
+    const qrFailedNotif = PaymentLedgerEngine.formatReleaseNotification({
+      transferStatus: "failed",
+      jobNo: "JOB-101",
+      targetMilestoneTitle: "Plumbing Stage",
+      isQrHandshake: true,
+    });
+    expect(qrFailedNotif.title).toBe("Work Verified (Payout Pending) ⚠️");
+    expect(qrFailedNotif.message).toContain("Payout transfer encountered an issue and will be retried");
+
+    // 4. No Stripe Configuration / Mock Account
+    const noStripeNotif = PaymentLedgerEngine.formatReleaseNotification({
+      transferStatus: "skipped_no_stripe",
+      jobNo: "JOB-101",
+      targetMilestoneTitle: "Plumbing Stage",
+      isQrHandshake: false,
+    });
+    expect(noStripeNotif.title).toBe("Milestone Approved & Escrow Released 📋");
+    expect(noStripeNotif.message).toContain("escrow release recorded on platform");
+  });
+
+  it("Contract G: Full Release Lifecycle maintains committed Firestore state while delivering accurate status in failure scenario", async () => {
+    // 1. Commit Firestore release
+    const releaseResult = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+      jobId,
+      quoteId,
+      milestoneId,
+      authUid,
+      idempotencyKey,
+    });
+    expect(releaseResult.success).toBe(true);
+
+    // 2. Simulate Stripe network rejection
+    const rejectingStripe = {
+      transfers: {
+        create: vi.fn().mockRejectedValue(new Error("503 Service Unavailable: Stripe Connect Maintenance")),
+      },
+    };
+
+    const stripeResult = await PaymentLedgerEngine.executeStripeEscrowTransfer(
+      db,
+      {
+        jobId,
+        quoteId,
+        milestoneId,
+        idempotencyKey,
+        traderId: releaseResult.traderId,
+        netPayoutPence: releaseResult.netPayoutPence,
+        targetMilestoneTitle: releaseResult.targetMilestoneTitle,
+      },
+      { stripe: rejectingStripe }
+    );
+
+    // 3. Format Notification
+    const notif = PaymentLedgerEngine.formatReleaseNotification({
+      transferStatus: stripeResult.transferStatus,
+      isQrHandshake: false,
+      jobNo: releaseResult.jobNo,
+      targetMilestoneTitle: releaseResult.targetMilestoneTitle,
+    });
+
+    // 4. Verify Invariants:
+    // a. Firestore milestone is still released
+    const quoteDoc = await db.collection("jobs").doc(jobId).collection("quotes").doc(quoteId).get();
+    expect(quoteDoc.data()?.milestones[0].status).toBe("funds_released");
+
+    // b. Ledger records failed transfer
+    const ledgerDoc = (await db.collection("payment_ledger").where("idempotencyKey", "==", idempotencyKey).get()).docs[0].data();
+    expect(ledgerDoc.transferStatus).toBe("failed");
+    expect(ledgerDoc.transferError).toContain("503 Service Unavailable");
+
+    // c. Notification is NOT misleading
+    expect(notif.title).toBe("Release Recorded (Payout Pending Retry) ⚠️");
+    expect(notif.title).not.toContain("Funds Released!");
+  });
 });
