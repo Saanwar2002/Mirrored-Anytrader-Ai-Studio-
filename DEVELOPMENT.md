@@ -32,8 +32,9 @@
     - *Real Test #5*: Strict state-machine enforcement rejects invalid transitions on emulator (unfunded, cancelled).
     - *Real Test #6*: Crash recovery with stale lock verifies authoritative state and avoids duplicate financial effects.
   - **Task 6 Payment Authority Test Suite (`tests/unit/task6PaymentAuthority.test.ts`)**: **22/22 tests passing (100%)**.
-  - **Task 6 Startup Ordering Test Suite (`tests/unit/task6StartupOrdering.test.ts`)**: **9/9 tests passing (100%)**.
-  - **Complete Platform-Wide Unit Test Suite (`npm test`)**: **862/862 tests passing** across **52 test files** (100% clean).
+  - **Task 6 Stripe Production-Path Contract Suite (`tests/unit/task6StripeProductionPath.test.ts`)**: **5/5 tests passing (100%)**.
+  - **Task 6 Startup Ordering Test Suite (`tests/unit/task6StartupOrdering.test.ts`)**: **11/11 tests passing (100%)**.
+  - **Complete Platform-Wide Unit Test Suite (`npm test`)**: **869/869 tests passing** across **53 test files** (100% clean).
   - **TypeScript & Lint (`npm run lint` / `tsc --noEmit`)**: 0 errors.
   - **Clean Applet Build (`compile_applet`)**: Succeeded cleanly.
 

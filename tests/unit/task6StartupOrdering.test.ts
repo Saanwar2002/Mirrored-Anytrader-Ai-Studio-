@@ -282,5 +282,95 @@ describe("Task 6: Application Startup & Readiness Ordering Hardening", () => {
     expect(serverStarted).toBe(false);
     expect(workerStarted).toBe(false);
   });
+
+  it("Test J (SCHEDULERS, LISTENERS, AND SYNC WORKERS DO NOT START ON BOOTSTRAP FAILURE)", async () => {
+    let syncWorkersStarted = false;
+    let schedulersStarted = false;
+    let matchingSystemStarted = false;
+    let serverStarted = false;
+    let workerStarted = false;
+
+    const hooks: BootstrapLifecycleHooks = {
+      initFirebase: vi.fn().mockRejectedValue(new Error("Network connection to Firebase failed")),
+      verifyFirestore: vi.fn(),
+      queue: mockQueue,
+      registerHandlers: vi.fn(),
+      startWorker: vi.fn().mockImplementation(() => {
+        workerStarted = true;
+      }),
+      startSyncWorkers: vi.fn().mockImplementation(() => {
+        syncWorkersStarted = true;
+      }),
+      startBackgroundSchedulers: vi.fn().mockImplementation(() => {
+        schedulersStarted = true;
+      }),
+      startMatchingSystem: vi.fn().mockImplementation(() => {
+        matchingSystemStarted = true;
+      }),
+      startHttpServer: vi.fn().mockImplementation(() => {
+        serverStarted = true;
+      }),
+    };
+
+    await expect(runBootstrapSequence(hooks)).rejects.toThrow("Network connection to Firebase failed");
+    expect(workerStarted).toBe(false);
+    expect(syncWorkersStarted).toBe(false);
+    expect(schedulersStarted).toBe(false);
+    expect(matchingSystemStarted).toBe(false);
+    expect(serverStarted).toBe(false);
+    expect(mockQueue.isWorkerActive()).toBe(false);
+  });
+
+  it("Test K (SUCCESSFUL BOOTSTRAP STARTS ALL SUBSYSTEMS IN STRICT ORDER)", async () => {
+    const sequenceOrder: string[] = [];
+
+    const hooks: BootstrapLifecycleHooks = {
+      initFirebase: vi.fn().mockImplementation(async () => {
+        sequenceOrder.push("initFirebase");
+        return { app: mockApp, db: mockDb };
+      }),
+      verifyFirestore: vi.fn().mockImplementation(async (db: any) => {
+        sequenceOrder.push("verifyFirestore");
+        return true;
+      }),
+      queue: mockQueue,
+      startSyncWorkers: vi.fn().mockImplementation(() => {
+        sequenceOrder.push("startSyncWorkers");
+      }),
+      registerHandlers: vi.fn().mockImplementation(() => {
+        sequenceOrder.push("registerHandlers");
+        for (const type of REQUIRED_INTELLIGENCE_HANDLERS) {
+          mockQueue.registerHandler(type, vi.fn() as any);
+        }
+      }),
+      startWorker: vi.fn().mockImplementation(() => {
+        sequenceOrder.push("startWorker");
+        mockQueue.startWorker(5000);
+      }),
+      startBackgroundSchedulers: vi.fn().mockImplementation(() => {
+        sequenceOrder.push("startBackgroundSchedulers");
+      }),
+      startMatchingSystem: vi.fn().mockImplementation(async () => {
+        sequenceOrder.push("startMatchingSystem");
+      }),
+      startHttpServer: vi.fn().mockImplementation(async () => {
+        sequenceOrder.push("startHttpServer");
+        return { listen: vi.fn() };
+      }),
+    };
+
+    const result = await runBootstrapSequence(hooks);
+    expect(result.status).toBe("ready");
+    expect(sequenceOrder).toEqual([
+      "initFirebase",
+      "verifyFirestore",
+      "startSyncWorkers",
+      "registerHandlers",
+      "startWorker",
+      "startBackgroundSchedulers",
+      "startMatchingSystem",
+      "startHttpServer",
+    ]);
+  });
 });
 

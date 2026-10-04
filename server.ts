@@ -4009,50 +4009,27 @@ async function startServer() {
       });
 
       // Handle Stripe side-effects strictly AFTER database state is committed transactionally
-      let stripeTransferId: string | undefined;
+      let stripeClient = null;
+      try {
+        stripeClient = getStripe();
+      } catch (e) {}
 
-      if (result.traderId && result.stripePaymentIntentId && !result.isDestinationCharge) {
-        try {
-          const traderDoc = await firestoreDb.collection("users").doc(result.traderId).get();
-          const traderStripeAccountId = traderDoc.data()?.stripeAccountId;
-          
-          let stripe;
-          try { stripe = getStripe(); } catch (e) {}
-
-          if (stripe && traderStripeAccountId && !traderStripeAccountId.startsWith("acct_mock_")) {
-            // Deterministic Stripe-side Idempotency Key
-            const stripeIdempotencyKey = `release:${jobId}:${quoteId}:${milestoneId || '0'}:${idempotencyKey}`;
-
-            const transfer = await stripe.transfers.create({
-              amount: result.netPayoutPence,
-              currency: "gbp",
-              destination: traderStripeAccountId,
-              description: `Milestone release for Job #${result.jobNo || jobId} (${result.targetMilestoneTitle})`,
-              metadata: {
-                jobId,
-                quoteId,
-                milestoneId: milestoneId || "m0",
-                traderId: result.traderId
-              }
-            }, {
-              idempotencyKey: stripeIdempotencyKey,
-            });
-            stripeTransferId = transfer.id;
-
-            // Update ledger with transfer ID (outside transaction but tracked by idempotency)
-            await firestoreDb.collection("payment_ledger").where("idempotencyKey", "==", idempotencyKey).get().then(snap => {
-              if (!snap.empty) {
-                return snap.docs[0].ref.update({ stripeTransferId, transferStatus: "completed" });
-              }
-            });
-          }
-        } catch (stripeErr: any) {
-          console.error("Stripe transfer execution failed during milestone release:", stripeErr.message);
-          // We do NOT throw here because the DB state is already committed.
-          // The next retry with same idempotencyKey will enter releaseEscrowFunds, 
-          // hit the idempotency cache or allow retry, and we can try Stripe again.
-        }
-      }
+      const stripeTransferResult = await PaymentLedgerEngine.executeStripeEscrowTransfer(
+        firestoreDb,
+        {
+          jobId,
+          quoteId,
+          milestoneId: result.milestoneId || milestoneId,
+          idempotencyKey,
+          traderId: result.traderId,
+          netPayoutPence: result.netPayoutPence,
+          targetMilestoneTitle: result.targetMilestoneTitle,
+          jobNo: result.jobNo,
+          stripePaymentIntentId: result.stripePaymentIntentId,
+          isDestinationCharge: result.isDestinationCharge,
+        },
+        { stripe: stripeClient }
+      );
 
       // Notify Trader (outside transaction)
       if (result.traderId) {
@@ -4069,7 +4046,12 @@ async function startServer() {
         }).catch(() => {});
       }
 
-      res.json(result);
+      res.json({
+        ...result,
+        stripeTransferStatus: stripeTransferResult.transferStatus,
+        stripeTransferId: stripeTransferResult.stripeTransferId,
+        stripeError: stripeTransferResult.error,
+      });
     } catch (error: any) {
       console.error("Milestone Release Error:", error);
       sendHttpError(res, error, req);
@@ -6583,15 +6565,14 @@ export async function bootstrap() {
 // Authoritative bootstrap startup
 bootstrap().catch((err) => {
   console.error("[Fatal] Authoritative application bootstrap failed (Fail-Closed):", err?.message || err);
-  if (process.env.NODE_ENV === "production" && !process.env.K_SERVICE) {
-    // If not in a container platform requiring port binding for diagnostics, exit process fail-closed
+  if (process.env.NODE_ENV === "production") {
+    // Strict production invariant (including Cloud Run / container platform): fail closed immediately
     process.exit(1);
   }
-  // In container environments (e.g. Cloud Run K_SERVICE), bind port 3000 strictly for health diagnostic probe
-  // returning 503 Unhealthy without worker, without projection sync, and without active readiness.
-  console.log("[Bootstrap] Starting HTTP server on port 3000 for diagnostic ingress (Readiness: UNHEALTHY)...");
+  // In local development environment, mount Vite dev server on port 3000 for client UI preview
+  console.warn("[Bootstrap:Dev] Starting Vite development server on port 3000 (Application Readiness: UNREADY)...");
   startServer().catch((serverErr) => {
-    console.error("[Fatal] Failed to start HTTP server:", serverErr);
+    console.error("[Fatal] Failed to start HTTP dev server:", serverErr);
   });
 });
 

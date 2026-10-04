@@ -431,4 +431,156 @@ export class PaymentLedgerEngine {
 
     return result;
   }
+
+  /**
+   * Production-Path Stripe Escrow Transfer Side Effect:
+   * Strictly executed AFTER Firestore transaction commits.
+   * Generates deterministic Stripe idempotency key:
+   * `release:${jobId}:${quoteId}:${milestoneId || '0'}:${idempotencyKey}`
+   * Updates ledger transfer status and records transfer errors without mutating DB transaction history.
+   */
+  public static async executeStripeEscrowTransfer(
+    db: any,
+    params: {
+      jobId: string;
+      quoteId: string;
+      milestoneId?: string;
+      idempotencyKey: string;
+      traderId?: string;
+      netPayoutPence: number;
+      targetMilestoneTitle?: string;
+      jobNo?: string;
+      stripePaymentIntentId?: string;
+      isDestinationCharge?: boolean;
+    },
+    options?: {
+      stripe?: any;
+    }
+  ): Promise<{
+    transferStatus: "completed" | "failed" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
+    stripeTransferId?: string;
+    stripeIdempotencyKey: string;
+    error?: string;
+  }> {
+    const {
+      jobId,
+      quoteId,
+      milestoneId,
+      idempotencyKey,
+      traderId,
+      netPayoutPence,
+      targetMilestoneTitle = "Work Stage",
+      jobNo,
+      isDestinationCharge,
+    } = params;
+
+    const stripeIdempotencyKey = `release:${jobId}:${quoteId}:${milestoneId || "0"}:${idempotencyKey}`;
+
+    if (isDestinationCharge) {
+      return {
+        transferStatus: "skipped_destination_charge",
+        stripeIdempotencyKey,
+      };
+    }
+
+    if (!traderId) {
+      return {
+        transferStatus: "skipped_no_trader",
+        stripeIdempotencyKey,
+      };
+    }
+
+    const stripe = options?.stripe;
+    if (!stripe) {
+      return {
+        transferStatus: "skipped_no_stripe",
+        stripeIdempotencyKey,
+      };
+    }
+
+    try {
+      let traderStripeAccountId: string | undefined;
+      if (db) {
+        const traderDoc = await db.collection("users").doc(traderId).get();
+        traderStripeAccountId = traderDoc.data()?.stripeAccountId;
+      }
+
+      if (!traderStripeAccountId || traderStripeAccountId.startsWith("acct_mock_")) {
+        return {
+          transferStatus: "skipped_mock_account",
+          stripeIdempotencyKey,
+        };
+      }
+
+      const transfer = await stripe.transfers.create(
+        {
+          amount: netPayoutPence,
+          currency: "gbp",
+          destination: traderStripeAccountId,
+          description: `Milestone release for Job #${jobNo || jobId} (${targetMilestoneTitle})`,
+          metadata: {
+            jobId,
+            quoteId,
+            milestoneId: milestoneId || "m0",
+            traderId,
+          },
+        },
+        {
+          idempotencyKey: stripeIdempotencyKey,
+        }
+      );
+
+      const stripeTransferId = transfer?.id;
+
+      if (db) {
+        const ledgerSnap = await db
+          .collection("payment_ledger")
+          .where("idempotencyKey", "==", idempotencyKey)
+          .get();
+        if (!ledgerSnap.empty) {
+          await ledgerSnap.docs[0].ref.update({
+            stripeTransferId,
+            transferStatus: "completed",
+            transferCompletedAt: new Date().toISOString(),
+          });
+        }
+      }
+
+      return {
+        transferStatus: "completed",
+        stripeTransferId,
+        stripeIdempotencyKey,
+      };
+    } catch (stripeErr: any) {
+      const errorMessage = stripeErr?.message || String(stripeErr);
+      console.error(
+        `[Stripe Transfer Error] Milestone release transfer failed for job ${jobId}, quote ${quoteId}:`,
+        errorMessage
+      );
+
+      if (db) {
+        try {
+          const ledgerSnap = await db
+            .collection("payment_ledger")
+            .where("idempotencyKey", "==", idempotencyKey)
+            .get();
+          if (!ledgerSnap.empty) {
+            await ledgerSnap.docs[0].ref.update({
+              transferStatus: "failed",
+              transferError: errorMessage,
+              lastTransferAttemptAt: new Date().toISOString(),
+            });
+          }
+        } catch (dbErr) {
+          console.error("Failed to record Stripe transfer failure to ledger:", dbErr);
+        }
+      }
+
+      return {
+        transferStatus: "failed",
+        error: errorMessage,
+        stripeIdempotencyKey,
+      };
+    }
+  }
 }
