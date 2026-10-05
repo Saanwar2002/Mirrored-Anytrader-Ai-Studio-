@@ -42,6 +42,9 @@ export const SCALE_LIMITS = {
   /** Hard cap on cursor pagination page size */
   maxCursorPageSize: 100,
 
+  /** Maximum stale task scans performed in a single recovery cycle */
+  maxStaleScanPerCycle: 200,
+
   /** Maximum AI generation prompt character length */
   maxAiPromptChars: 32_000,
 

@@ -29,6 +29,70 @@ import { DataRetentionSecurityError } from '../../src/server/intelligence/dataRe
 import { DataRightsSecurityError } from '../../src/server/intelligence/dataRights';
 import { ProvenanceSecurityError } from '../../src/server/intelligence/provenanceGraph';
 
+// Chainable query simulation supporting where, orderBy, limit, and startAfter
+class MockQuery {
+  private docs: any[];
+  private limitVal: number | null = null;
+  private startAfterDoc: any = null;
+
+  constructor(docs: any[]) {
+    this.docs = docs;
+  }
+
+  where(field: string, op: string, val: any): MockQuery {
+    const filtered = this.docs.filter(d => {
+      const docVal = d.data()[field];
+      if (op === '==') return docVal === val;
+      if (op === '<=') return docVal <= val;
+      if (op === '>=') return docVal >= val;
+      return true;
+    });
+    return new MockQuery(filtered);
+  }
+
+  orderBy(field: string, dir: 'asc' | 'desc' = 'asc'): MockQuery {
+    const sorted = [...this.docs].sort((a, b) => {
+      const valA = a.data()[field];
+      const valB = b.data()[field];
+      if (valA < valB) return dir === 'asc' ? -1 : 1;
+      if (valA > valB) return dir === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return new MockQuery(sorted);
+  }
+
+  limit(n: number): MockQuery {
+    const q = new MockQuery(this.docs);
+    q.limitVal = n;
+    q.startAfterDoc = this.startAfterDoc;
+    return q;
+  }
+
+  startAfter(doc: any): MockQuery {
+    const q = new MockQuery(this.docs);
+    q.limitVal = this.limitVal;
+    q.startAfterDoc = doc;
+    return q;
+  }
+
+  async get() {
+    let result = [...this.docs];
+    if (this.startAfterDoc) {
+      const idx = result.findIndex(d => d.id === this.startAfterDoc.id);
+      if (idx !== -1) {
+        result = result.slice(idx + 1);
+      }
+    }
+    if (this.limitVal !== null) {
+      result = result.slice(0, this.limitVal);
+    }
+    return {
+      empty: result.length === 0,
+      docs: result,
+    };
+  }
+}
+
 // Mock in-memory Firestore database simulating transactional concurrency & collections
 class MockFirestoreDb {
   public store = new Map<string, Map<string, any>>();
@@ -39,86 +103,51 @@ class MockFirestoreDb {
     }
     const docs = this.store.get(colName)!;
 
-    return {
-      doc: (docId: string) => ({
+    const getDocRef = (docId: string) => ({
+      id: docId,
+      firestore: {
+        collectionGroup: () => {},
+        listCollections: () => {},
+      },
+      get: async () => ({
+        exists: docs.has(docId),
         id: docId,
-        firestore: {
-          collectionGroup: () => {},
-          listCollections: () => {},
-        },
-        get: async () => ({
-          exists: docs.has(docId),
-          id: docId,
-          data: () => docs.get(docId),
-        }),
-        set: async (data: any) => {
-          docs.set(docId, JSON.parse(JSON.stringify(data)));
-        },
-        update: async (data: any) => {
-          const existing = docs.get(docId) || {};
-          docs.set(docId, { ...existing, ...JSON.parse(JSON.stringify(data)) });
-        },
-        delete: async () => {
-          docs.delete(docId);
-        },
+        data: () => docs.get(docId),
       }),
-      where: (field: string, op: string, val: any) => ({
-        where: (f2: string, op2: string, v2: any) => ({
-          limit: (n: number) => ({
-            get: async () => {
-              const res: any[] = [];
-              for (const [id, d] of docs.entries()) {
-                if (d[field] === val && d[f2] <= v2) {
-                  res.push({ id, data: () => d, exists: true });
-                }
-                if (res.length >= n) break;
-              }
-              return { empty: res.length === 0, docs: res };
-            },
-          }),
-        }),
-        limit: (n: number) => ({
-          get: async () => {
-            const res: any[] = [];
-            for (const [id, d] of docs.entries()) {
-              if (d[field] === val) {
-                res.push({ id, data: () => d, exists: true });
-              }
-              if (res.length >= n) break;
-            }
-            return { empty: res.length === 0, docs: res };
-          },
-        }),
-        get: async () => {
-          const res: any[] = [];
-          for (const [id, d] of docs.entries()) {
-            if (d[field] === val) {
-              res.push({ id, data: () => d, exists: true });
-            }
-          }
-          return { empty: res.length === 0, docs: res };
-        },
-      }),
-      limit: (n: number) => ({
-        startAfter: (lastDoc: any) => ({
-          get: async () => {
-            const all = Array.from(docs.entries());
-            const lastIdx = all.findIndex(([id]) => id === lastDoc?.id);
-            const slice = all.slice(lastIdx + 1, lastIdx + 1 + n);
-            return {
-              empty: slice.length === 0,
-              docs: slice.map(([id, data]) => ({ id, data: () => data })),
-            };
-          },
-        }),
-        get: async () => {
-          const slice = Array.from(docs.entries()).slice(0, n);
-          return {
-            empty: slice.length === 0,
-            docs: slice.map(([id, data]) => ({ id, data: () => data })),
-          };
-        },
-      }),
+      set: async (data: any) => {
+        docs.set(docId, JSON.parse(JSON.stringify(data)));
+      },
+      update: async (data: any) => {
+        const existing = docs.get(docId) || {};
+        docs.set(docId, { ...existing, ...JSON.parse(JSON.stringify(data)) });
+      },
+      delete: async () => {
+        docs.delete(docId);
+      },
+    });
+
+    const getDocsArray = () => {
+      return Array.from(docs.entries()).map(([id, data]) => ({
+        id,
+        data: () => data,
+        exists: true,
+      }));
+    };
+
+    return {
+      doc: getDocRef,
+      where: (field: string, op: string, val: any) => {
+        return new MockQuery(getDocsArray()).where(field, op, val);
+      },
+      orderBy: (field: string, dir: 'asc' | 'desc' = 'asc') => {
+        return new MockQuery(getDocsArray()).orderBy(field, dir);
+      },
+      limit: (n: number) => {
+        return new MockQuery(getDocsArray()).limit(n);
+      },
+      get: async () => {
+        return new MockQuery(getDocsArray()).get();
+      }
     };
   }
 
@@ -498,6 +527,104 @@ describe('V8.3 Task 33: Scale & Resilience Adversarial Suite', () => {
       const sample = await mockDb.collection('intelligence_tasks').doc('stale_task_000').get();
       expect(sample.data()?.status).toBe('retrying');
       expect(sample.data()?.activeSlotAllocated).toBe(false);
+    });
+
+    it('Task 33R-1 Production Path: Proves hard stale-recovery bound with a population larger than maxStaleScanPerCycle', async () => {
+      const maxStaleLimit = SCALE_LIMITS.maxStaleScanPerCycle;
+      const seedCount = maxStaleLimit + 5; // 205 stale tasks
+      const TENANT = 'tenant_hard_bound_1';
+
+      // Seed 205 stale processing tasks with expired leases
+      for (let i = 0; i < seedCount; i++) {
+        const taskId = `stale_bound_task_${String(i).padStart(3, '0')}`;
+        await mockDb.collection('intelligence_tasks').doc(taskId).set({
+          taskId,
+          status: 'processing',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseExpiresAt: new Date(Date.now() - 10000).toISOString(),
+          tenantId: TENANT,
+          activeSlotAllocated: true,
+        });
+      }
+
+      // Seed tenant workload active count to 205
+      await mockDb.collection('tenant_active_workloads').doc(TENANT).set({
+        tenantId: TENANT,
+        activeCount: seedCount,
+      });
+
+      // FIRST RECOVERY CYCLE: Must process at most maxStaleLimit tasks
+      const firstCycleRecovered = await queue.recoverStaleTasksAsync();
+      expect(firstCycleRecovered.length).toBeLessThanOrEqual(maxStaleLimit);
+      expect(firstCycleRecovered.length).toBe(maxStaleLimit); // exactly 200
+
+      // Verify that after the first cycle, some stale tasks remain in 'processing' state
+      const workloadAfterFirst = await mockDb.collection('tenant_active_workloads').doc(TENANT).get();
+      // 205 - 200 = 5 remaining slots
+      expect(workloadAfterFirst.data()?.activeCount).toBe(5);
+
+      // Verify at least one remaining task is still 'processing' and has activeSlotAllocated true
+      const remainingSample = await mockDb.collection('intelligence_tasks').doc('stale_bound_task_204').get();
+      expect(remainingSample.data()?.status).toBe('processing');
+      expect(remainingSample.data()?.activeSlotAllocated).toBe(true);
+
+      // SECOND RECOVERY CYCLE: Must process the remaining 5 tasks
+      const secondCycleRecovered = await queue.recoverStaleTasksAsync();
+      expect(secondCycleRecovered.length).toBe(5);
+
+      // Verify that after second cycle, all 205 have been successfully recovered
+      const workloadAfterSecond = await mockDb.collection('tenant_active_workloads').doc(TENANT).get();
+      expect(workloadAfterSecond.data()?.activeCount).toBe(0);
+
+      const finalSample = await mockDb.collection('intelligence_tasks').doc('stale_bound_task_204').get();
+      expect(finalSample.data()?.status).toBe('retrying');
+      expect(finalSample.data()?.activeSlotAllocated).toBe(false);
+    });
+
+    it('Task 33R-1 Production Path: Proves that worker reassignment or re-claiming an expired lease does not duplicate tenant slots', async () => {
+      const TENANT = 'tenant_reassignment_1';
+      const task = await queue.enqueueTaskAsync('job_extraction', 'job', 'job_reassign', 'idem_reassign_1', {
+        tenantId: TENANT,
+      });
+
+      // Claim task for worker 1 (first attempt)
+      const claimed1 = await queue.claimTaskTransactional(task.taskId, 'worker_1', -5000); // Expired lease immediately
+      expect(claimed1).toBe(true);
+
+      let workload = await mockDb.collection('tenant_active_workloads').doc(TENANT).get();
+      expect(workload.data()?.activeCount).toBe(1);
+
+      // Worker 2 claims the task because the lease has expired (worker reassignment / re-claim)
+      const claimed2 = await queue.claimTaskTransactional(task.taskId, 'worker_2', 60000);
+      expect(claimed2).toBe(true);
+
+      // The slot count must remain exactly 1 (it must not increment to 2!)
+      workload = await mockDb.collection('tenant_active_workloads').doc(TENANT).get();
+      expect(workload.data()?.activeCount).toBe(1);
+
+      // Worker 1 (stale worker) attempts to complete the task
+      queue.registerHandler('job_extraction', async () => {
+        return { completed: true };
+      });
+
+      // Execute task under Worker 1: should be aborted cleanly due to lost ownership
+      const resultTask = await queue.executeTask(task.taskId, 'worker_1');
+      expect(resultTask.status).toBe('processing'); // Still processing under worker_2
+
+      // Workload must still be exactly 1
+      workload = await mockDb.collection('tenant_active_workloads').doc(TENANT).get();
+      expect(workload.data()?.activeCount).toBe(1);
+
+      // Worker 2 completes the task successfully
+      await queue.executeTask(task.taskId, 'worker_2');
+
+      // Now the task is succeeded, and the slot is released (count becomes 0)
+      const finalTask = await queue.getTaskAsync(task.taskId);
+      expect(finalTask?.status).toBe('succeeded');
+
+      workload = await mockDb.collection('tenant_active_workloads').doc(TENANT).get();
+      expect(workload.data()?.activeCount).toBe(0);
     });
   });
 

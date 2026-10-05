@@ -475,6 +475,12 @@ export class IntelligenceTaskQueue {
 
         // Atomically enforce tenant active workload limit in Firestore transaction across all worker instances
         if (tenantId) {
+          // Exactly-once lifecycle: if task already has a slot allocated (stale re-claim or worker reassignment),
+          // release it first to avoid duplicates or leaks
+          if (data.activeSlotAllocated) {
+            await releaseTenantSlotTransactional(transaction, this.firestoreDb, tenantId);
+          }
+
           const slotAcquired = await acquireTenantSlotTransactional(
             transaction,
             this.firestoreDb,
@@ -613,17 +619,22 @@ export class IntelligenceTaskQueue {
     const nowIso = new Date(now).toISOString();
     const recovered: IntelligenceTask[] = [];
 
-    const PAGE_SIZE = 50;
-    const MAX_STALE_SCAN_PER_CYCLE = 200;
+    const PAGE_SIZE = SCALE_LIMITS.defaultCursorPageSize;
+    const MAX_STALE_SCAN_PER_CYCLE = SCALE_LIMITS.maxStaleScanPerCycle;
     let totalScanned = 0;
     let lastDoc: any = null;
 
     try {
-      while (totalScanned < MAX_STALE_SCAN_PER_CYCLE) {
-        let query = this.firestoreDb
-          .collection('intelligence_tasks')
-          .where('status', '==', 'processing')
-          .limit(PAGE_SIZE);
+       while (totalScanned < MAX_STALE_SCAN_PER_CYCLE) {
+         let query = this.firestoreDb
+           .collection('intelligence_tasks')
+           .where('status', '==', 'processing');
+
+         if (typeof (query as any).orderBy === 'function') {
+           query = (query as any).orderBy('taskId');
+         }
+
+         query = query.limit(PAGE_SIZE);
 
         if (lastDoc && typeof (query as any).startAfter === 'function') {
           query = query.startAfter(lastDoc);
