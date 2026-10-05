@@ -83,6 +83,36 @@ export function getSummaryCollectionName(aggregateType: IntelligenceAggregateTyp
   return `intelligence_${aggregateType}s`;
 }
 
+/**
+ * Computes deterministic SHA-256 hash of all canonical fields of an intelligence extraction.
+ * Protects modelVersion, promptVersion, sourceVersion, schemaVersion, evidenceIds,
+ * structuredCandidate, provenance, confidence, and generatedAt against in-place mutations.
+ */
+export function computeExtractionHash(extraction: IntelligenceExtraction): string {
+  return computeStructuredDataHash({
+    aggregateId: extraction.aggregateId,
+    aggregateType: extraction.aggregateType,
+    sourceVersion: String(extraction.sourceVersion ?? ''),
+    pipelineVersion: extraction.pipelineVersion,
+    modelVersion: extraction.modelVersion,
+    promptVersion: extraction.promptVersion,
+    schemaVersion: extraction.schemaVersion,
+    candidate: extraction.structuredCandidate,
+    evidenceIds: (extraction.evidenceIds || []).slice().sort(),
+    confidence: extraction.confidence,
+    provenance: extraction.provenance
+      ? {
+          source: extraction.provenance.source,
+          sourceContentHash: extraction.provenance.sourceContentHash,
+          evidenceIds: (extraction.provenance.evidenceIds || []).slice().sort(),
+          pipelineVersion: extraction.provenance.pipelineVersion,
+          modelVersion: extraction.provenance.modelVersion,
+          promptVersion: extraction.provenance.promptVersion,
+        }
+      : undefined,
+  });
+}
+
 export class ImmutableIntelligenceStore {
   /**
    * Resets local state (no-op retained for testing interface compatibility)
@@ -119,15 +149,10 @@ export class ImmutableIntelligenceStore {
       throw new Error('[ImmutableStore] Missing versionId for immutable intelligence persistence');
     }
 
-    const extractionHash = computeStructuredDataHash({
+    const extractionHash = computeExtractionHash({
+      ...extraction,
       aggregateId,
       aggregateType,
-      sourceVersion: extraction.sourceVersion,
-      pipelineVersion: extraction.pipelineVersion,
-      modelVersion: extraction.modelVersion,
-      promptVersion: extraction.promptVersion,
-      schemaVersion: extraction.schemaVersion,
-      candidate: extraction.structuredCandidate,
     });
 
     const summaryCollectionName = getSummaryCollectionName(aggregateType);
@@ -162,16 +187,7 @@ export class ImmutableIntelligenceStore {
 
       if (existingSnap && existingSnap.exists) {
         const existingData = (typeof existingSnap.data === 'function' ? existingSnap.data() : existingSnap.data) as IntelligenceExtraction;
-        const existingHash = computeStructuredDataHash({
-          aggregateId: existingData.aggregateId,
-          aggregateType: existingData.aggregateType,
-          sourceVersion: existingData.sourceVersion,
-          pipelineVersion: existingData.pipelineVersion,
-          modelVersion: existingData.modelVersion,
-          promptVersion: existingData.promptVersion,
-          schemaVersion: existingData.schemaVersion,
-          candidate: existingData.structuredCandidate,
-        });
+        const existingHash = computeExtractionHash(existingData);
 
         if (existingHash === extractionHash) {
           // Idempotent retry: Exact same execution recognized.
