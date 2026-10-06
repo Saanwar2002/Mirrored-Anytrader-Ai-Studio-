@@ -475,20 +475,19 @@ export class IntelligenceTaskQueue {
 
         // Atomically enforce tenant active workload limit in Firestore transaction across all worker instances
         if (tenantId) {
-          // Exactly-once lifecycle: if task already has a slot allocated (stale re-claim or worker reassignment),
-          // release it first to avoid duplicates or leaks
-          if (data.activeSlotAllocated) {
-            await releaseTenantSlotTransactional(transaction, this.firestoreDb, tenantId);
-          }
-
-          const slotAcquired = await acquireTenantSlotTransactional(
-            transaction,
-            this.firestoreDb,
-            tenantId,
-            SCALE_LIMITS.maxTenantActiveTasks
-          );
-          if (!slotAcquired) {
-            return false; // Throttled: Tenant has reached or exceeded max active concurrency limit
+          // If task already has activeSlotAllocated === true (e.g. expired lease reclaim),
+          // preserve the existing tenant workload slot without releasing/reacquiring.
+          // If it does NOT have a slot allocated, acquire one.
+          if (!data.activeSlotAllocated) {
+            const slotAcquired = await acquireTenantSlotTransactional(
+              transaction,
+              this.firestoreDb,
+              tenantId,
+              SCALE_LIMITS.maxTenantActiveTasks
+            );
+            if (!slotAcquired) {
+              return false; // Throttled: Tenant has reached or exceeded max active concurrency limit
+            }
           }
         }
 

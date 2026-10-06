@@ -109,6 +109,8 @@ import {
   INTELLIGENCE_SCHEMA_VERSION,
 } from '../../src/server/intelligence/provenance';
 import { setGlobalIntelligenceDb } from '../../src/server/intelligence/immutableStore';
+import { SCALE_LIMITS } from '../../src/server/intelligence/scaleLimits';
+import { getTenantActiveWorkloadCount } from '../../src/server/intelligence/tenantWorkloadFairness';
 
 describe('V8.1 Intelligence Firestore Emulator & Invariant Suite', () => {
   let testEnv: RulesTestEnvironment | null = null;
@@ -6498,6 +6500,114 @@ describe('V8.1 Intelligence Firestore Emulator & Invariant Suite', () => {
 
         const extractionsSnap = await getDocs(collection(adminDb, 'intelligence_extractions'));
         expect(extractionsSnap.docs.length).toBe(1);
+      });
+    });
+
+    it('8. TASK 33R-1 TENANT WORKLOAD EXACTLY-ONCE RECLAIM (Emulator): Preserves slot on expired reclaim, rejects old worker, releases on complete', async () => {
+      await withAdminDb(async (adminDb) => {
+        const storeDb = createRealFirestoreTaskDb(adminDb);
+        setGlobalIntelligenceDb(storeDb as any);
+        const queue = new IntelligenceTaskQueue(5, 300000, 'worker_A', 10);
+        queue.setFirestoreDb(storeDb as any);
+
+        const TENANT_ID = 'tenant_emu_reclaim_001';
+        const task = await queue.enqueueTaskAsync(
+          'job_extraction',
+          'job',
+          'job_emu_reclaim_001',
+          'idem_emu_reclaim_001',
+          { tenantId: TENANT_ID }
+        );
+
+        // A. Initial claim: active slots = 0 -> Worker A claims -> active slots = 1
+        const initialCount = await getTenantActiveWorkloadCount(storeDb as any, TENANT_ID);
+        expect(initialCount).toBe(0);
+
+        // Worker A claims with an expired lease duration (-5000ms) to simulate immediate expiration
+        const claimedA = await queue.claimTaskTransactional(task.taskId, 'worker_A', -5000);
+        expect(claimedA).toBe(true);
+
+        const afterClaimACount = await getTenantActiveWorkloadCount(storeDb as any, TENANT_ID);
+        expect(afterClaimACount).toBe(1);
+
+        const taskAfterA = await queue.getTaskAsync(task.taskId);
+        expect(taskAfterA?.workerId).toBe('worker_A');
+        expect(taskAfterA?.activeSlotAllocated).toBe(true);
+        expect(taskAfterA?.status).toBe('processing');
+
+        // B. Expired lease reclaim: Worker A owns task, active slots = 1 -> lease expires -> Worker B reclaims -> active slots = 1 NOT 2
+        const claimedB = await queue.claimTaskTransactional(task.taskId, 'worker_B', 60000);
+        expect(claimedB).toBe(true);
+
+        const afterClaimBCount = await getTenantActiveWorkloadCount(storeDb as any, TENANT_ID);
+        expect(afterClaimBCount).toBe(1); // EXACTLY 1, NOT 2
+
+        const taskAfterB = await queue.getTaskAsync(task.taskId);
+        expect(taskAfterB?.workerId).toBe('worker_B');
+        expect(taskAfterB?.activeSlotAllocated).toBe(true);
+        expect(taskAfterB?.status).toBe('processing');
+
+        // C. Old worker rejected: Worker A attempts completion after Worker B has reclaimed the task
+        // Expected: Worker A cannot finalize, slot remains 1, Worker B remains authoritative
+        queue.registerHandler('job_extraction', async () => ({ extracted: true }));
+        const resultA = await queue.executeTask(task.taskId, 'worker_A');
+        expect(resultA.status).toBe('processing'); // Still processing under worker_B
+
+        const afterOldWorkerAttemptCount = await getTenantActiveWorkloadCount(storeDb as any, TENANT_ID);
+        expect(afterOldWorkerAttemptCount).toBe(1);
+
+        const taskStillB = await queue.getTaskAsync(task.taskId);
+        expect(taskStillB?.workerId).toBe('worker_B');
+        expect(taskStillB?.status).toBe('processing');
+
+        // D. New worker completes: Worker B completes -> active slots = 0
+        const resultB = await queue.executeTask(task.taskId, 'worker_B');
+        expect(resultB.status).toBe('succeeded');
+
+        const finalCount = await getTenantActiveWorkloadCount(storeDb as any, TENANT_ID);
+        expect(finalCount).toBe(0);
+
+        const taskFinal = await queue.getTaskAsync(task.taskId);
+        expect(taskFinal?.status).toBe('succeeded');
+        expect(taskFinal?.activeSlotAllocated).toBe(false);
+      });
+    });
+
+    it('9. TASK 33R-1 CONCURRENT TENANT FAIRNESS (Emulator): Active slots cannot exceed configured tenant maximum', async () => {
+      await withAdminDb(async (adminDb) => {
+        const storeDb = createRealFirestoreTaskDb(adminDb);
+        setGlobalIntelligenceDb(storeDb as any);
+        const queue = new IntelligenceTaskQueue(5, 300000, 'worker_C', 10);
+        queue.setFirestoreDb(storeDb as any);
+
+        const TENANT_ID = 'tenant_emu_fairness_002';
+        const maxLimit = SCALE_LIMITS.maxTenantActiveTasks; // 5
+
+        // Enqueue maxLimit + 3 tasks for the same tenant
+        const taskIds: string[] = [];
+        for (let i = 0; i < maxLimit + 3; i++) {
+          const t = await queue.enqueueTaskAsync(
+            'job_extraction',
+            'job',
+            `job_emu_fairness_${i}`,
+            `idem_emu_fairness_${i}`,
+            { tenantId: TENANT_ID }
+          );
+          taskIds.push(t.taskId);
+        }
+
+        // Concurrently attempt to claim all tasks
+        const claimResults = await Promise.all(
+          taskIds.map((id, idx) => queue.claimTaskTransactional(id, `worker_fair_${idx}`, 60000))
+        );
+
+        const successfulClaims = claimResults.filter(Boolean).length;
+        expect(successfulClaims).toBeLessThanOrEqual(maxLimit);
+        expect(successfulClaims).toBe(maxLimit);
+
+        const activeCount = await getTenantActiveWorkloadCount(storeDb as any, TENANT_ID);
+        expect(activeCount).toBe(maxLimit);
+        expect(activeCount).toBeLessThanOrEqual(SCALE_LIMITS.maxTenantActiveTasks);
       });
     });
   });
