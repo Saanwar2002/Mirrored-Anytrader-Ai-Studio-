@@ -56,11 +56,11 @@ Task 33 builds directly on the existing architecture without adding external mes
 
 ## 3. Adversarial Test Matrix
 
-Covered across `tests/unit/task33ScaleResilience.test.ts` (15/15 PASS):
+Covered across `tests/unit/task33ScaleResilience.test.ts` (20/20 PASS):
 - **Vector 1: Queue Backpressure**: Centralized limits verified; oversized payloads rejected; concurrency clamped.
-- **Vector 2: Lease Ownership & Concurrency Races**: Two workers racing to claim a task; stale worker completion aborted on lease expiration; stale lease recovery verified.
+- **Vector 2: Lease Ownership & Concurrency Races**: Two workers racing to claim a task; stale worker completion aborted on lease expiration; stale lease recovery verified; worker reassignment preserves active slot.
 - **Vector 3: Failure Classification & Backoff**: Transient errors retried with exponential backoff; security, lineage, rights, and hold violations classified as non-retryable and moved to dead-letter; attempt exhaustion transitions to dead-letter.
-- **Vector 4: Tenant Workload Fairness**: Single tenant active tasks throttled while permitting concurrent work for other tenants.
+- **Vector 4: Tenant Workload Fairness & Hard Bounds**: Single tenant active tasks throttled while permitting concurrent work for other tenants; hard stale scan ceiling (205 seeded vs 200 limit) verified across cycles; slot preserved across expired lease reclaims.
 - **Vector 5: Bounded Firestore Operations**: 950 writes chunked into 3 batches ($\le 400$ each); 120 documents paginated in pages of 50 via cursors.
 - **Vector 6: Idempotency & Data Integrity**: Deterministic document ID prevents duplicate creation; repeated execution on completed tasks prevents duplicate side-effects.
 
@@ -70,12 +70,13 @@ Covered across `tests/unit/task33ScaleResilience.test.ts` (15/15 PASS):
 
 | Verification Step | Command | Result |
 | :--- | :--- | :--- |
-| **Full Unit / Security Suite** | `npm test` | **PASS: 725/725 tests passed** across **46 test files** (100% pass rate) |
-| **Task 33 Adversarial Suite** | `npx vitest run tests/unit/task33ScaleResilience.test.ts` | **PASS: 15/15 tests passed** |
+| **Full Unit / Security Suite** | `npm test` | **PASS: 897/897 tests passed** across **54 test files** (100% pass rate) |
+| **Firestore Emulator Suite** | `npm run test:emulator` | **PASS: 565/565 tests passed** across emulator test suites |
+| **Task 33 Adversarial Suite** | `npx vitest run tests/unit/task33ScaleResilience.test.ts` | **PASS: 20/20 tests passed** |
 | **TypeScript & Lint** | `npm run lint` (`tsc --noEmit`) | **PASS: 0 errors** |
 | **Applet Compilation** | `compile_applet` | **PASS: Production bundle compilation succeeded** |
 | **Production Build** | `npm run build` | **PASS: Full-stack build completed** (`dist/` & `dist/server.cjs`) |
-| **Release Candidate Audit** | `npm run audit:release` | **PASS: 0 Critical Failures** (5 non-critical environment warnings) |
+| **Release Candidate Audit** | `npm run audit:release` | **PASS: 0 Critical Failures** (non-critical environment warnings) |
 
 ---
 
@@ -100,7 +101,9 @@ Covered across `tests/unit/task33ScaleResilience.test.ts` (15/15 PASS):
 
 ## 7. Status & Boundaries
 
-- **Task**: V8.3 Task 33 — Scale & Resilience Foundation.
-- **Status**: **VERIFIED & CLOSED — 100% PASS (GO FOR RELEASE)**.
-- **Task 34 (Independent Final Audit)**: **NOT STARTED**.
+- **Task 33 (Scale & Resilience Foundation)**: **IMPLEMENTED / REMEDIATED**.
+- **Task 33R (Remediation)**: **REMEDIATED**.
+- **Task 33R-1 (Surgical Remediation)**: **TECHNICALLY COMPLETE — READY FOR FINAL INDEPENDENT AUDIT**.
+- **Task 34 (Independent Final Audit)**: **NOT STARTED — NEXT**.
+- **V8.3 final sign-off**: **PENDING TASK 34**.
 - **V8.4 (Contractor Archive Ingestion)**: **NOT STARTED**.

@@ -2,7 +2,7 @@
 
 ## 🛡️ AnyTrader — Task 33R-1: Bounded Scale, Deterministic Pagination & Tenant Workload Exactly-Once Remediation (October 5, 2026)
 - **1. Exactly-Once Tenant Workload Slot Lifecycle & Concurrency Safeties**:
-  - **Atomic Lease Re-claims / Reassignments**: In `claimTaskTransactional`, if a task already has a slot allocated (`data.activeSlotAllocated === true`), the old tenant slot is atomically released before acquiring a new one inside the existing transaction. This guarantees exactly one active slot per processing task, eliminating slot leaks on lease expiry, worker re-claim, or worker reassignment.
+  - **Slot Preservation on Expired Lease Re-claims / Reassignments**: In `claimTaskTransactional`, if a task already has an active slot allocated (`data.activeSlotAllocated === true`), the existing tenant workload slot is preserved without releasing or reacquiring. If the task does not yet have a slot allocated, one is acquired transactionally. This guarantees exactly one active slot per processing task throughout worker reassignment, eliminating slot duplication or leaks.
   - **Authoritative Firestore State**: No in-memory state can act as a correctness authority. Active slot allocation is strictly validated and recorded under `activeSlotAllocated: true/false` inside Firestore transactions.
   - **Ownership Lost Defenses**: Throwing `OwnershipLostError` inside transactions safely aborts and rolls back database updates, ensuring stale/late workers can never double-release slots or corrupt task statuses.
 - **2. Bounded Production Reads & Deterministic Pagination**:
@@ -15,9 +15,17 @@
   - **New Workload/Reassignment Test**: Added `Task 33R-1 Production Path: Proves that worker reassignment or re-claiming an expired lease does not duplicate tenant slots` validating atomic slots, reclaim counters, and owner-finalization rejections.
 - **4. Testing & Type-Safety Verification**:
   - **Task 33 Scale Resilience Test Suite**: **20/20 tests passing (100% success)** (`tests/unit/task33ScaleResilience.test.ts`).
+  - **Firestore Emulator Test Suite**: **565/565 tests passing (100% success)** across the emulator test suites (`tests/unit/firebaseEmulatorIntelligenceV81.test.ts` Tests 8 & 9).
   - **Complete Platform-Wide Unit Test Suite (`npm test`)**: **897/897 tests passing** across **54 test files** (100% success).
   - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors.
   - **Clean Applet Build (`compile_applet`)**: Successfully compiled and built.
+- **5. Status & Next Step**:
+  - **Task 33**: **IMPLEMENTED / REMEDIATED**.
+  - **Task 33R**: **REMEDIATED**.
+  - **Task 33R-1**: **TECHNICALLY COMPLETE — READY FOR FINAL INDEPENDENT AUDIT**.
+  - **Task 34**: **NOT STARTED — NEXT**.
+  - **V8.3 final sign-off**: **PENDING TASK 34**.
+  - **V8.4**: **NOT STARTED**.
 
 ## 🛡️ AnyTrader — Task 6: Payment Authority, Escrow Security & Startup Ordering Hardening (October 4, 2026)
 - **1. Server-Authoritative Payment Ledger & Escrow Authority (`src/server/paymentLedger.ts`)**:

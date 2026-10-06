@@ -157,8 +157,9 @@ All API endpoints derive tenant ownership strictly from the verified JWT token (
 
 - **Task**: V8.3 Task 32R-2 — Final Evidence & Report Reconciliation.
 - **Status**: **VERIFIED & CLOSED — 100% PASS (GO FOR RELEASE)**.
-- **Commit SHA**: NOT VERIFIED
-- **Working tree status**: NOT VERIFIED
-- **Task 33 (Scale & Resilience)**: **NOT STARTED**.
-- **Task 34 (Independent Final Audit)**: **NOT STARTED**.
+- **Task 33 (Scale & Resilience)**: **IMPLEMENTED / REMEDIATED**.
+- **Task 33R (Remediation)**: **REMEDIATED**.
+- **Task 33R-1 (Surgical Remediation)**: **TECHNICALLY COMPLETE — READY FOR FINAL INDEPENDENT AUDIT**.
+- **Task 34 (Independent Final Audit)**: **NOT STARTED — NEXT**.
+- **V8.3 final sign-off**: **PENDING TASK 34**.
 - **V8.4 (Contractor Archive Ingestion)**: **NOT STARTED**.
