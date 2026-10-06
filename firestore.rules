@@ -206,34 +206,63 @@ service cloud.firestore {
     match /users/{userId} {
       // Strictly restricted to document owner or administrators to protect private PII (email, phone, address)
       allow read: if isOwner(userId) || isAdmin();
+
+      // Task 35-A: Explicit allowlist on create — clients can only initialize non-privileged profile fields
       allow create: if isOwner(userId) && (
-        isAdmin() || (
-          request.resource.data.get('isAdmin', false) == false && 
-          !(request.resource.data.get('role', '') in ['admin', 'ecosystem_manager']) &&
-          request.resource.data.get('accountType', 'consumer') != 'admin' &&
-          !('admin' in request.resource.data.get('capabilities', []))
-        )
+        isAdmin() ||
+        request.resource.data.keys().hasOnly([
+          'id', 'uid', 'name', 'displayName', 'email', 'phone', 'phoneNumber',
+          'photoURL', 'avatarUrl', 'profileImage', 'avatar',
+          'bio', 'about', 'description',
+          'trade', 'trades', 'categories', 'services', 'skills', 'subcategories', 'specializations',
+          'businessName', 'companyName', 'company',
+          'address', 'homeAddress', 'businessAddress', 'street', 'line1', 'line2',
+          'city', 'county', 'postcode', 'postcodeArea', 'location', 'area',
+          'coordinates', 'lat', 'lng', 'latitude', 'longitude',
+          'website', 'portfolio', 'socialLinks',
+          'hourlyRate', 'dayRate', 'calloutFee', 'pricingNotes',
+          'qualifications', 'certifications', 'insurancePolicyNumber', 'insuranceExpiry',
+          'insuranceProvider', 'experienceYears', 'yearsInBusiness', 'tradeBodyMemberships',
+          'availability', 'schedule', 'workingHours', 'workingDays', 'serviceRadius', 'coverageRadiusMiles',
+          'emergencyCallout', 'emergencyAvailable',
+          'emergencyContact', 'emergencyContactName', 'emergencyContactPhone',
+          'preferences', 'notificationPreferences', 'settings', 'theme', 'language',
+          'soundEnabled', 'hapticsEnabled', 'emailNotifications', 'smsNotifications', 'pushNotifications',
+          'fcmToken', 'pushToken', 'notificationToken',
+          'updatedAt', 'createdAt', 'lastLoginAt', 'lastActiveAt',
+          'completedOnboarding', 'onboardingStep'
+        ])
       );
+      
       allow delete: if isOwner(userId) || isAdmin();
       
-      // Prevent privilege escalation and financial/subscription/rating/verification tampering
+      // Task 35-A: Explicit allowlist on update — clients can ONLY modify approved non-privileged fields
+      // Prevents self-elevation of role, driver, verification, tier, balance, credits, or unexpected fields
       allow update: if isSignedIn() && (
         isAdmin() || (
-          isOwner(userId) && (
-            request.resource.data.get('isAdmin', false) == false && 
-            !(request.resource.data.get('role', '') in ['admin', 'ecosystem_manager']) &&
-            !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-              'role', 'isAdmin', 'accountType', 'capabilities', 'permissions', 'verified', 'isVerified', 'idVerified',
-              'verifiedTrader', 'videoVerified', 'videoVerificationStatus',
-              'subscriptionStatus', 'subscriptionId', 'hasExclusiveAddon', 'isExclusiveActive',
-              'exclusiveSubscribedAt', 'exclusiveSubscriptionId', 'hasVerifiedVideoProSubscription',
-              'videoProSubscribedAt', 'videoProSubscriptionId', 'adWalletBalance', 'adSpendTotal',
-              'tierId', 'tier', 'isPro', 'isProInvoiceSubscriber',
-              'pendingPlatformFees', 'stripeCustomerId', 'stripeAccountId', 'gothamSubscription',
-              'balance', 'credits', 'payoutTransferred', 'paymentStatus', 'payoutStatus',
-              'rating', 'totalReviews', 'trustScore'
-            ])
-          )
+          isOwner(userId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'id', 'uid', 'name', 'displayName', 'email', 'phone', 'phoneNumber',
+            'photoURL', 'avatarUrl', 'profileImage', 'avatar',
+            'bio', 'about', 'description',
+            'trade', 'trades', 'categories', 'services', 'skills', 'subcategories', 'specializations',
+            'businessName', 'companyName', 'company',
+            'address', 'homeAddress', 'businessAddress', 'street', 'line1', 'line2',
+            'city', 'county', 'postcode', 'postcodeArea', 'location', 'area',
+            'coordinates', 'lat', 'lng', 'latitude', 'longitude',
+            'website', 'portfolio', 'socialLinks',
+            'hourlyRate', 'dayRate', 'calloutFee', 'pricingNotes',
+            'qualifications', 'certifications', 'insurancePolicyNumber', 'insuranceExpiry',
+            'insuranceProvider', 'experienceYears', 'yearsInBusiness', 'tradeBodyMemberships',
+            'availability', 'schedule', 'workingHours', 'workingDays', 'serviceRadius', 'coverageRadiusMiles',
+            'emergencyCallout', 'emergencyAvailable',
+            'emergencyContact', 'emergencyContactName', 'emergencyContactPhone',
+            'preferences', 'notificationPreferences', 'settings', 'theme', 'language',
+            'soundEnabled', 'hapticsEnabled', 'emailNotifications', 'smsNotifications', 'pushNotifications',
+            'fcmToken', 'pushToken', 'notificationToken',
+            'updatedAt', 'createdAt', 'lastLoginAt', 'lastActiveAt',
+            'completedOnboarding', 'onboardingStep'
+          ])
         )
       );
     }

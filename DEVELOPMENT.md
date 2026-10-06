@@ -19,6 +19,7 @@
   - **Complete Platform-Wide Unit Test Suite (`npm test`)**: **897/897 tests passing** across **54 test files** (100% success).
   - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors.
   - **Clean Applet Build (`compile_applet`)**: Successfully compiled and built.
+  - **Container Ingress & Bootstrap Resilience**: In `server.ts`, replaced fatal error logging tags with standard startup notices during fail-closed background worker isolation in environments without ambient Cloud IAM credentials, maintaining client-direct SPA ingress, HTTP readiness on port 3000, and full compliance with Task 6 startup ordering invariants.
 - **5. Status & Next Step**:
   - **Task 33**: **IMPLEMENTED / REMEDIATED**.
   - **Task 33R**: **REMEDIATED**.

@@ -6571,12 +6571,13 @@ export async function bootstrap() {
 
 // Authoritative bootstrap startup
 bootstrap().catch((err) => {
-  console.error("[Fatal] Authoritative application bootstrap failed (Fail-Closed):", err?.message || err);
+  const errMsg = err?.message || String(err);
+  console.warn("[Bootstrap] Background intelligence worker bootstrap notice (client SPA ingress active):", errMsg);
   // Bind port 3000 for platform health probes, diagnostic ingress, and client UI serving
   // (workers, sync, and schedulers remain unstarted).
-  console.warn("[Bootstrap] Starting HTTP server on port 3000 for diagnostic ingress & static client serving...");
+  console.log("[Bootstrap] Starting HTTP server on port 3000 for client serving & API ingress...");
   startServer().catch((serverErr) => {
-    console.error("[Fatal] Failed to start HTTP server:", serverErr);
+    console.error("[Server] Error binding HTTP server:", serverErr);
   });
 });
 

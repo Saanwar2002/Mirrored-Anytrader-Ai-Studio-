@@ -2157,4 +2157,273 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       expect(res2.status).toBe("in_progress");
     }, 30000);
   });
+
+  // =========================================================================
+  // CATEGORY 13: TASK 35-A — USER PRIVILEGE BOUNDARY & DRIVER SELF-ELEVATION
+  // =========================================================================
+  describe("Category 13: Task 35-A — User Privilege Boundary & Driver Self-Elevation Prevention", () => {
+    it("79. Test A — Normal profile creation with approved client-writable fields succeeds (ALLOW)", async () => {
+      const userDb = testEnv.authenticatedContext("user_legit_create").firestore();
+      await assertSucceeds(
+        setDoc(doc(userDb, "users", "user_legit_create"), {
+          id: "user_legit_create",
+          name: "Legit User",
+          displayName: "Legit User",
+          email: "legit@example.com",
+          phoneNumber: "+447700900222",
+          bio: "Just an ordinary homeowner",
+          city: "London",
+          postcodeArea: "SW1A",
+          createdAt: new Date().toISOString(),
+        })
+      );
+    });
+
+    it("80. Test B — Privileged role creation fails (role = admin DENY)", async () => {
+      const userDb = testEnv.authenticatedContext("user_attacker_admin").firestore();
+      await assertFails(
+        setDoc(doc(userDb, "users", "user_attacker_admin"), {
+          id: "user_attacker_admin",
+          name: "Attacker",
+          role: "admin",
+          email: "attacker@evil.com",
+        })
+      );
+    });
+
+    it("81. Test C — Driver self-elevation fails on create and update (isDriver = true, role = driver DENY)", async () => {
+      const userCreateDb = testEnv.authenticatedContext("user_driver_elevate").firestore();
+
+      // Create with role = driver fails
+      await assertFails(
+        setDoc(doc(userCreateDb, "users", "user_driver_elevate"), {
+          id: "user_driver_elevate",
+          name: "Fake Driver",
+          role: "driver",
+        })
+      );
+
+      // Create with isDriver = true fails
+      await assertFails(
+        setDoc(doc(userCreateDb, "users", "user_driver_elevate"), {
+          id: "user_driver_elevate",
+          name: "Fake Driver",
+          isDriver: true,
+        })
+      );
+
+      // Seed legitimate user profile
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await setDoc(doc(context.firestore(), "users", "user_driver_elevate"), {
+          id: "user_driver_elevate",
+          name: "Normal User",
+          email: "normal@example.com",
+        });
+      });
+
+      // Update attempting to self-set isDriver = true fails
+      await assertFails(
+        updateDoc(doc(userCreateDb, "users", "user_driver_elevate"), {
+          isDriver: true,
+        })
+      );
+
+      // Update attempting to self-set role = driver fails
+      await assertFails(
+        updateDoc(doc(userCreateDb, "users", "user_driver_elevate"), {
+          role: "driver",
+        })
+      );
+    });
+
+    it("82. Test D — Verification self-elevation fails (verifiedTrader, idVerified, verified DENY)", async () => {
+      const userDb = testEnv.authenticatedContext("user_verify_elevate").firestore();
+
+      // Create with verification flags fails
+      await assertFails(
+        setDoc(doc(userDb, "users", "user_verify_elevate"), {
+          id: "user_verify_elevate",
+          name: "Fake Verified",
+          verifiedTrader: true,
+          idVerified: true,
+          verified: true,
+        })
+      );
+
+      // Seed legitimate user profile
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await setDoc(doc(context.firestore(), "users", "user_verify_elevate"), {
+          id: "user_verify_elevate",
+          name: "Unverified User",
+          email: "unverified@example.com",
+        });
+      });
+
+      // Update with verification flags fails
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_verify_elevate"), {
+          verifiedTrader: true,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_verify_elevate"), {
+          idVerified: true,
+        })
+      );
+    });
+
+    it("83. Test E — Entitlement manipulation fails (tierId, subscriptionStatus DENY)", async () => {
+      const userDb = testEnv.authenticatedContext("user_tier_elevate").firestore();
+
+      // Create with tierId/subscriptionStatus fails
+      await assertFails(
+        setDoc(doc(userDb, "users", "user_tier_elevate"), {
+          id: "user_tier_elevate",
+          name: "Fake Pro",
+          tierId: "pro_tier",
+          subscriptionStatus: "active",
+        })
+      );
+
+      // Seed legitimate user profile
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await setDoc(doc(context.firestore(), "users", "user_tier_elevate"), {
+          id: "user_tier_elevate",
+          name: "Free Tier User",
+          email: "free@example.com",
+        });
+      });
+
+      // Update with tierId/subscriptionStatus fails
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_tier_elevate"), {
+          tierId: "enterprise_gotham",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_tier_elevate"), {
+          subscriptionStatus: "active",
+        })
+      );
+    });
+
+    it("84. Test F — Financial manipulation fails (credits, balance, adWalletBalance DENY)", async () => {
+      const userDb = testEnv.authenticatedContext("user_finance_elevate").firestore();
+
+      // Create with financial balances fails
+      await assertFails(
+        setDoc(doc(userDb, "users", "user_finance_elevate"), {
+          id: "user_finance_elevate",
+          name: "Rich Attacker",
+          balance: 100000,
+          credits: 500,
+          adWalletBalance: 1000,
+        })
+      );
+
+      // Seed legitimate user profile
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await setDoc(doc(context.firestore(), "users", "user_finance_elevate"), {
+          id: "user_finance_elevate",
+          name: "Zero Balance User",
+          email: "zero@example.com",
+        });
+      });
+
+      // Update with financial balances fails
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_finance_elevate"), {
+          balance: 50000,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_finance_elevate"), {
+          credits: 999,
+        })
+      );
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_finance_elevate"), {
+          adWalletBalance: 500,
+        })
+      );
+    });
+
+    it("85. Test G — Protected-field addition fails on existing user document (ALLOWLIST ENFORCEMENT)", async () => {
+      const userDb = testEnv.authenticatedContext("user_allowlist_test").firestore();
+
+      // Seed legitimate user profile
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await setDoc(doc(context.firestore(), "users", "user_allowlist_test"), {
+          id: "user_allowlist_test",
+          name: "Standard User",
+          email: "standard@example.com",
+        });
+      });
+
+      // Attempt to inject arbitrary/newly introduced unapproved field
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_allowlist_test"), {
+          arbitraryPrivilegeField: true,
+        })
+      );
+
+      await assertFails(
+        updateDoc(doc(userDb, "users", "user_allowlist_test"), {
+          customSecurityOverride: "granted",
+        })
+      );
+    });
+
+    it("86. Test H — Legitimate profile update still works on approved fields (ALLOW)", async () => {
+      const userDb = testEnv.authenticatedContext("user_legit_update").firestore();
+
+      // Seed legitimate user profile
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await setDoc(doc(context.firestore(), "users", "user_legit_update"), {
+          id: "user_legit_update",
+          name: "Alice Builder",
+          email: "alice.builder@example.com",
+          bio: "Original bio",
+        });
+      });
+
+      // Legitimate profile field updates succeed
+      await assertSucceeds(
+        updateDoc(doc(userDb, "users", "user_legit_update"), {
+          bio: "Updated professional carpenter bio with 15 years experience",
+          phoneNumber: "+447700900333",
+          hourlyRate: 45,
+          trade: "Carpentry",
+          city: "Manchester",
+          updatedAt: new Date().toISOString(),
+        })
+      );
+    });
+
+    it("87. Test I — Trusted server / Admin SDK writes remain fully functional for privileged fields (ALLOW)", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await assertSucceeds(
+          setDoc(doc(adminDb, "users", "user_server_managed"), {
+            id: "user_server_managed",
+            name: "Server Verified Trader",
+            role: "driver",
+            isDriver: true,
+            verifiedTrader: true,
+            idVerified: true,
+            tierId: "gotham_enterprise",
+            subscriptionStatus: "active",
+            balance: 2500,
+            credits: 50,
+          })
+        );
+
+        const docSnap = await getDoc(doc(adminDb, "users", "user_server_managed"));
+        expect(docSnap.data()?.role).toBe("driver");
+        expect(docSnap.data()?.isDriver).toBe(true);
+        expect(docSnap.data()?.verifiedTrader).toBe(true);
+        expect(docSnap.data()?.tierId).toBe("gotham_enterprise");
+      });
+    });
+  });
 });
