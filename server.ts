@@ -27,6 +27,7 @@ import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSa
 import { resolveTrustedCanonicalIdentity } from "./src/server/identity.ts";
 import { executeCreateJobCommand, resolveCreateJobQuota } from "./src/server/createJobCommand.ts";
 import { executeQuoteCommand, executeAcceptQuoteCommand } from "./src/server/quoteCommands.ts";
+import { executeAcceptRideCommand } from "./src/server/driverAuthorization.ts";
 import { executeJobLifecycleCommand } from "./src/server/jobLifecycleCommands.ts";
 import { 
   startPublicJobCardsSync, 
@@ -3119,48 +3120,19 @@ async function startServer() {
     }
   });
 
-  // Server-Authoritative Ride Acceptance (V6 Hardened against BOLA)
+  // Server-Authoritative Ride Acceptance (V8.3 Task 35-B Hardened against Driver Privilege Escalation & Impersonation)
   app.post("/api/rides/accept", requireAuth, async (req, res) => {
     try {
-      const { rideId } = req.body;
-      const driverId = (req as any).user.uid;
       if (!db) throw new BadRequestError("Database not initialized");
+      const caller = (req as any).user;
 
-      await db.runTransaction(async (transaction: any) => {
-        const rideRef = db!.collection("ride_requests").doc(rideId);
-        const rideDoc = await transaction.get(rideRef);
-        
-        if (!rideDoc.exists) {
-          throw new BadRequestError("Ride request not found");
-        }
-        
-        const rideData = rideDoc.data();
-        if (rideData.status !== "pending") {
-          throw new ConflictError("Ride is no longer available");
-        }
-        
-        if (rideData.driverId) {
-          throw new ConflictError("Ride has already been accepted by another driver");
-        }
-        
-        const driverRef = db!.collection("driver_status").doc(driverId);
-        
-        transaction.update(rideRef, {
-          driverId,
-          status: 'accepted',
-          assignedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        
-        transaction.set(driverRef, {
-          status: 'busy',
-          currentRideId: rideId,
-          lastActiveAt: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
+      const result = await executeAcceptRideCommand({
+        db,
+        caller,
+        body: req.body || {},
       });
 
-      await domainEvents.dispatch("RIDE_ACCEPTED", rideId, driverId, { driverId }, undefined, db);
-
-      res.json({ success: true, rideId, driverId });
+      res.json(result);
     } catch (error: any) {
       console.error("Accept Ride Error:", error);
       sendHttpError(res, error, req);

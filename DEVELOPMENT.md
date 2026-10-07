@@ -1,5 +1,24 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Task 35-B: Driver Authorization & Ride Claiming Security Remediation (October 6, 2026)
+- **1. Server-Authoritative Driver Eligibility & Identity Binding**:
+  - **Elimination of Request-Body Authority**: In `src/server/driverAuthorization.ts` and `server.ts` (`/api/rides/accept`), request body flags (`isDriver`, `role`, `accountType`, `capabilities`, `status`, etc.) are completely ignored. Driver status is determined strictly from the server-authoritative `users/{callerUid}` document.
+  - **Identity Impersonation Defense**: If `req.body.driverId` is provided and does not match the authenticated caller UID (`req.body.driverId !== callerUid`), the request is immediately rejected with `ForbiddenError("Cannot accept ride on behalf of another driver.")`.
+  - **Suspension / Disabled Status Verification**: Authoritatively rejects suspended, disabled, banned, deactivated, or inactive drivers (`isDisabled`, `isSuspended`, `status: "suspended"`, `status: "disabled"`, `driverStatus`, etc.) with `ForbiddenError`.
+- **2. Preserved Transactional Concurrency & Zero Race Conditions**:
+  - **Pre-Claim Security Boundary**: Driver eligibility verification happens inside the atomic Firestore transaction before any ride state mutations.
+  - **Atomic Ride Claim**: Transaction reads `users/{callerUid}` and `ride_requests/{rideId}`, verifies driver eligibility, ride availability (`status in ["pending", "searching", "offered"]`), non-passenger self-acceptance, and updates `ride_requests` and `driver_status` atomically.
+- **3. Automated Test Verification (`tests/unit/task35BDriverAuthorization.test.ts`)**:
+  - **9/9 Attack Tests Passing (100% success)** covering: Test A (legitimate driver accept), Test B (normal consumer rejected), Test C (`isDriver=true` body override rejected), Test D (`role=driver` body override rejected), Test E (user attempting another driver's ID rejected), Test F (driver attempting impersonation rejected), Test G (suspended/disabled driver rejected), Test H (unauthenticated 401), Test I (racing claims concurrency lock).
+  - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
+  - **Complete Platform Unit Suite (`npm test`)**: **906/906 tests passing** across **55 test files** (100% success rate).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
+- **4. Status & Next Step**:
+  - **Task 35-A**: **VERIFIED & CLOSED**.
+  - **Task 35-B**: **VERIFIED & CLOSED — 100% AUDIT PASS**.
+  - **Task 35-C**: **NOT STARTED — NEXT**.
+
 ## 🛡️ AnyTrader — Task 33R-1: Bounded Scale, Deterministic Pagination & Tenant Workload Exactly-Once Remediation (October 5, 2026)
 - **1. Exactly-Once Tenant Workload Slot Lifecycle & Concurrency Safeties**:
   - **Slot Preservation on Expired Lease Re-claims / Reassignments**: In `claimTaskTransactional`, if a task already has an active slot allocated (`data.activeSlotAllocated === true`), the existing tenant workload slot is preserved without releasing or reacquiring. If the task does not yet have a slot allocated, one is acquired transactionally. This guarantees exactly one active slot per processing task throughout worker reassignment, eliminating slot duplication or leaks.
