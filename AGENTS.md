@@ -17,8 +17,9 @@
   - **V8.3 final sign-off**: **PENDING TASK 34**.
   - **V8.4 (Contractor Archive Ingestion)**: **NOT STARTED**.
 - **Latest Comprehensive Test Results**:
-  - **Full Unit Test Suite (`npm test`)**: **897/897 tests passing** across 54 test files (100% clean).
+  - **Full Unit Test Suite (`npm test`)**: **984/984 tests passing** across 59 test files (100% clean).
   - **Firebase Emulator Test Suite (`npm run test:emulator`)**: **565/565 tests passing** across all emulator test suites.
+  - **Task 35-F Stripe Redirect Integrity Suite**: **8/8 tests passing** (`tests/unit/task35FStripeRedirectIntegrity.test.ts`).
   - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
   - **Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
   - **Applet Compilation (`compile_applet`)**: Succeeded cleanly.

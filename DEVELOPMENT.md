@@ -98,7 +98,19 @@
   - **Task 35-C / 35-C-R1**: **VERIFIED & CLOSED**.
   - **Task 35-D / 35-D-R1**: **VERIFIED & CLOSED**.
   - **Task 35-E / 35-E-R1 / 35-E-R2 / 35-E-R3 / 35-E-R4 / 35-E-R4-R1**: **VERIFIED & CLOSED — 100% REMEDIATED**.
-  - **Task 35-F**: **NOT STARTED — NEXT**.
+  - **Task 35-F**: **VERIFIED & CLOSED — 100% CERTIFIED**.
+
+## 🛡️ AnyTrader — Task 35-F: Stripe Redirect URL Integrity & Open Redirect Defense (October 7, 2026)
+- **1. Server-Authoritative Redirect Sanitizer (`src/server/paymentVerification.ts`)**:
+  - Implemented `sanitizeRedirectUrl(candidateUrl, appUrl, fallbackPath)` to sanitize and validate all client-supplied success, cancel, and return URLs.
+  - Rejects external domain hijacking attempts (`https://evil.com`), protocol-relative exploits (`//attacker.com`), dangerous URI schemes (`javascript:`, `data:`, `vbscript:`, `file:`, `ftp:`), and CRLF control characters.
+- **2. Universal Payment Endpoint Integration (`server.ts`, `src/server/tripPaymentAuthorization.ts`)**:
+  - Integrated `sanitizeRedirectUrl` across `/api/create-checkout-session`, `/api/create-setup-session`, `/api/create-customer-portal-session`, and `executeCreateTripPaymentCommand`.
+- **3. Automated Test Verification (`tests/unit/task35FStripeRedirectIntegrity.test.ts`)**:
+  - **8/8 Security Tests Passing (100% success)**.
+  - **Full Unit Test Suite (`npm test`)**: **984/984 tests passing** across 59 test files (100% clean).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Succeeded cleanly.
 
 ## 🛡️ AnyTrader — Task 35-D / 35-D-R1: Notification Authorization & Push Token Ownership Remediation (October 7, 2026)
 - **1. Strict Push Token Ownership Invariant (Task 35-D-R1 Remediation)**:

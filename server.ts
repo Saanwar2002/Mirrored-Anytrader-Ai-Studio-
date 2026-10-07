@@ -19,6 +19,7 @@ import { sendHttpError, BadRequestError, UnauthorizedError, ForbiddenError, NotF
 import { runProductionChecks } from "./src/server/productionChecks.ts";
 import { validateJobTransition, validateMilestoneTransition, validateRideTransition, validateQuoteTransition, JobStatus } from "./src/server/stateMachine.ts";
 import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
+import { sanitizeRedirectUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
 import {
   listAuthoritativeNotifications,
@@ -2197,8 +2198,8 @@ async function startServer() {
       const userId = authUid; // Derive strictly from verified Firebase token
       const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
 
-      const finalSuccessUrl = successUrl || `${appUrl}/profile?session_id={CHECKOUT_SESSION_ID}`;
-      const finalCancelUrl = cancelUrl || `${appUrl}/profile`;
+      const finalSuccessUrl = sanitizeRedirectUrl(successUrl, appUrl, `/profile?session_id={CHECKOUT_SESSION_ID}`);
+      const finalCancelUrl = sanitizeRedirectUrl(cancelUrl, appUrl, `/profile`);
 
       // 1. Resolve strictly server-authoritative pricing and Stripe Connect routing
       // Completely bypasses and ignores client-provided price_data to prevent price manipulation
@@ -2468,8 +2469,8 @@ async function startServer() {
       const userId = authUid; // Derive strictly from verified token
       const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
 
-      const finalSuccessUrl = successUrl || `${appUrl}/profile?setup=success`;
-      const finalCancelUrl = cancelUrl || `${appUrl}/profile`;
+      const finalSuccessUrl = sanitizeRedirectUrl(successUrl, appUrl, `/profile?setup=success`);
+      const finalCancelUrl = sanitizeRedirectUrl(cancelUrl, appUrl, `/profile`);
 
       let stripe;
       try {
@@ -2613,6 +2614,7 @@ async function startServer() {
       const authUid = (req as any).user.uid;
       const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
       const { returnUrl } = req.body;
+      const finalReturnUrl = sanitizeRedirectUrl(returnUrl, appUrl, `/billing`);
 
       if (!db) {
         return res.status(500).json({ error: "Database service unavailable" });
@@ -2630,7 +2632,7 @@ async function startServer() {
       try {
         stripe = getStripe();
       } catch (e) {
-        return res.json({ url: returnUrl || `${appUrl}/billing?portal=mock_preview` });
+        return res.json({ url: finalReturnUrl });
       }
 
       if (!customerId) {
@@ -2639,7 +2641,7 @@ async function startServer() {
 
       const portalSession = await stripe.billingPortal.sessions.create({
         customer: customerId,
-        return_url: returnUrl || `${appUrl}/billing`,
+        return_url: finalReturnUrl,
       });
 
       res.json({ url: portalSession.url });

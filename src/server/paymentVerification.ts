@@ -190,3 +190,80 @@ export class FinancialSecurityEngine {
     this.inProgressTransactions.clear();
   }
 }
+
+/**
+ * Task 35-F — Server-Authoritative Stripe Redirect URL Sanitization & Origin Integrity Verification.
+ *
+ * Prevents Open Redirects, Protocol Injections (javascript:, data:, etc.),
+ * Protocol-Relative URL Exploits (//evil.com), and External Domain Hijacking.
+ *
+ * @param candidateUrl The client-supplied candidate redirect URL (success_url, cancel_url, return_url)
+ * @param appUrl The server's authoritative base application URL
+ * @param fallbackPath The default relative fallback path if candidateUrl is missing, invalid, or untrusted
+ * @returns Server-authoritative, verified redirect URL
+ */
+export function sanitizeRedirectUrl(candidateUrl: any, appUrl: string, fallbackPath: string): string {
+  const normalizedAppUrl = (appUrl || process.env.APP_URL || "http://localhost:3000").replace(/\/+$/, "");
+  const normalizedFallbackPath = fallbackPath.startsWith("/") ? fallbackPath : `/${fallbackPath}`;
+  const defaultFallbackUrl = `${normalizedAppUrl}${normalizedFallbackPath}`;
+
+  if (!candidateUrl || typeof candidateUrl !== "string") {
+    return defaultFallbackUrl;
+  }
+
+  const trimmed = candidateUrl.trim();
+  if (!trimmed) {
+    return defaultFallbackUrl;
+  }
+
+  // Reject dangerous schemes or control chars
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.startsWith("javascript:") ||
+    lower.startsWith("data:") ||
+    lower.startsWith("vbscript:") ||
+    lower.startsWith("file:") ||
+    lower.startsWith("ftp:") ||
+    /[\r\n\t]/.test(trimmed)
+  ) {
+    console.warn(`[Task 35-F Redirect Defense] Rejected dangerous URI scheme or control chars in candidate URL: ${trimmed}`);
+    return defaultFallbackUrl;
+  }
+
+  // Reject protocol-relative URLs starting with // (e.g. //attacker.com/phish)
+  if (trimmed.startsWith("//")) {
+    console.warn(`[Task 35-F Redirect Defense] Rejected protocol-relative URL candidate: ${trimmed}`);
+    return defaultFallbackUrl;
+  }
+
+  // Handle relative paths starting with /
+  if (trimmed.startsWith("/")) {
+    return `${normalizedAppUrl}${trimmed}`;
+  }
+
+  // Handle absolute URLs
+  try {
+    const candidateParsed = new URL(trimmed);
+    const appParsed = new URL(normalizedAppUrl);
+
+    // Protocol must be http or https
+    if (candidateParsed.protocol !== "http:" && candidateParsed.protocol !== "https:") {
+      console.warn(`[Task 35-F Redirect Defense] Rejected unsupported protocol '${candidateParsed.protocol}' in: ${trimmed}`);
+      return defaultFallbackUrl;
+    }
+
+    // Origin must match authoritative app origin
+    if (candidateParsed.origin.toLowerCase() !== appParsed.origin.toLowerCase()) {
+      console.warn(
+        `[Task 35-F Redirect Defense] External origin mismatch detected! Candidate origin '${candidateParsed.origin}' does not match expected app origin '${appParsed.origin}'. Defaulting to fallback.`
+      );
+      return defaultFallbackUrl;
+    }
+
+    return candidateParsed.toString();
+  } catch (err) {
+    console.warn(`[Task 35-F Redirect Defense] Failed to parse candidate URL '${trimmed}':`, err);
+    return defaultFallbackUrl;
+  }
+}
+
