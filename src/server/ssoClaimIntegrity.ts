@@ -167,17 +167,24 @@ export async function evaluateAccountLinkingEligibility(
     throw new UnauthorizedError("Authentication required for account linking.");
   }
 
-  // Derive authoritative providerId and sub from verified claims if present, else sanitize providerInput
-  const providerId = verifiedClaims?.providerId || providerInput?.providerId;
-  const sub = verifiedClaims?.sub || providerInput?.sub;
-  const targetEmail = (verifiedClaims?.email || providerInput?.email || "").trim().toLowerCase();
+  // Task 35-E-R2: Trust Boundary Hardening.
+  // Account-linking authorization strictly requires cryptographically verified provider claims.
+  // If verifiedClaims is missing, null, or undefined, fail closed immediately.
+  if (!verifiedClaims) {
+    throw new BadRequestError("Cryptographically verified provider claims are required for account linking.");
+  }
 
-  if (!providerId || typeof providerId !== "string" || !sub || typeof sub !== "string") {
-    throw new BadRequestError("Provider ID and subject identifier (sub) are required.");
+  // Derive identity STRICTLY from verifiedClaims, NEVER falling back to untrusted providerInput
+  const providerId = (verifiedClaims.providerId || "").trim();
+  const sub = (verifiedClaims.sub || "").trim();
+  const targetEmail = (verifiedClaims.email || "").trim().toLowerCase();
+
+  if (!providerId || !sub) {
+    throw new BadRequestError("Verified provider ID and subject identifier (sub) are required.");
   }
 
   // Trusted email verification status comes STRICTLY from verifiedClaims, NEVER providerInput.email_verified
-  const isEmailCryptographicallyVerified = verifiedClaims?.email_verified === true;
+  const isEmailCryptographicallyVerified = verifiedClaims.email_verified === true;
 
   const callerUid = caller.uid;
 

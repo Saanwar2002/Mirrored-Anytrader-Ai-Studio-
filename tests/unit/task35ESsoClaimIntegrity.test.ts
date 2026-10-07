@@ -226,14 +226,24 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
       email: "eve@example.com",
     };
 
-    // Eve attempts to link an account with Bob's email with email_verified: false in body
+    // Eve attempts to link an account with Bob's email with email_verified: false in verifiedClaims
     await expect(
-      evaluateAccountLinkingEligibility(mockDb, caller, {
-        providerId: "google",
-        sub: "google_sub_new_eve_999",
-        email: "bob@example.com",
-        email_verified: false,
-      })
+      evaluateAccountLinkingEligibility(
+        mockDb,
+        caller,
+        {
+          providerId: "google",
+          sub: "google_sub_new_eve_999",
+          email: "bob@example.com",
+          email_verified: false,
+        },
+        {
+          providerId: "google",
+          sub: "google_sub_new_eve_999",
+          email: "bob@example.com",
+          email_verified: false, // unverified email
+        }
+      )
     ).rejects.toThrow(ConflictError);
   });
 
@@ -284,13 +294,80 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
           email: "bob@example.com",
           email_verified: true, // Client-supplied forged boolean!
         },
-        null // No verified provider claims!
+        null // No verified provider claims! -> Fails closed
       )
-    ).rejects.toThrow(ConflictError);
+    ).rejects.toThrow();
 
     // Assert User B's (Bob's) account remains completely untouched in the database
     expect(JSON.stringify(mockDb._store["users/user_bob"])).toBe(initialBobState);
     expect(mockDb._store["users/user_bob"].providers.google).toBe("google_sub_bob_456");
+  });
+
+  it("Test E-R2 — Fail Closed on Missing Verified Claims (R2 Critical)", async () => {
+    const caller = {
+      uid: "attacker_eve",
+      email: "eve@example.com",
+    };
+
+    // 1. Missing verified claims (undefined)
+    await expect(
+      evaluateAccountLinkingEligibility(
+        mockDb,
+        caller,
+        {
+          providerId: "google",
+          sub: "google_sub_eve",
+          email: "eve@example.com",
+        }
+      )
+    ).rejects.toThrow(BadRequestError);
+
+    // 2. Null verified claims
+    await expect(
+      evaluateAccountLinkingEligibility(
+        mockDb,
+        caller,
+        {
+          providerId: "google",
+          sub: "google_sub_eve",
+          email: "eve@example.com",
+        },
+        null
+      )
+    ).rejects.toThrow(BadRequestError);
+
+    // 3. Verified claims present with empty providerId/sub
+    await expect(
+      evaluateAccountLinkingEligibility(
+        mockDb,
+        caller,
+        {
+          providerId: "google",
+          sub: "google_sub_eve",
+        },
+        {
+          providerId: "",
+          sub: "",
+        }
+      )
+    ).rejects.toThrow(BadRequestError);
+
+    // 4. Untrusted providerInput cannot substitute providerId or sub
+    // Even if providerInput has valid strings, empty verifiedClaims fails closed
+    await expect(
+      evaluateAccountLinkingEligibility(
+        mockDb,
+        caller,
+        {
+          providerId: "google",
+          sub: "google_sub_attacker",
+        },
+        {
+          providerId: "google",
+          sub: "", // missing in verified claims
+        }
+      )
+    ).rejects.toThrow(BadRequestError);
   });
 
   it("Test F — Unverified JWT payload cannot authorize: Invalid signature / wrong secret is rejected", () => {
@@ -346,12 +423,22 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
       email: "eve@example.com",
     };
 
-    // Eve attempts to claim Alice's google sub
+    // Eve attempts to claim Alice's google sub with verified claims
     await expect(
-      evaluateAccountLinkingEligibility(mockDb, caller, {
-        providerId: "google",
-        sub: "google_sub_alice_123", // Already belongs to alice
-      })
+      evaluateAccountLinkingEligibility(
+        mockDb,
+        caller,
+        {
+          providerId: "google",
+          sub: "google_sub_alice_123", // Already belongs to alice
+        },
+        {
+          providerId: "google",
+          sub: "google_sub_alice_123",
+          email: "eve@example.com",
+          email_verified: true,
+        }
+      )
     ).rejects.toThrow(ConflictError);
   });
 
