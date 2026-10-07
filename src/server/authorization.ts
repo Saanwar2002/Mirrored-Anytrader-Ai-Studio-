@@ -1024,7 +1024,19 @@ export async function authorizeNotificationRequest(
       if (!rideDoc.exists) {
         return false;
       }
-      const rideData = rideDoc.data() || {};
+      const rideData = (typeof rideDoc.data === "function" ? rideDoc.data() : rideDoc.data) || {};
+      
+      // Driver Conflict Defense: If driverId and assignedDriverId disagree, fail closed
+      if (
+        rideData.driverId &&
+        rideData.assignedDriverId &&
+        typeof rideData.driverId === "string" &&
+        typeof rideData.assignedDriverId === "string" &&
+        rideData.driverId !== rideData.assignedDriverId
+      ) {
+        return false;
+      }
+
       const passengerId = rideData.passengerId || rideData.userId || rideData.riderId || rideData.customerId;
       const driverId = rideData.assignedDriverId || rideData.driverId;
 

@@ -20,6 +20,13 @@ import { runProductionChecks } from "./src/server/productionChecks.ts";
 import { validateJobTransition, validateMilestoneTransition, validateRideTransition, validateQuoteTransition, JobStatus } from "./src/server/stateMachine.ts";
 import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
+import {
+  listAuthoritativeNotifications,
+  markAuthoritativeNotificationRead,
+  deleteAuthoritativeNotification,
+  registerAuthoritativePushToken,
+  sendAuthoritativeChatPush,
+} from "./src/server/notificationEngine.ts";
 import { AbuseDefenseEngine } from "./src/server/abuseDefense.ts";
 import { BusinessLogicDefense } from "./src/server/businessLogicDefense.ts";
 import { domainEvents } from "./src/server/domainEvents.ts";
@@ -2157,45 +2164,26 @@ async function startServer() {
     res.json({ status: "ok", ready: true, bootstrapReady: true, message: "TradeQuote UK API is running and ready" });
   });
 
-  // Push Notification Dispatcher
-  app.post("/api/chat-push", requireAuth, async (req, res) => {
-    try {
-      const { recipientId, title, body, rideId, type, channelId } = req.body;
-      if (!recipientId || !db) return res.status(400).json({ error: "Missing parameters or DB offline" });
-      
-      const userDoc = await db.collection("users").doc(recipientId).get();
-      if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
-      
-      const fcmToken = userDoc.data()?.fcmToken;
-      if (!fcmToken) return res.status(400).json({ error: "User has no FCM token registered" });
-      
-      await admin.messaging().send({
-        token: fcmToken,
-        notification: {
-          title: title || "New Message",
-          body: body || "You have a new message",
-        },
-        data: {
-          rideId: rideId || "",
-          type: type || "chat_message"
-        },
-        android: {
-          priority: "high",
-          notification: { sound: "default", channelId: channelId || "chat_messages" }
-        },
-        apns: {
-          payload: {
-            aps: { sound: "default", contentAvailable: true }
-          }
-        }
-      });
-      
-      res.json({ success: true, message: "Push sent successfully" });
-    } catch (error: any) {
-      console.error("FCM Push Error:", error.message);
-      res.status(500).json({ error: error.message });
+  // Push Notification Dispatcher (Server-Authoritative Recipient & Relationship Hardened)
+  app.post(
+    "/api/chat-push",
+    requireAuth,
+    AbuseDefenseEngine.createMiddleware("NOTIFICATION_SEND"),
+    async (req, res) => {
+      try {
+        const caller = (req as any).user;
+        const result = await sendAuthoritativeChatPush(
+          db,
+          admin.apps.length ? admin.messaging() : null,
+          caller,
+          req.body
+        );
+        res.json({ success: true, message: "Push sent successfully", ...result });
+      } catch (error: any) {
+        sendHttpError(res, error, req);
+      }
     }
-  });
+  );
 
   // Stripe Checkout Session (Server-Authoritative Pricing & Stripe Connect Routing)
   app.post("/api/create-checkout-session", requireAuth, paymentLimiter, async (req, res) => {
@@ -5164,6 +5152,102 @@ Limit your response to just the text of the tip. Do not use quotes.`;
       }
     }
   );
+
+  // Server-Authoritative Notification Querying / Listing (Task 35-D Hardened)
+  // Requesting user is derived strictly from authentication context; client targetUserId parameter is restricted to admins
+  app.get("/api/notifications", requireAuth, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const targetUserId = req.query.userId || req.query.uid || req.query.recipientId;
+      const unreadOnly = req.query.unread === "true" || req.query.unreadOnly === "true";
+      const limit = req.query.limit ? Number(req.query.limit) : 50;
+
+      const notifications = await listAuthoritativeNotifications(db, caller, {
+        targetUserId: typeof targetUserId === "string" ? targetUserId : undefined,
+        unreadOnly,
+        limit,
+      });
+
+      res.json({
+        success: true,
+        notifications,
+        count: notifications.length,
+      });
+    } catch (error: any) {
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Server-Authoritative Mark-Read / Mark-Unread (Task 35-D Hardened)
+  app.patch("/api/notifications/:id/read", requireAuth, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const notificationId = req.params.id;
+      const readState = req.body?.read !== false; // defaults to true
+      const result = await markAuthoritativeNotificationRead(db, caller, notificationId, readState);
+      res.json(result);
+    } catch (error: any) {
+      sendHttpError(res, error, req);
+    }
+  });
+
+  app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const notificationId = req.params.id;
+      const readState = req.body?.read !== false;
+      const result = await markAuthoritativeNotificationRead(db, caller, notificationId, readState);
+      res.json(result);
+    } catch (error: any) {
+      sendHttpError(res, error, req);
+    }
+  });
+
+  app.patch("/api/notifications/:id", requireAuth, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const notificationId = req.params.id;
+      const readState = req.body?.read !== undefined ? Boolean(req.body.read) : true;
+      const result = await markAuthoritativeNotificationRead(db, caller, notificationId, readState);
+      res.json(result);
+    } catch (error: any) {
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Server-Authoritative Notification Deletion (Task 35-D Hardened)
+  app.delete("/api/notifications/:id", requireAuth, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const notificationId = req.params.id;
+      const result = await deleteAuthoritativeNotification(db, caller, notificationId);
+      res.json(result);
+    } catch (error: any) {
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Server-Authoritative Push Token Registration (Task 35-D Hardened)
+  // Strictly binds token to authenticated caller's profile
+  app.post("/api/notifications/register-token", requireAuth, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const result = await registerAuthoritativePushToken(db, caller, req.body);
+      res.json(result);
+    } catch (error: any) {
+      sendHttpError(res, error, req);
+    }
+  });
+
+  app.post("/api/push-token", requireAuth, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const result = await registerAuthoritativePushToken(db, caller, req.body);
+      res.json(result);
+    } catch (error: any) {
+      sendHttpError(res, error, req);
+    }
+  });
 
   // Server-Authoritative Lead Distribution & Matching Alert Dispatch (H3 Hardened)
   // Homeowner job posting leads are authoritatively matched and dispatched server-side
