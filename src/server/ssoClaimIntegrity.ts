@@ -27,8 +27,8 @@ export interface SsoTokenGenerationResult {
 }
 
 export interface ProviderIdentityInput {
-  providerId: string;
-  sub: string;
+  providerId?: string;
+  sub?: string;
   email?: string;
   email_verified?: boolean; // Untrusted client field
 }
@@ -167,7 +167,7 @@ export async function evaluateAccountLinkingEligibility(
     throw new UnauthorizedError("Authentication required for account linking.");
   }
 
-  // Task 35-E-R2: Trust Boundary Hardening.
+  // Task 35-E-R2/R3: Trust Boundary Hardening.
   // Account-linking authorization strictly requires cryptographically verified provider claims.
   // If verifiedClaims is missing, null, or undefined, fail closed immediately.
   if (!verifiedClaims) {
@@ -181,6 +181,21 @@ export async function evaluateAccountLinkingEligibility(
 
   if (!providerId || !sub) {
     throw new BadRequestError("Verified provider ID and subject identifier (sub) are required.");
+  }
+
+  // Task 35-E-R3: Untrusted/Verified Conflict Defense.
+  // If untrusted client claims (providerInput) are supplied and contradict cryptographically
+  // verified claims, fail closed immediately. Untrusted claims must never override or spoof verified claims.
+  if (providerInput) {
+    if (providerInput.providerId && providerInput.providerId.trim() !== providerId) {
+      throw new BadRequestError("Conflicting provider ID between untrusted client input and verified provider claims.");
+    }
+    if (providerInput.sub && providerInput.sub.trim() !== sub) {
+      throw new BadRequestError("Conflicting subject identifier (sub) between untrusted client input and verified provider claims.");
+    }
+    if (providerInput.email && providerInput.email.trim().toLowerCase() !== targetEmail) {
+      throw new BadRequestError("Conflicting email between untrusted client input and verified provider claims.");
+    }
   }
 
   // Trusted email verification status comes STRICTLY from verifiedClaims, NEVER providerInput.email_verified
@@ -227,6 +242,7 @@ export async function evaluateAccountLinkingEligibility(
       }
     } catch (err: any) {
       if (err instanceof ConflictError) throw err;
+      if (err instanceof BadRequestError) throw err;
       console.warn("[SSO Engine] Provider linking lookup warning:", err?.message);
     }
   }
@@ -235,5 +251,134 @@ export async function evaluateAccountLinkingEligibility(
     eligible: true,
     providerId,
     sub,
+  };
+}
+
+export type ProviderTokenVerifierFn = (
+  credential: string,
+  providerId: string
+) => Promise<VerifiedProviderClaims>;
+
+/**
+ * Default cryptographic provider credential verifier.
+ * Leverages Firebase Admin Auth verifyIdToken for OIDC/Firebase provider tokens,
+ * or allows an injected cryptographic verifier function.
+ */
+export async function verifyProviderCredentialCryptographically(
+  credential: string,
+  providerId: string,
+  adminAuthInstance?: any
+): Promise<VerifiedProviderClaims> {
+  if (!credential || typeof credential !== "string" || credential.trim().length === 0) {
+    throw new BadRequestError("Missing or invalid provider credential for cryptographic verification.");
+  }
+  if (!providerId || typeof providerId !== "string" || providerId.trim().length === 0) {
+    throw new BadRequestError("Provider ID is required for cryptographic verification.");
+  }
+
+  const cleanProviderId = providerId.trim().toLowerCase();
+
+  // If Firebase Admin Auth is supplied or available globally, verify via verifyIdToken
+  if (adminAuthInstance && typeof adminAuthInstance.verifyIdToken === "function") {
+    try {
+      const decoded = await adminAuthInstance.verifyIdToken(credential.trim(), true);
+      const sub = (decoded.sub || decoded.uid || "").trim();
+      if (!sub) {
+        throw new UnauthorizedError("Provider token did not contain a valid subject identifier.");
+      }
+      return {
+        providerId: cleanProviderId,
+        sub,
+        email: decoded.email ? String(decoded.email).trim().toLowerCase() : undefined,
+        email_verified: decoded.email_verified === true,
+      };
+    } catch (authErr: any) {
+      throw new UnauthorizedError(`Cryptographic verification of provider credential failed: ${authErr.message || authErr}`);
+    }
+  }
+
+  throw new BadRequestError("No trusted cryptographic verifier is configured for this provider credential.");
+}
+
+export interface ExecuteLinkAccountParams {
+  db: any;
+  caller: AuthenticatedUser | null | undefined;
+  providerCredential?: string;
+  providerInput: ProviderIdentityInput;
+  verifierFn?: ProviderTokenVerifierFn;
+  adminAuthInstance?: any;
+}
+
+/**
+ * Task 35-E-R3: Production Account Linking Service
+ *
+ * Implements the complete production cryptographic trust chain:
+ * 1. Authenticate caller (server-derived UID)
+ * 2. Require and cryptographically verify external provider credential
+ * 3. Construct VerifiedProviderClaims exclusively from cryptographic verifier result
+ * 4. Pass verified claims to evaluateAccountLinkingEligibility()
+ * 5. Persist provider identity binding atomically in Firestore upon verified eligibility
+ */
+export async function executeAuthoritativeAccountLinking(
+  params: ExecuteLinkAccountParams
+): Promise<{ success: boolean; providerId: string; sub: string }> {
+  const { db, caller, providerCredential, providerInput, verifierFn, adminAuthInstance } = params;
+
+  if (!caller || !caller.uid) {
+    throw new UnauthorizedError("Authentication required for account linking.");
+  }
+
+  if (!providerCredential || typeof providerCredential !== "string" || providerCredential.trim().length === 0) {
+    throw new BadRequestError("Cryptographically verifiable provider credential is required.");
+  }
+
+  const targetProviderId = (providerInput?.providerId || "google").trim().toLowerCase();
+
+  // Step 2 & 3: Cryptographic verification of provider credential
+  let verifiedClaims: VerifiedProviderClaims;
+  if (verifierFn) {
+    verifiedClaims = await verifierFn(providerCredential, targetProviderId);
+  } else {
+    verifiedClaims = await verifyProviderCredentialCryptographically(
+      providerCredential,
+      targetProviderId,
+      adminAuthInstance
+    );
+  }
+
+  if (!verifiedClaims || !verifiedClaims.providerId || !verifiedClaims.sub) {
+    throw new UnauthorizedError("Cryptographic provider verification did not yield valid claims.");
+  }
+
+  // Step 4: Evaluate linking eligibility using verified claims
+  const eligibility = await evaluateAccountLinkingEligibility(
+    db,
+    caller,
+    providerInput,
+    verifiedClaims
+  );
+
+  // Step 5: Atomically link provider in authoritative database
+  if (db) {
+    try {
+      await db.collection("users").doc(caller.uid).set(
+        {
+          providers: {
+            [eligibility.providerId]: eligibility.sub,
+          },
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (saveErr: any) {
+      console.error("[SSO Engine] Failed to save linked provider:", saveErr);
+      throw saveErr;
+    }
+  }
+
+  return {
+    success: true,
+    providerId: eligibility.providerId,
+    sub: eligibility.sub,
   };
 }

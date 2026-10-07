@@ -27,7 +27,10 @@ import {
   registerAuthoritativePushToken,
   sendAuthoritativeChatPush,
 } from "./src/server/notificationEngine.ts";
-import { generateAuthoritativeSsoToken } from "./src/server/ssoClaimIntegrity.ts";
+import {
+  generateAuthoritativeSsoToken,
+  executeAuthoritativeAccountLinking,
+} from "./src/server/ssoClaimIntegrity.ts";
 import { AbuseDefenseEngine } from "./src/server/abuseDefense.ts";
 import { BusinessLogicDefense } from "./src/server/businessLogicDefense.ts";
 import { domainEvents } from "./src/server/domainEvents.ts";
@@ -4529,6 +4532,27 @@ async function startServer() {
       );
 
       res.json({ token: result.token });
+    } catch (error: any) {
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Authoritative Provider Account-Linking Route (Task 35-E-R3 Cryptographic Trust Chain)
+  app.post("/api/account/link-provider", requireAuth, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const { credential, idToken, providerToken, ...untrustedProviderInput } = req.body || {};
+      const providerCredential = credential || idToken || providerToken;
+
+      const result = await executeAuthoritativeAccountLinking({
+        db,
+        caller,
+        providerCredential,
+        providerInput: untrustedProviderInput,
+        adminAuthInstance: admin.auth(),
+      });
+
+      res.json(result);
     } catch (error: any) {
       sendHttpError(res, error, req);
     }

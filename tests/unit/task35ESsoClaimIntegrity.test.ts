@@ -4,6 +4,8 @@ import {
   generateAuthoritativeSsoToken,
   verifyAuthoritativeSsoToken,
   evaluateAccountLinkingEligibility,
+  executeAuthoritativeAccountLinking,
+  verifyProviderCredentialCryptographically,
 } from "../../src/server/ssoClaimIntegrity.ts";
 import {
   resolveTrustedCanonicalIdentity,
@@ -72,7 +74,12 @@ function createMockSsoDb() {
             },
             async set(data: any, options?: any) {
               if (options?.merge && store[path]) {
-                store[path] = { ...store[path], ...JSON.parse(JSON.stringify(data)) };
+                const existing = store[path];
+                const merged = { ...existing, ...JSON.parse(JSON.stringify(data)) };
+                if (data.providers && existing.providers) {
+                  merged.providers = { ...existing.providers, ...data.providers };
+                }
+                store[path] = merged;
               } else {
                 store[path] = { id: docId, ...JSON.parse(JSON.stringify(data)) };
               }
@@ -505,5 +512,363 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
     expect(identity.uid).toBe("user_alice");
     expect(identity.accountType).toBe("consumer");
     expect(identity.capabilities).toEqual(["homeowner"]);
+  });
+
+  describe("Task 35-E-R3: Production Cryptographic Verification Integration", () => {
+    // Trusted cryptographic verifier double for testing production trust chain
+    const createTrustedVerifier = (mockVerifiedTokens: Record<string, any>) => {
+      return async (credential: string, providerId: string) => {
+        const token = mockVerifiedTokens[credential];
+        if (!token) {
+          throw new UnauthorizedError("Invalid or forged provider credential.");
+        }
+        return {
+          providerId,
+          sub: token.sub,
+          email: token.email,
+          email_verified: token.email_verified === true,
+        };
+      };
+    };
+
+    it("Test R3-A — Missing verified claims: Account linking with no verified provider claims is DENIED", async () => {
+      const caller = { uid: "user_alice", email: "alice@example.com" };
+
+      // Attempt linking without credential
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "",
+          providerInput: { providerId: "google", sub: "google_123" },
+        })
+      ).rejects.toThrow(BadRequestError);
+
+      // Verify no account link occurred
+      expect(mockDb._store["users/user_alice"].providers.google).toBe("google_sub_alice_123");
+    });
+
+    it("Test R3-B — Request body cannot create trusted claims: Body fields without cryptographically verified credential are DENIED", async () => {
+      const caller = { uid: "attacker_eve", email: "eve@example.com" };
+
+      const trustedVerifier = createTrustedVerifier({});
+
+      // Attacker supplies untrusted payload with fake unverified credential
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "forged_invalid_credential_string",
+          providerInput: {
+            providerId: "attacker-provider",
+            sub: "attacker-sub",
+            email: "victim@example.com",
+            email_verified: true,
+          },
+          verifierFn: trustedVerifier,
+        })
+      ).rejects.toThrow(UnauthorizedError);
+
+      // Verify attacker did not get provider linked
+      expect(mockDb._store["users/attacker_eve"].providers).toBeUndefined();
+    });
+
+    it("Test R3-C — Forged 'email_verified': Client supplies email_verified=true but verified claims do not establish ownership", async () => {
+      const caller = { uid: "attacker_eve", email: "eve@example.com" };
+
+      const trustedVerifier = createTrustedVerifier({
+        "valid_cred_unverified_email": {
+          sub: "eve_unverified_sub",
+          email: "victim@example.com",
+          email_verified: false, // Provider verified that email is NOT verified
+        },
+      });
+
+      // Attacker supplies email_verified=true in client input to try to claim Bob's email
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "valid_cred_unverified_email",
+          providerInput: {
+            providerId: "google",
+            sub: "eve_unverified_sub",
+            email: "bob@example.com",
+            email_verified: true, // Forged client boolean
+          },
+          verifierFn: trustedVerifier,
+        })
+      ).rejects.toThrow();
+
+      // Bob's account must remain untouched
+      expect(mockDb._store["users/user_bob"].providers.google).toBe("google_sub_bob_456");
+    });
+
+    it("Test R3-D — Forged provider subject: Client attempts to substitute sub=another-user-provider-sub", async () => {
+      const caller = { uid: "attacker_eve", email: "eve@example.com" };
+
+      // Provider actually verified Eve's own sub
+      const trustedVerifier = createTrustedVerifier({
+        "eve_real_token": {
+          sub: "eve_legit_sub_999",
+          email: "eve@example.com",
+          email_verified: true,
+        },
+      });
+
+      // Client attempts to claim Alice's sub in providerInput
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "eve_real_token",
+          providerInput: {
+            providerId: "google",
+            sub: "google_sub_alice_123", // Forged Alice sub in request body
+          },
+          verifierFn: trustedVerifier,
+        })
+      ).rejects.toThrow(BadRequestError);
+
+      // Alice's provider remains untouched
+      expect(mockDb._store["users/user_alice"].providers.google).toBe("google_sub_alice_123");
+    });
+
+    it("Test R3-E — Forged provider ID: Client attempts to substitute providerId=another-provider", async () => {
+      const caller = { uid: "attacker_eve", email: "eve@example.com" };
+
+      const trustedVerifier = createTrustedVerifier({
+        "eve_token": {
+          sub: "eve_sub_123",
+          email: "eve@example.com",
+          email_verified: true,
+        },
+      });
+
+      // Verified providerId is passed to verifier as "google", but client input claims "github"
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "eve_token",
+          providerInput: {
+            providerId: "github", // Contradicts verified provider
+            sub: "eve_sub_123",
+          },
+          verifierFn: async (cred, prov) => {
+            return {
+              providerId: "google", // Verified provider is google
+              sub: "eve_sub_123",
+              email: "eve@example.com",
+              email_verified: true,
+            };
+          },
+        })
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R3-F — Forged email: Client substitutes email=victim@example.com while verified claims identify another account", async () => {
+      const caller = { uid: "attacker_eve", email: "eve@example.com" };
+
+      const trustedVerifier = createTrustedVerifier({
+        "eve_cred": {
+          sub: "eve_sub_888",
+          email: "eve@example.com",
+          email_verified: true,
+        },
+      });
+
+      // Client attempts to claim Bob's email
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "eve_cred",
+          providerInput: {
+            providerId: "google",
+            sub: "eve_sub_888",
+            email: "bob@example.com", // Spoofed email in request body
+          },
+          verifierFn: trustedVerifier,
+        })
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R3-G — Verified claims positive case: Legitimate cryptographically verified provider credential is ALLOWED", async () => {
+      const caller = { uid: "user_alice", email: "alice@example.com" };
+
+      const trustedVerifier = createTrustedVerifier({
+        "alice_valid_github_credential": {
+          sub: "github_alice_valid_777",
+          email: "alice@example.com",
+          email_verified: true,
+        },
+      });
+
+      const result = await executeAuthoritativeAccountLinking({
+        db: mockDb,
+        caller,
+        providerCredential: "alice_valid_github_credential",
+        providerInput: {
+          providerId: "github",
+          sub: "github_alice_valid_777",
+        },
+        verifierFn: trustedVerifier,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.providerId).toBe("github");
+      expect(result.sub).toBe("github_alice_valid_777");
+
+      // Verify persistence in authoritative database
+      expect(mockDb._store["users/user_alice"].providers.github).toBe("github_alice_valid_777");
+      expect(mockDb._store["users/user_alice"].providers.google).toBe("google_sub_alice_123");
+    });
+
+    it("Test R3-H — Untrusted/verified conflict: Conflicting request fields NEVER override verified values and are rejected", async () => {
+      const caller = { uid: "user_alice", email: "alice@example.com" };
+
+      // 1. Conflicting sub rejected
+      await expect(
+        evaluateAccountLinkingEligibility(
+          mockDb,
+          caller,
+          {
+            providerId: "google",
+            sub: "attacker_spoofed_sub", // Conflict with verified sub
+          },
+          {
+            providerId: "google",
+            sub: "verified_legit_sub",
+            email: "alice@example.com",
+            email_verified: true,
+          }
+        )
+      ).rejects.toThrow(BadRequestError);
+
+      // 2. Conflicting providerId rejected
+      await expect(
+        evaluateAccountLinkingEligibility(
+          mockDb,
+          caller,
+          {
+            providerId: "attacker_provider", // Conflict with verified providerId
+            sub: "verified_legit_sub",
+          },
+          {
+            providerId: "google",
+            sub: "verified_legit_sub",
+            email: "alice@example.com",
+            email_verified: true,
+          }
+        )
+      ).rejects.toThrow(BadRequestError);
+
+      // 3. Conflicting email rejected
+      await expect(
+        evaluateAccountLinkingEligibility(
+          mockDb,
+          caller,
+          {
+            providerId: "google",
+            sub: "verified_legit_sub",
+            email: "spoofed_victim@example.com", // Conflict with verified email
+          },
+          {
+            providerId: "google",
+            sub: "verified_legit_sub",
+            email: "alice@example.com",
+            email_verified: true,
+          }
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R3-I — Provider collision: Verified provider identity already belonging to another account is DENIED", async () => {
+      const caller = { uid: "attacker_eve", email: "eve@example.com" };
+
+      const trustedVerifier = createTrustedVerifier({
+        "eve_has_alice_cred": {
+          sub: "google_sub_alice_123", // Already linked to Alice!
+          email: "eve@example.com",
+          email_verified: true,
+        },
+      });
+
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "eve_has_alice_cred",
+          providerInput: {
+            providerId: "google",
+          },
+          verifierFn: trustedVerifier,
+        })
+      ).rejects.toThrow(ConflictError);
+
+      // Alice's provider link is preserved
+      expect(mockDb._store["users/user_alice"].providers.google).toBe("google_sub_alice_123");
+    });
+
+    it("Test R3-J — Email collision: Verified provider email belonging to another account is DENIED", async () => {
+      const caller = { uid: "attacker_eve", email: "eve@example.com" };
+
+      const trustedVerifier = createTrustedVerifier({
+        "eve_with_bob_email": {
+          sub: "eve_new_sub_444",
+          email: "bob@example.com", // Belongs to user_bob
+          email_verified: true,
+        },
+      });
+
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "eve_with_bob_email",
+          providerInput: {
+            providerId: "google",
+          },
+          verifierFn: trustedVerifier,
+        })
+      ).rejects.toThrow(ConflictError);
+
+      // Bob's account is preserved
+      expect(mockDb._store["users/user_bob"].providers.google).toBe("google_sub_bob_456");
+    });
+
+    it("Test R3-K — Real Firebase Admin verifier abstraction: verifyProviderCredentialCryptographically exercises verifyIdToken", async () => {
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async (token: string, checkRevoked: boolean) => {
+          if (token === "valid_firebase_jwt") {
+            return {
+              sub: "firebase_verified_sub_123",
+              email: "test@example.com",
+              email_verified: true,
+            };
+          }
+          throw new Error("Decoding Firebase ID token failed");
+        }),
+      };
+
+      // 1. Success path through cryptographic verifier
+      const claims = await verifyProviderCredentialCryptographically(
+        "valid_firebase_jwt",
+        "google",
+        mockAdminAuth
+      );
+
+      expect(mockAdminAuth.verifyIdToken).toHaveBeenCalledWith("valid_firebase_jwt", true);
+      expect(claims.providerId).toBe("google");
+      expect(claims.sub).toBe("firebase_verified_sub_123");
+      expect(claims.email).toBe("test@example.com");
+      expect(claims.email_verified).toBe(true);
+
+      // 2. Invalid token path fails closed
+      await expect(
+        verifyProviderCredentialCryptographically("invalid_jwt", "google", mockAdminAuth)
+      ).rejects.toThrow(UnauthorizedError);
+    });
   });
 });

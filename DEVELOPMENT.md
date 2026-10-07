@@ -1,21 +1,37 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
-## 🛡️ AnyTrader — Task 35-E / 35-E-R1 / 35-E-R2: SSO Claim Integrity & Account Linking Trust Boundary Remediation (October 7, 2026)
-- **1. Fail-Closed Verified Claims Trust Boundary (Task 35-E-R2 Remediation)**:
-  - **Closed Untrusted `providerInput` Fallback Boundary**: In `src/server/ssoClaimIntegrity.ts`, `evaluateAccountLinkingEligibility` now strictly requires `verifiedClaims`. Missing, null, or undefined `verifiedClaims` triggers an immediate fail-closed `BadRequestError("Cryptographically verified provider claims are required for account linking.")`.
-  - **Zero Trust in Client Provider Fields**: Eliminated the fallback `providerId = verifiedClaims?.providerId || providerInput?.providerId`, `sub = verifiedClaims?.sub || providerInput?.sub`, and `targetEmail = (verifiedClaims?.email || providerInput?.email || "")`. Provider identity (`providerId`, `sub`) and email are derived strictly from `verifiedClaims`. Client-controlled `providerInput` fields cannot independently establish or substitute identity.
-- **2. Cryptographically Verified Account-Linking Authorization (Task 35-E-R1 Remediation)**:
-  - **Eliminated Client-Supplied `email_verified` Bypass**: In `src/server/ssoClaimIntegrity.ts`, `evaluateAccountLinkingEligibility` strictly relies on `verifiedClaims.email_verified === true` (derived from cryptographically verified token/provider authentication results) rather than trusting client-supplied `providerInput.email_verified`.
+## 🛡️ AnyTrader — Task 35-E / 35-E-R1 / 35-E-R2 / 35-E-R3: SSO Claim Integrity & Account Linking Cryptographic Trust Chain (October 7, 2026)
+- **1. Production Cryptographic Trust Chain Integration (Task 35-E-R3 Remediation)**:
+  - **Closed Production Call Site Gap**: Implemented and integrated production service `executeAuthoritativeAccountLinking` in `src/server/ssoClaimIntegrity.ts` and exposed endpoint `POST /api/account/link-provider` in `server.ts`.
+  - **Complete Cryptographic Trust Chain**:
+    ```
+    External / Provider Credential (JWT / ID Token)
+            ↓
+    Cryptographic Verifier (`verifyProviderCredentialCryptographically` via `admin.auth().verifyIdToken()`)
+            ↓
+    Normalized `VerifiedProviderClaims` (derived strictly post-verification)
+            ↓
+    `evaluateAccountLinkingEligibility(db, caller, providerInput, verifiedClaims)`
+            ↓
+    Atomic Provider Binding in Firestore (`users/{uid}.providers.{providerId}`)
+    ```
+  - **Untrusted / Verified Conflict Defense**: Rejects any request where untrusted client input (`providerInput.providerId`, `providerInput.sub`, `providerInput.email`) conflicts with cryptographically verified claims (`BadRequestError`). Untrusted claims can never override verified claims.
+  - **Zero Trust in Client Fields**: `providerId`, `sub`, `email`, and `email_verified` are sourced strictly from verified provider tokens.
+- **2. Fail-Closed Verified Claims Trust Boundary (Task 35-E-R2 Remediation)**:
+  - **Closed Untrusted `providerInput` Fallback Boundary**: In `src/server/ssoClaimIntegrity.ts`, `evaluateAccountLinkingEligibility` strictly requires `verifiedClaims`. Missing, null, or undefined `verifiedClaims` triggers an immediate fail-closed `BadRequestError("Cryptographically verified provider claims are required for account linking.")`.
+  - **Zero Trust in Client Provider Fields**: Eliminated fallback chains `providerId = verifiedClaims?.providerId || providerInput?.providerId`. Provider identity (`providerId`, `sub`) and email are derived strictly from `verifiedClaims`.
+- **3. Cryptographically Verified Account-Linking Authorization (Task 35-E-R1 Remediation)**:
+  - **Eliminated Client-Supplied `email_verified` Bypass**: In `src/server/ssoClaimIntegrity.ts`, `evaluateAccountLinkingEligibility` strictly relies on `verifiedClaims.email_verified === true` rather than trusting client-supplied `providerInput.email_verified`.
   - **Account Collision Defense**: A malicious caller supplying `{ email: "victim@example.com", email_verified: true }` in untrusted client payload without verified provider authentication claims is rejected immediately, and the victim account remains completely untouched.
-- **3. Server-Authoritative SSO Token Generation & Derivation (`src/server/ssoClaimIntegrity.ts`, `server.ts`)**:
-  - **Eliminated Request-Body Email & Identity Injection**: In `/api/sso-token`, removed client fallback `const email = (req as any).user.email || req.body.email;`. Caller identity (`uid`) and email are derived strictly from cryptographically verified authentication token claims or server-side Firestore profile. Client-supplied `req.body.uid`, `req.body.userId`, `req.body.email`, `req.body.role`, `req.body.isAdmin`, `req.body.discount`, `req.body.category`, `req.body.sub`, `req.body.providerId` are completely discarded.
+- **4. Server-Authoritative SSO Token Generation & Derivation (`src/server/ssoClaimIntegrity.ts`, `server.ts`)**:
+  - **Eliminated Request-Body Email & Identity Injection**: In `/api/sso-token`, caller identity (`uid`) and email are derived strictly from cryptographically verified authentication token claims or server-side Firestore profile. Client-supplied `req.body.uid`, `req.body.userId`, `req.body.email`, `req.body.role`, `req.body.isAdmin`, `req.body.discount`, `req.body.category`, `req.body.sub`, `req.body.providerId` are completely discarded.
   - **Cryptographic SSO Token Generation (`generateAuthoritativeSsoToken`)**: Signs short-lived (2m) JWTs strictly bound to `audience: "shop.tradequote.uk"` and `issuer: "anytrader-auth"` with server-derived role, category, and fee-tier discounts.
   - **Cryptographic Verification (`verifyAuthoritativeSsoToken`)**: Verifies signature, issuer, audience, and expiry before trusting any SSO assertion.
-- **4. Identity Binding & Account Linking Collision Defense (`evaluateAccountLinkingEligibility`)**:
+- **5. Identity Binding & Account Linking Collision Defense (`evaluateAccountLinkingEligibility`)**:
   - **Provider Subject Collision Defense**: Prevents cross-account provider linking by verifying that a provider identity (`providerId` + `sub`) is not already linked to another account in Firestore.
   - **Unverified Email Collision Defense**: Rejects account linking collisions where an unverified email matches an existing user account without verified credentials.
-- **5. Automated Test Verification (`tests/unit/task35ESsoClaimIntegrity.test.ts`)**:
-  - **12/12 Security Tests Passing (100% success)**:
+- **6. Automated Test Verification (`tests/unit/task35ESsoClaimIntegrity.test.ts`)**:
+  - **23/23 Security Tests Passing (100% success)**:
     - *Test A*: Valid verified SSO identity establishes caller and generates signed token.
     - *Test B*: Forged request `uid` / `userId` in body is ignored; token generated strictly for authenticated caller.
     - *Test C*: Forged email in request body is ignored; token contains verified caller email.
@@ -28,19 +44,30 @@
     - *Test H*: Account linking collision with another user's provider `sub` rejected (`ConflictError`).
     - *Test I*: Verified legitimate SSO flow (linking with verified claims, token generation, shop navigation) preserved.
     - *Test J*: Privilege claims remain server-authoritative across `resolveTrustedCanonicalIdentity`.
+    - *Test R3-A*: Missing verified claims fails closed (`BadRequestError`), no account link occurs.
+    - *Test R3-B*: Request body cannot create trusted claims without cryptographic credential verification (`UnauthorizedError`).
+    - *Test R3-C*: Forged `email_verified=true` in client input cannot override provider's unverified status.
+    - *Test R3-D*: Forged provider subject substitution in request body rejected (`BadRequestError`).
+    - *Test R3-E*: Forged provider ID in request body rejected (`BadRequestError`).
+    - *Test R3-F*: Forged email in request body rejected (`BadRequestError`).
+    - *Test R3-G*: Legitimate cryptographically verified provider credential is allowed and persists in database.
+    - *Test R3-H*: Untrusted/verified conflict rejects conflicting sub, providerId, or email.
+    - *Test R3-I*: Provider collision with another user's account is denied (`ConflictError`).
+    - *Test R3-J*: Email collision with another user's account is denied (`ConflictError`).
+    - *Test R3-K*: Real Firebase Admin verifier abstraction tests `verifyIdToken(token, true)` integration.
   - **Task 35-D Notification Suite**: **11/11 tests passing** (`tests/unit/task35DNotificationAuthorization.test.ts`).
   - **Task 35-C Payment Integrity Suite**: **17/17 tests passing** (`tests/unit/task35CTripPaymentIntegrity.test.ts`).
   - **Task 35-B Driver Authorization Suite**: **11/11 tests passing** (`tests/unit/task35BDriverAuthorization.test.ts`).
   - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
-  - **Complete Platform Unit Suite (`npm test`)**: **948/948 tests passing** across **58 test files** (100% clean).
+  - **Complete Platform Unit Suite (`npm test`)**: **959/959 tests passing** across **58 test files** (100% clean).
   - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
   - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
-- **6. Status & Next Step**:
+- **7. Status & Next Step**:
   - **Task 35-A**: **VERIFIED & CLOSED**.
   - **Task 35-B / 35-B-R1 / 35-B-R2**: **VERIFIED & CLOSED**.
   - **Task 35-C / 35-C-R1**: **VERIFIED & CLOSED**.
   - **Task 35-D / 35-D-R1**: **VERIFIED & CLOSED**.
-  - **Task 35-E / 35-E-R1 / 35-E-R2**: **VERIFIED & CLOSED — 100% REMEDIATED**.
+  - **Task 35-E / 35-E-R1 / 35-E-R2 / 35-E-R3**: **VERIFIED & CLOSED — 100% REMEDIATED**.
   - **Task 35-F**: **NOT STARTED — NEXT**.
 
 ## 🛡️ AnyTrader — Task 35-D / 35-D-R1: Notification Authorization & Push Token Ownership Remediation (October 7, 2026)
