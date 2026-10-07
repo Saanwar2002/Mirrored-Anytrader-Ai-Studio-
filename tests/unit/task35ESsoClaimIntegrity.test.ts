@@ -118,7 +118,7 @@ function createMockSsoDb() {
   };
 }
 
-describe("Task 35-E: SSO Claim Integrity & Server-Authoritative Identity", () => {
+describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identity", () => {
   const TEST_JWT_SECRET = "super_secure_test_sso_jwt_secret_key_12345";
   let mockDb: ReturnType<typeof createMockSsoDb>;
   let mockConfigFetcher: () => Promise<any>;
@@ -226,7 +226,7 @@ describe("Task 35-E: SSO Claim Integrity & Server-Authoritative Identity", () =>
       email: "eve@example.com",
     };
 
-    // Eve attempts to link an account with Bob's email with email_verified: false or forged in body
+    // Eve attempts to link an account with Bob's email with email_verified: false in body
     await expect(
       evaluateAccountLinkingEligibility(mockDb, caller, {
         providerId: "google",
@@ -261,6 +261,36 @@ describe("Task 35-E: SSO Claim Integrity & Server-Authoritative Identity", () =>
     const verified = verifyAuthoritativeSsoToken(ssoResult.token, TEST_JWT_SECRET);
     expect(verified.role).toBe("consumer");
     expect(verified.discount).toBe(0);
+  });
+
+  it("Test E-R1 — Forged 'email_verified=true' Cannot Claim Another User's Email (R1 Critical)", async () => {
+    // Setup: User A = authenticated attacker (attacker_eve), User B = Bob (bob@example.com)
+    const attackerCaller = {
+      uid: "attacker_eve",
+      email: "eve@example.com",
+    };
+
+    const initialBobState = JSON.stringify(mockDb._store["users/user_bob"]);
+
+    // Attacker Eve supplies client input with email: "bob@example.com" and email_verified: true
+    // but without any cryptographically verified provider claims proving control
+    await expect(
+      evaluateAccountLinkingEligibility(
+        mockDb,
+        attackerCaller,
+        {
+          providerId: "google",
+          sub: "google_sub_malicious_claim_777",
+          email: "bob@example.com",
+          email_verified: true, // Client-supplied forged boolean!
+        },
+        null // No verified provider claims!
+      )
+    ).rejects.toThrow(ConflictError);
+
+    // Assert User B's (Bob's) account remains completely untouched in the database
+    expect(JSON.stringify(mockDb._store["users/user_bob"])).toBe(initialBobState);
+    expect(mockDb._store["users/user_bob"].providers.google).toBe("google_sub_bob_456");
   });
 
   it("Test F — Unverified JWT payload cannot authorize: Invalid signature / wrong secret is rejected", () => {
@@ -331,13 +361,21 @@ describe("Task 35-E: SSO Claim Integrity & Server-Authoritative Identity", () =>
       email: "alice@example.com",
     };
 
-    // Alice linking a new github provider
-    const linkResult = await evaluateAccountLinkingEligibility(mockDb, caller, {
-      providerId: "github",
-      sub: "github_sub_alice_789",
-      email: "alice@example.com",
-      email_verified: true,
-    });
+    // Alice linking a new github provider with cryptographically verified claims
+    const linkResult = await evaluateAccountLinkingEligibility(
+      mockDb,
+      caller,
+      {
+        providerId: "github",
+        sub: "github_sub_alice_789",
+      },
+      {
+        providerId: "github",
+        sub: "github_sub_alice_789",
+        email: "alice@example.com",
+        email_verified: true,
+      }
+    );
 
     expect(linkResult.eligible).toBe(true);
     expect(linkResult.providerId).toBe("github");

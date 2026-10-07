@@ -1,5 +1,5 @@
 /**
- * AnyTrader V8.3 Task 35-E — SSO Claim Integrity & Server-Authoritative Identity Engine
+ * AnyTrader V8.3 Task 35-E / 35-E-R1 — SSO Claim Integrity & Server-Authoritative Identity Engine
  *
  * Enforces cryptographic verification and server-authoritative derivation for all SSO tokens,
  * provider claims, subject bindings, and identity resolution.
@@ -10,6 +10,7 @@
  * 3. Email and email_verified claims cannot be forged from client input.
  * 4. Custom claims and administrative privileges come exclusively from verified token claims or server database records.
  * 5. Provider identities (providerId, sub) cannot be substituted across accounts or cause collision hijacks.
+ * 6. Account-linking authorization relies strictly on cryptographically verified provider claims, NEVER client-supplied email_verified.
  */
 
 import jwt from "jsonwebtoken";
@@ -26,6 +27,13 @@ export interface SsoTokenGenerationResult {
 }
 
 export interface ProviderIdentityInput {
+  providerId: string;
+  sub: string;
+  email?: string;
+  email_verified?: boolean; // Untrusted client field
+}
+
+export interface VerifiedProviderClaims {
   providerId: string;
   sub: string;
   email?: string;
@@ -146,27 +154,36 @@ export function verifyAuthoritativeSsoToken(
 
 /**
  * Validates that an SSO provider identity binding does not conflict with existing accounts.
+ * Enforces that client-supplied `email_verified` is NEVER trusted for authorization.
+ * Only cryptographically verified provider claims (`verifiedClaims`) are trusted for email verification.
  */
 export async function evaluateAccountLinkingEligibility(
   db: any,
   caller: AuthenticatedUser | null | undefined,
-  providerInput: ProviderIdentityInput
+  providerInput: ProviderIdentityInput,
+  verifiedClaims?: VerifiedProviderClaims | null
 ): Promise<{ eligible: boolean; providerId: string; sub: string }> {
   if (!caller || !caller.uid) {
     throw new UnauthorizedError("Authentication required for account linking.");
   }
 
-  const { providerId, sub, email } = providerInput;
+  // Derive authoritative providerId and sub from verified claims if present, else sanitize providerInput
+  const providerId = verifiedClaims?.providerId || providerInput?.providerId;
+  const sub = verifiedClaims?.sub || providerInput?.sub;
+  const targetEmail = (verifiedClaims?.email || providerInput?.email || "").trim().toLowerCase();
 
   if (!providerId || typeof providerId !== "string" || !sub || typeof sub !== "string") {
     throw new BadRequestError("Provider ID and subject identifier (sub) are required.");
   }
 
+  // Trusted email verification status comes STRICTLY from verifiedClaims, NEVER providerInput.email_verified
+  const isEmailCryptographicallyVerified = verifiedClaims?.email_verified === true;
+
   const callerUid = caller.uid;
 
   if (db) {
     try {
-      // Query if this providerId + sub is already linked to another account
+      // 1. Query if this providerId + sub is already linked to another account
       const existingQuery = await db
         .collection("users")
         .where(`providers.${providerId}`, "==", sub)
@@ -180,21 +197,24 @@ export async function evaluateAccountLinkingEligibility(
         }
       }
 
-      // If email is provided, check for account collision
-      if (email && typeof email === "string" && email.trim().length > 0) {
+      // 2. If email is provided, check for account collision
+      if (targetEmail.length > 0) {
         const emailMatchQuery = await db
           .collection("users")
-          .where("email", "==", email.trim().toLowerCase())
+          .where("email", "==", targetEmail)
           .limit(1)
           .get();
 
         if (emailMatchQuery && !emailMatchQuery.empty) {
           const emailOwnerDoc = emailMatchQuery.docs[0];
           if (emailOwnerDoc.id !== callerUid) {
-            // If email belongs to another user and email_verified is not verified, reject linking collision
-            if (providerInput.email_verified !== true) {
-              throw new ConflictError("Email identity collision detected: unverified email cannot link to an existing account.");
+            // Cannot link or hijack an email belonging to another user
+            // Untrusted providerInput.email_verified is completely rejected
+            if (!isEmailCryptographicallyVerified) {
+              throw new ConflictError("Email identity collision detected: unverified email or untrusted claims cannot link to an existing account.");
             }
+            // Even with verified email, cross-account linking to another user's account without ownership is blocked
+            throw new ConflictError("Email is already registered to another user account. Account linking collision denied.");
           }
         }
       }
