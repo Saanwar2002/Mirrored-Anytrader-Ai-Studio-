@@ -1,5 +1,40 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Task 35-E: SSO Claim Integrity & Server-Authoritative Identity (October 7, 2026)
+- **1. Server-Authoritative SSO Token Generation & Derivation (`src/server/ssoClaimIntegrity.ts`, `server.ts`)**:
+  - **Eliminated Request-Body Email & Identity Injection**: In `/api/sso-token`, removed client fallback `const email = (req as any).user.email || req.body.email;`. Caller identity (`uid`) and email are derived strictly from cryptographically verified authentication token claims or server-side Firestore profile. Client-supplied `req.body.uid`, `req.body.userId`, `req.body.email`, `req.body.role`, `req.body.isAdmin`, `req.body.discount`, `req.body.category`, `req.body.sub`, `req.body.providerId` are completely discarded.
+  - **Cryptographic SSO Token Generation (`generateAuthoritativeSsoToken`)**: Signs short-lived (2m) JWTs strictly bound to `audience: "shop.tradequote.uk"` and `issuer: "anytrader-auth"` with server-derived role, category, and fee-tier discounts.
+  - **Cryptographic Verification (`verifyAuthoritativeSsoToken`)**: Verifies signature, issuer, audience, and expiry before trusting any SSO assertion.
+- **2. Identity Binding & Account Linking Collision Defense (`evaluateAccountLinkingEligibility`)**:
+  - **Provider Subject Collision Defense**: Prevents cross-account provider linking by verifying that a provider identity (`providerId` + `sub`) is not already linked to another account in Firestore.
+  - **Unverified Email Collision Defense**: Rejects account linking collisions where an unverified email matches an existing user account without verified credentials.
+- **3. Automated Test Verification (`tests/unit/task35ESsoClaimIntegrity.test.ts`)**:
+  - **10/10 Security Tests Passing (100% success)**:
+    - *Test A*: Valid verified SSO identity establishes caller and generates signed token.
+    - *Test B*: Forged request `uid` / `userId` in body is ignored; token generated strictly for authenticated caller.
+    - *Test C*: Forged email in request body is ignored; token contains verified caller email.
+    - *Test D*: Forged `email_verified=true` or unverified email collision rejected (`ConflictError`).
+    - *Test E*: Forged `role="admin"` / `isAdmin=true` in body ignored; token retains true role/discount.
+    - *Test F*: Unverified JWT payload / tampered token / invalid signature fails closed (`UnauthorizedError`).
+    - *Test G*: SSO subject / providerId substitution in body ignored.
+    - *Test H*: Account linking collision with another user's provider `sub` rejected (`ConflictError`).
+    - *Test I*: Verified legitimate SSO flow (linking, token generation, shop navigation) preserved.
+    - *Test J*: Privilege claims remain server-authoritative across `resolveTrustedCanonicalIdentity`.
+  - **Task 35-D Notification Suite**: **11/11 tests passing** (`tests/unit/task35DNotificationAuthorization.test.ts`).
+  - **Task 35-C Payment Integrity Suite**: **17/17 tests passing** (`tests/unit/task35CTripPaymentIntegrity.test.ts`).
+  - **Task 35-B Driver Authorization Suite**: **11/11 tests passing** (`tests/unit/task35BDriverAuthorization.test.ts`).
+  - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
+  - **Complete Platform Unit Suite (`npm test`)**: **946/946 tests passing** across **58 test files** (100% clean).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
+- **4. Status & Next Step**:
+  - **Task 35-A**: **VERIFIED & CLOSED**.
+  - **Task 35-B / 35-B-R1 / 35-B-R2**: **VERIFIED & CLOSED**.
+  - **Task 35-C / 35-C-R1**: **VERIFIED & CLOSED**.
+  - **Task 35-D / 35-D-R1**: **VERIFIED & CLOSED**.
+  - **Task 35-E**: **VERIFIED & CLOSED — 100% IMPLEMENTED**.
+  - **Task 35-F**: **NOT STARTED — NEXT**.
+
 ## 🛡️ AnyTrader — Task 35-D / 35-D-R1: Notification Authorization & Push Token Ownership Remediation (October 7, 2026)
 - **1. Strict Push Token Ownership Invariant (Task 35-D-R1 Remediation)**:
   - **Eliminated Admin Token Overwrite Exception**: Removed `isCallerAdmin && clientSuppliedUserId ? clientSuppliedUserId : callerUid` from `registerAuthoritativePushToken` in `src/server/notificationEngine.ts`.

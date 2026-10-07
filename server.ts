@@ -27,6 +27,7 @@ import {
   registerAuthoritativePushToken,
   sendAuthoritativeChatPush,
 } from "./src/server/notificationEngine.ts";
+import { generateAuthoritativeSsoToken } from "./src/server/ssoClaimIntegrity.ts";
 import { AbuseDefenseEngine } from "./src/server/abuseDefense.ts";
 import { BusinessLogicDefense } from "./src/server/businessLogicDefense.ts";
 import { domainEvents } from "./src/server/domainEvents.ts";
@@ -4509,59 +4510,27 @@ async function startServer() {
     }
   });
 
-  // AI Shop SSO Token Route
+  // AI Shop SSO Token Route (Server-Authoritative SSO Claims - Task 35-E Hardened)
   app.post("/api/sso-token", requireAuth, async (req, res) => {
     try {
-      const uid = (req as any).user.uid; // Strictly derive from verified token
-      const email = (req as any).user.email || req.body.email;
+      const caller = (req as any).user;
       const secret = process.env.JWT_SECRET;
       
       if (!secret) {
         return res.status(500).json({ error: "SSO secret not configured" });
       }
 
-      // Fetch user profile to securely derive role and subscription discount
-      let discount = 0;
-      let userRole = "homeowner";
-      let userCategory = null;
-      try {
-        if (db) {
-          const userDoc = await db.collection("users").doc(uid).get();
-          const userData = userDoc.data();
-          userRole = userData?.role || "homeowner";
-          userCategory = userData?.primaryTrade || userData?.category || null;
-          const tierId = userData?.tierId || (userRole === "tradesperson" ? "Basic" : "Standard");
-          
-          const platformConfig = await getCachedConfig("global");
-          const tiers = userRole === "tradesperson" ? platformConfig?.feeTiers : platformConfig?.businessTiers;
-          const tier = tiers?.find((t: any) => t.name === tierId);
-          discount = tier?.shopDiscount || 0;
-        }
-      } catch (tierErr) {
-        console.warn("Could not fetch tier for discount:", tierErr);
-      }
-
-      const token = jwt.sign(
-        { 
-          uid, 
-          role: userRole, 
-          email, 
-          category: userCategory, 
-          discount, 
-          iat: Math.floor(Date.now() / 1000) 
-        },
+      const result = await generateAuthoritativeSsoToken(
+        db,
+        caller,
         secret,
-        { 
-          expiresIn: "2m", 
-          audience: "shop.tradequote.uk", 
-          issuer: "anytrader-auth" 
-        } // Short-lived 2-minute token with strict audience
+        req.body,
+        () => getCachedConfig("global")
       );
 
-      res.json({ token });
+      res.json({ token: result.token });
     } catch (error: any) {
-      console.error("SSO Token Error:", error);
-      res.status(500).json({ error: "Failed to generate SSO token" });
+      sendHttpError(res, error, req);
     }
   });
 
