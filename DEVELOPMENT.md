@@ -1,23 +1,26 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
-## 🛡️ AnyTrader — Task 35-D: Notification Authorization & Recipient Integrity (October 7, 2026)
-- **1. Server-Authoritative Notification Lifecycle & Listing (`src/server/notificationEngine.ts`, `server.ts`)**:
-  - **Authenticated Caller Binding**: Notification reads (`GET /api/notifications`) and list helpers strictly derive user identity from the server-verified authentication context (`(req as any).user.uid`). Client-supplied `userId`, `uid`, `recipientId` query parameters are ignored for non-admins (or rejected if attempting cross-user reads).
+## 🛡️ AnyTrader — Task 35-D / 35-D-R1: Notification Authorization & Push Token Ownership Remediation (October 7, 2026)
+- **1. Strict Push Token Ownership Invariant (Task 35-D-R1 Remediation)**:
+  - **Eliminated Admin Token Overwrite Exception**: Removed `isCallerAdmin && clientSuppliedUserId ? clientSuppliedUserId : callerUid` from `registerAuthoritativePushToken` in `src/server/notificationEngine.ts`.
+  - **Universal Ownership Rule**: Push token registration/update operations are strictly locked: `authenticated caller UID == token owner UID`. An authenticated admin cannot use the normal push-token registration endpoint to register, overwrite, or redirect another user's push token. Supplying a conflicting `userId`, `uid`, `ownerId`, or `targetUserId` triggers an immediate `ForbiddenError("Cannot register push token for another user.")`, preserving the target user's existing token.
+- **2. Server-Authoritative Notification Lifecycle & Listing (`src/server/notificationEngine.ts`, `server.ts`)**:
+  - **Authenticated Caller Binding**: Notification reads (`GET /api/notifications`) strictly derive user identity from the server-verified authentication context (`(req as any).user.uid`). Client-supplied `userId`, `uid`, `recipientId` query parameters are ignored for non-admins (or rejected if attempting cross-user reads).
   - **Ownership-Bound Mutation & Deletion**: Mark-read (`PATCH /api/notifications/:id/read`, `POST /api/notifications/:id/read`, `PATCH /api/notifications/:id`) and deletion (`DELETE /api/notifications/:id`) endpoints verify document ownership (`notification.userId === callerUid || notification.recipientId === callerUid`) or administrative privilege before executing updates or deletes.
-  - **Push Token Registration Isolation**: Token registration (`POST /api/notifications/register-token`, `POST /api/push-token`) binds the push token strictly to `users/{callerUid}`. Client attempts to supply another user's `userId` or `uid` fail with `ForbiddenError`.
   - **Hardened Push Dispatcher (`POST /api/chat-push`)**: Integrated `sendAuthoritativeChatPush` and rate-limiting. Replaced unverified recipient dispatch with mandatory `authorizeNotificationRequest` check, preventing arbitrary cross-user push spam or phishing.
-- **2. Recipient Redirection & Cross-Resource Substitution Defense (`src/server/authorization.ts`)**:
+- **3. Recipient Redirection & Cross-Resource Substitution Defense (`src/server/authorization.ts`)**:
   - **Authoritative Relationship Verification**: Notifications between different users require an authoritative, verifiable relationship across Job, Conversation, Project, or Ride contexts.
   - **Ride/Taxi Recipient Integrity**: For ride-linked notifications, verifies that passenger can only notify assigned driver and driver can only notify passenger on that specific ride. Cross-trip recipient substitution and conflicting driver records (`driverId !== assignedDriverId`) fail closed immediately.
   - **Privilege Field Immunity**: Client-supplied `role`, `isAdmin`, `isDriver`, `accountType` in request bodies are ignored.
-- **3. Automated Test Verification (`tests/unit/task35DNotificationAuthorization.test.ts`)**:
-  - **10/10 Security Tests Passing (100% success)**:
+- **4. Automated Test Verification (`tests/unit/task35DNotificationAuthorization.test.ts`)**:
+  - **11/11 Security Tests Passing (100% success)**:
     - *Test A*: Legitimate notification read for authenticated caller succeeds.
     - *Test B*: Cross-user notification read rejected (`ForbiddenError`).
     - *Test C*: Forged recipient rejected without valid database relationship.
     - *Test D*: Cross-user notification mark-read and deletion rejected (`ForbiddenError`).
     - *Test E*: Forged notification owner rejected; target notification remains protected.
-    - *Test F*: Push token cross-user registration rejected (`ForbiddenError`); target user token preserved.
+    - *Test F*: Push token cross-user registration rejected for normal user (`ForbiddenError`); target user token preserved.
+    - *Test F-R1 (R1 Remediation)*: Push token cross-user registration rejected for admin caller (`ForbiddenError`); target user's existing token remains completely unchanged.
     - *Test G*: Client privilege field spoofing (`role="admin"`) rejected; trusted admin claim works.
     - *Test H*: Conflicting ride recipient rejected; authoritative trip recipient push succeeds.
     - *Test I*: Cross-resource driver injection and conflicting internal driver fields fail closed.
@@ -25,14 +28,14 @@
   - **Task 35-C Regression Suite**: **17/17 tests passing** (`tests/unit/task35CTripPaymentIntegrity.test.ts`).
   - **Task 35-B Concurrency Suite**: **11/11 tests passing** (`tests/unit/task35BDriverAuthorization.test.ts`).
   - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
-  - **Complete Platform Unit Suite (`npm test`)**: **935/935 tests passing** across **57 test files** (100% clean).
+  - **Complete Platform Unit Suite (`npm test`)**: **936/936 tests passing** across **57 test files** (100% clean).
   - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
   - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
-- **4. Status & Next Step**:
+- **5. Status & Next Step**:
   - **Task 35-A**: **VERIFIED & CLOSED**.
   - **Task 35-B / 35-B-R1 / 35-B-R2**: **VERIFIED & CLOSED**.
   - **Task 35-C / 35-C-R1**: **VERIFIED & CLOSED**.
-  - **Task 35-D**: **VERIFIED & CLOSED — 100% IMPLEMENTED**.
+  - **Task 35-D / 35-D-R1**: **VERIFIED & CLOSED — 100% REMEDIATED**.
   - **Task 35-E**: **NOT STARTED — NEXT**.
 
 ## 🛡️ AnyTrader — Task 35-C-R1: Trip Payment Recipient & Fare Integrity Remediation (October 7, 2026)

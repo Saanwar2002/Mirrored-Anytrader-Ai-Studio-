@@ -29,6 +29,8 @@ export interface RegisterPushTokenInput {
   pushToken?: string;
   userId?: string;
   uid?: string;
+  ownerId?: string;
+  targetUserId?: string;
 }
 
 export interface SendChatPushInput {
@@ -220,6 +222,7 @@ export async function deleteAuthoritativeNotification(
 
 /**
  * Server-authoritative push token registration strictly locked to caller identity.
+ * Invariant: Token owner is ALWAYS authenticated caller UID (even for admin callers).
  */
 export async function registerAuthoritativePushToken(
   db: any,
@@ -235,15 +238,14 @@ export async function registerAuthoritativePushToken(
   }
 
   const callerUid = caller.uid;
-  const isCallerAdmin = isUserAdminClaim(caller);
 
-  // Client-supplied userId or uid MUST NOT permit registering tokens for another user
-  const clientSuppliedUserId = payload.userId || payload.uid;
+  // Client-supplied userId, uid, ownerId, or targetUserId MUST NOT permit registering tokens for another user (even if caller is admin)
+  const clientSuppliedUserId = payload.userId || payload.uid || payload.ownerId || payload.targetUserId;
   if (
     clientSuppliedUserId &&
     typeof clientSuppliedUserId === "string" &&
-    clientSuppliedUserId.trim() !== callerUid &&
-    !isCallerAdmin
+    clientSuppliedUserId.trim().length > 0 &&
+    clientSuppliedUserId.trim() !== callerUid
   ) {
     throw new ForbiddenError("Cannot register push token for another user.");
   }
@@ -258,7 +260,7 @@ export async function registerAuthoritativePushToken(
     throw new BadRequestError("Push token exceeds maximum permitted length.");
   }
 
-  const effectiveUserId = isCallerAdmin && clientSuppliedUserId ? clientSuppliedUserId.trim() : callerUid;
+  const effectiveUserId = callerUid;
   const userDocRef = db.collection("users").doc(effectiveUserId);
 
   await userDocRef.set(

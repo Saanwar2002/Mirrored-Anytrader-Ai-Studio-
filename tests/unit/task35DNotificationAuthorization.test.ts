@@ -314,6 +314,64 @@ describe("Task 35-D: Notification Authorization & Recipient Integrity", () => {
     expect(mockDb._store["users/user_bob"].fcmToken).toBe("fcm_token_bob_456");
   });
 
+  it("Test F-R1 — Admin Cross-User Push Token Registration Denied: Admin cannot register/overwrite User B's token", async () => {
+    // Setup: Admin A attempts to register a token targeting normal User B
+    await expect(
+      registerAuthoritativePushToken(
+        mockDb,
+        { uid: "admin_super", isAdmin: true },
+        {
+          userId: "user_bob",
+          token: "admin_injected_token_for_bob",
+        }
+      )
+    ).rejects.toThrow(ForbiddenError);
+
+    // Assert User B's existing push token remains completely unchanged
+    expect(mockDb._store["users/user_bob"].fcmToken).toBe("fcm_token_bob_456");
+
+    // Also test with ownerId and targetUserId fields
+    await expect(
+      registerAuthoritativePushToken(
+        mockDb,
+        { uid: "admin_super", isAdmin: true },
+        {
+          ownerId: "user_bob",
+          fcmToken: "admin_injected_token_for_bob_2",
+        }
+      )
+    ).rejects.toThrow(ForbiddenError);
+
+    expect(mockDb._store["users/user_bob"].fcmToken).toBe("fcm_token_bob_456");
+
+    // Verify same-user explicit identity passes for both normal user and admin:
+    // Normal user with matching explicit userId
+    const normalSameUser = await registerAuthoritativePushToken(
+      mockDb,
+      { uid: "user_alice" },
+      {
+        userId: "user_alice",
+        fcmToken: "updated_alice_token_111",
+      }
+    );
+    expect(normalSameUser.success).toBe(true);
+    expect(normalSameUser.userId).toBe("user_alice");
+    expect(mockDb._store["users/user_alice"].fcmToken).toBe("updated_alice_token_111");
+
+    // Admin user with matching explicit userId registers own admin token
+    const adminSameUser = await registerAuthoritativePushToken(
+      mockDb,
+      { uid: "admin_super", isAdmin: true },
+      {
+        userId: "admin_super",
+        fcmToken: "admin_own_token_999",
+      }
+    );
+    expect(adminSameUser.success).toBe(true);
+    expect(adminSameUser.userId).toBe("admin_super");
+    expect(mockDb._store["users/admin_super"].fcmToken).toBe("admin_own_token_999");
+  });
+
   it("Test G — Privilege-field spoof denied: Attacker supplying role='admin' in payload cannot bypass authorization", async () => {
     // Non-admin caller attempting to list bob's notifications with spoofed role in payload
     await expect(
