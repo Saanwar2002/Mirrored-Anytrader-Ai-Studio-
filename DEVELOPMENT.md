@@ -42,12 +42,13 @@
   - **Provider Subject Collision Defense**: Prevents cross-account provider linking by verifying that a provider identity (`providerId` + `sub`) is not already linked to another account in Firestore.
   - **Unverified Email Collision Defense**: Rejects account linking collisions where an unverified email matches an existing user account without verified credentials.
 - **8. Automated Test Verification (`tests/unit/task35ESsoClaimIntegrity.test.ts`)**:
-  - **34/34 Security Tests Passing (100% success)**:
+  - **35/35 Security Tests Passing (100% success)**:
     - *Test A*: Valid verified SSO identity establishes caller and generates signed token.
     - *Test B*: Forged request `uid` / `userId` in body is ignored; token generated strictly for authenticated caller.
     - *Test C*: Forged email in request body is ignored; token contains verified caller email.
     - *Test D*: Forged `email_verified=false` in body rejected (`ConflictError`).
     - *Test E*: Forged `role="admin"` / `isAdmin=true` in body ignored; token retains true role/discount.
+    - *Test R4-R1-F*: Verified that federated providers (e.g. `github.com`) missing provider-specific subject in `identities` fail closed immediately with `BadRequestError`.
     - *Test E-R1 (R1 Critical)*: Forged `email_verified=true` in client input cannot claim another user's email; rejected with victim's account untouched in the database.
     - *Test E-R2 (R2 Critical)*: Fail-closed on missing, null, or empty `verifiedClaims`; untrusted `providerInput` cannot substitute providerId or sub (`BadRequestError`).
     - *Test F*: Unverified JWT payload / tampered token / invalid signature fails closed (`UnauthorizedError`).
@@ -76,12 +77,13 @@
     - *Test R4-R1-B (R4-R1 Critical)*: Missing provider identity with NO client provider $\rightarrow$ DENIED (`BadRequestError`).
     - *Test R4-R1-C (R4-R1 Critical)*: Verified provider + matching client provider $\rightarrow$ ALLOWED (`claims.providerId === "google"`).
     - *Test R4-R1-D (R4-R1 Critical)*: Verified provider + conflicting client provider $\rightarrow$ DENIED (`BadRequestError`).
-    - *Test R4-R1-E (R4-R1 Critical)*: Genuine concurrent provider-link race $\rightarrow$ exactly 1 winner, exactly 1 `ConflictError`, provider identity bound to exactly 1 user.
+    - *Test R4-R1-E (R4-R1 Critical)*: Genuine concurrent provider-link race: executed with true Optimistic Concurrency Control (OCC) snapshot isolation during `db.runTransaction`. Both concurrent operations observe identical initial state; the first caller commits and bumps store version, while the second caller detects the stale snapshot version, retries against the updated database state, observes the newly committed binding, and rejects with `ConflictError`. Exactly 1 winner succeeds, exactly 1 loser receives `ConflictError`, and provider identity is bound to exactly 1 user.
+  - **Task 35-E Real Firestore Emulator Concurrency Suite**: **Passing** (`tests/unit/task35EFirestoreConcurrency.test.ts` via `npm run test:task35e-emulator`). Executes genuine concurrent account linking for identical provider subjects directly against the local Firebase Firestore emulator process.
   - **Task 35-D Notification Suite**: **11/11 tests passing** (`tests/unit/task35DNotificationAuthorization.test.ts`).
   - **Task 35-C Payment Integrity Suite**: **17/17 tests passing** (`tests/unit/task35CTripPaymentIntegrity.test.ts`).
   - **Task 35-B Driver Authorization Suite**: **11/11 tests passing** (`tests/unit/task35BDriverAuthorization.test.ts`).
   - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
-  - **Complete Platform Unit Suite (`npm test`)**: **970/970 tests passing** across **58 test files** (100% clean).
+  - **Complete Platform Unit Suite (`npm test`)**: **971/971 tests passing** across **58 test files** (100% clean).
   - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
   - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
 - **9. Status & Next Step**:

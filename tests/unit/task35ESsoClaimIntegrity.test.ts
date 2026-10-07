@@ -55,10 +55,42 @@ function createMockSsoDb() {
     },
   };
 
-  let activeTxPromise: Promise<any> = Promise.resolve();
+  let storeVersion = 0;
+  let commitLock: Promise<void> = Promise.resolve();
+  let nextTxId = 1;
+  const txLog: Array<any> = [];
+
+  function applyWrite(targetStore: Record<string, any>, path: string, data: any, options?: any) {
+    if (options?.merge && targetStore[path]) {
+      const existing = targetStore[path];
+      const merged = { ...existing, ...JSON.parse(JSON.stringify(data)) };
+      if (data.providers && existing.providers) {
+        merged.providers = { ...existing.providers, ...data.providers };
+      }
+      targetStore[path] = merged;
+    } else {
+      const docId = path.split("/").pop();
+      targetStore[path] = { id: docId, ...JSON.parse(JSON.stringify(data)) };
+    }
+  }
+
+  function evalQueryOnStore(targetStore: Record<string, any>, colName: string, field: string, op: string, val: any) {
+    return Object.entries(targetStore)
+      .filter(([k]) => k.startsWith(`${colName}/`))
+      .map(([_, v]) => v)
+      .filter((doc: any) => {
+        if (field.startsWith("providers.")) {
+          const provKey = field.split(".")[1];
+          return doc.providers?.[provKey] === val;
+        }
+        if (op === "==") return doc[field] === val;
+        return true;
+      });
+  }
 
   return {
     _store: store,
+    _txLog: txLog,
     collection(colName: string) {
       return {
         doc(docId: string) {
@@ -75,42 +107,30 @@ function createMockSsoDb() {
               };
             },
             async set(data: any, options?: any) {
-              if (options?.merge && store[path]) {
-                const existing = store[path];
-                const merged = { ...existing, ...JSON.parse(JSON.stringify(data)) };
-                if (data.providers && existing.providers) {
-                  merged.providers = { ...existing.providers, ...data.providers };
-                }
-                store[path] = merged;
-              } else {
-                store[path] = { id: docId, ...JSON.parse(JSON.stringify(data)) };
-              }
+              applyWrite(store, path, data, options);
             },
           };
         },
         where(field: string, op: string, val: any) {
-          const evalWhere = () => {
-            return Object.entries(store)
-              .filter(([k]) => k.startsWith(`${colName}/`))
-              .map(([_, v]) => v)
-              .filter((doc: any) => {
-                if (field.startsWith("providers.")) {
-                  const provKey = field.split(".")[1];
-                  return doc.providers?.[provKey] === val;
-                }
-                if (op === "==") return doc[field] === val;
-                return true;
-              });
-          };
+          const evalWhere = () => evalQueryOnStore(store, colName, field, op, val);
 
           return {
+            colName,
+            field,
+            op,
+            val,
             limit(max: number) {
               return {
+                colName,
+                field,
+                op,
+                val,
+                limitMax: max,
                 get: async () => {
-                  const currentDocs = evalWhere();
+                  const currentDocs = evalWhere().slice(0, max);
                   return {
                     empty: currentDocs.length === 0,
-                    docs: currentDocs.slice(0, max).map((d: any) => ({
+                    docs: currentDocs.map((d: any) => ({
                       id: d.uid || d.id,
                       data: () => JSON.parse(JSON.stringify(d)),
                     })),
@@ -133,29 +153,95 @@ function createMockSsoDb() {
       };
     },
     async runTransaction(cb: (tx: any) => Promise<any>) {
-      const currentLock = activeTxPromise;
-      let release: (value?: any) => void = () => {};
-      activeTxPromise = new Promise((resolve) => { release = resolve; });
+      const txId = nextTxId++;
+      const maxRetries = 5;
 
-      await currentLock;
-      try {
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        const snapshotVersion = storeVersion;
+        const snapshotStore: Record<string, any> = JSON.parse(JSON.stringify(store));
+        const pendingWrites: Array<{ path: string; data: any; options?: any }> = [];
+
+        txLog.push({ txId, attempt, event: "TX_START", snapshotVersion });
+
         const tx = {
           get: async (refOrQuery: any) => {
+            // Yield to event loop to simulate realistic async I/O delay and ensure concurrent transactions overlap
+            await new Promise((resolve) => setTimeout(resolve, 10));
+
+            if (refOrQuery?.path) {
+              const data = snapshotStore[refOrQuery.path];
+              txLog.push({ txId, attempt, event: "TX_READ_DOC", path: refOrQuery.path, exists: data !== undefined });
+              return {
+                id: refOrQuery.id || refOrQuery.path.split("/").pop(),
+                exists: data !== undefined && data !== null,
+                data: () => (data ? JSON.parse(JSON.stringify(data)) : undefined),
+              };
+            }
+            if (refOrQuery?.colName && refOrQuery?.field) {
+              let docs = evalQueryOnStore(snapshotStore, refOrQuery.colName, refOrQuery.field, refOrQuery.op, refOrQuery.val);
+              if (refOrQuery.limitMax !== undefined) {
+                docs = docs.slice(0, refOrQuery.limitMax);
+              }
+              txLog.push({
+                txId,
+                attempt,
+                event: "TX_QUERY",
+                query: `${refOrQuery.colName}.${refOrQuery.field} ${refOrQuery.op} ${refOrQuery.val}`,
+                resultCount: docs.length,
+              });
+              return {
+                empty: docs.length === 0,
+                docs: docs.map((d: any) => ({
+                  id: d.uid || d.id,
+                  data: () => JSON.parse(JSON.stringify(d)),
+                })),
+              };
+            }
             if (typeof refOrQuery.get === "function") {
               return await refOrQuery.get();
             }
             return refOrQuery;
           },
           set: async (ref: any, data: any, options?: any) => {
-            if (typeof ref.set === "function") {
-              return await ref.set(data, options);
-            }
+            const path = ref.path || `${ref.colName}/${ref.id}`;
+            txLog.push({ txId, attempt, event: "TX_STAGE_WRITE", path });
+            pendingWrites.push({ path, data, options });
           },
         };
-        return await cb(tx);
-      } finally {
-        release();
+
+        let result: any;
+        try {
+          result = await cb(tx);
+        } catch (err: any) {
+          txLog.push({ txId, attempt, event: "TX_REJECTED", error: err?.name || err?.message });
+          throw err;
+        }
+
+        let releaseCommit = () => {};
+        const commitPromise = new Promise<void>((resolve) => { releaseCommit = resolve; });
+        const currentLock = commitLock;
+        commitLock = commitLock.then(() => commitPromise);
+
+        await currentLock;
+        try {
+          if (snapshotVersion !== storeVersion) {
+            // OCC conflict! Snapshot is stale because another transaction committed in the interim.
+            txLog.push({ txId, attempt, event: "TX_OCC_CONFLICT_RETRY", snapshotVersion, currentStoreVersion: storeVersion });
+            continue; // Retry transaction against fresh snapshot version
+          }
+          // Snapshot is fresh! Apply staged pending writes to live database store
+          for (const w of pendingWrites) {
+            applyWrite(store, w.path, w.data, w.options);
+          }
+          storeVersion++;
+          txLog.push({ txId, attempt, event: "TX_COMMIT_SUCCESS", newStoreVersion: storeVersion });
+          return result;
+        } finally {
+          releaseCommit();
+        }
       }
+
+      throw new ConflictError("Optimistic concurrency conflict: maximum retry attempts exceeded.");
     },
   };
 }
@@ -883,6 +969,9 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
               email_verified: true,
               firebase: {
                 sign_in_provider: "google.com",
+                identities: {
+                  "google.com": ["firebase_verified_sub_123"],
+                },
               },
             };
           }
@@ -1069,6 +1158,9 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
           sub: "tx_sub_123",
           firebase: {
             sign_in_provider: "github.com",
+            identities: {
+              "github.com": ["tx_sub_123"],
+            },
           },
         })),
       };
@@ -1133,6 +1225,9 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
           email_verified: true,
           firebase: {
             sign_in_provider: "google.com",
+            identities: {
+              "google.com": ["google_sub_100"],
+            },
           },
         })),
       };
@@ -1145,6 +1240,29 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
 
       expect(claims.providerId).toBe("google");
       expect(claims.sub).toBe("google_sub_100");
+    });
+
+    it("Test R4-R1-F — Missing federated provider subject in identities: FAILS CLOSED with BadRequestError", async () => {
+      const mockAdminAuthMissingIdentities = {
+        verifyIdToken: vi.fn(async () => ({
+          uid: "firebase_uid_abc123",
+          sub: "firebase_uid_abc123",
+          email: "test@example.com",
+          email_verified: true,
+          firebase: {
+            sign_in_provider: "github.com",
+            identities: {}, // Missing "github.com" array!
+          },
+        })),
+      };
+
+      await expect(
+        verifyProviderCredentialCryptographically(
+          "github_token_without_identities",
+          "github",
+          mockAdminAuthMissingIdentities
+        )
+      ).rejects.toThrow(BadRequestError);
     });
 
     it("Test R4-R1-D — Verified provider + conflicting client provider: DENIED", async () => {
@@ -1227,6 +1345,19 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
         // Winning user is Eve, losing user Alice has no binding
         expect(mockDb._store["users/user_alice"]?.providers?.github).toBeUndefined();
       }
+
+      // 5. Transaction log audit verifying genuine Firestore OCC semantics (overlapping transactions & staged writes):
+      const txStartEvents = mockDb._txLog.filter((e: any) => e.event === "TX_START" && e.snapshotVersion === 0);
+      expect(txStartEvents.length).toBeGreaterThanOrEqual(2); // At least 2 transactions started at initial snapshot v0
+
+      const stageWriteEvents = mockDb._txLog.filter((e: any) => e.event === "TX_STAGE_WRITE");
+      expect(stageWriteEvents.length).toBeGreaterThanOrEqual(2); // Staged writes occurred before commit
+
+      const occRetryEvents = mockDb._txLog.filter((e: any) => e.event === "TX_OCC_CONFLICT_RETRY");
+      expect(occRetryEvents.length).toBe(1); // Exactly 1 OCC conflict retry occurred due to stale snapshot
+
+      const occRejectedEvents = mockDb._txLog.filter((e: any) => e.event === "TX_REJECTED" && e.error === "ConflictError");
+      expect(occRejectedEvents.length).toBe(1); // Retried transaction failed with ConflictError after reading updated state
     });
   });
 });

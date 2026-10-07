@@ -364,15 +364,22 @@ export async function verifyProviderCredentialCryptographically(
 
       // 2. Authoritative Subject identifier (sub) extraction
       let sub = "";
-      // Prefer provider-specific federated identity when available in Firebase token
-      if (decoded.firebase?.identities && rawSignInProvider && decoded.firebase.identities[rawSignInProvider]?.[0]) {
-        sub = String(decoded.firebase.identities[rawSignInProvider][0]).trim();
+      if (rawSignInProvider) {
+        const providerIdentity = decoded.firebase?.identities?.[rawSignInProvider];
+        if (
+          !Array.isArray(providerIdentity) ||
+          typeof providerIdentity[0] !== "string" ||
+          providerIdentity[0].trim().length === 0
+        ) {
+          throw new BadRequestError("Cryptographically verified provider subject is unavailable.");
+        }
+        sub = String(providerIdentity[0]).trim();
       } else {
-        sub = (decoded.sub || decoded.uid || "").trim();
-      }
-
-      if (!sub) {
-        throw new UnauthorizedError("Provider token did not contain a valid subject identifier.");
+        // Direct OIDC provider tokens (e.g. Google / Apple ID tokens directly verified via iss)
+        sub = (decoded.sub || "").trim();
+        if (!sub) {
+          throw new BadRequestError("Cryptographically verified provider subject is unavailable.");
+        }
       }
 
       return {
