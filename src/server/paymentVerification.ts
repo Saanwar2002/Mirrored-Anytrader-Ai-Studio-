@@ -5,7 +5,7 @@
  * 2. "No payment can be applied to the wrong resource."
  * 3. Strict mathematical validation of price, amount, currency, metadata binding, idempotency, and state machine transitions.
  */
-import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError } from "./httpErrors.ts";
+import { BadRequestError, ConflictError, ForbiddenError, UnauthorizedError, InternalServerError } from "./httpErrors.ts";
 import { validatePaymentTransition, validateMilestoneTransition } from "./stateMachine.ts";
 import { SERVER_OWNED_PROTECTED_KEYS, sanitizeClientPayload } from "./authorization.ts";
 import crypto from "crypto";
@@ -191,6 +191,43 @@ export class FinancialSecurityEngine {
   }
 }
 
+const ALLOWED_REDIRECT_PATHS = new Set([
+  "/corporate",
+  "/dashboard",
+  "/portfolio",
+  "/profile",
+  "/banner-ads",
+  "/billing",
+  "/payment-success",
+  "/payment-failed",
+  "/payment-complete",
+  "/platform-fee-success",
+  "/driver-dashboard",
+]);
+
+function isPathAllowed(pathname: string): boolean {
+  if (ALLOWED_REDIRECT_PATHS.has(pathname)) {
+    return true;
+  }
+  // Allow /job/<jobId> paths
+  if (pathname.startsWith("/job/") && pathname.length > 5 && !pathname.includes("//")) {
+    return true;
+  }
+  return false;
+}
+
+function extractPathname(urlOrPath: string, appUrl: string): string {
+  const normalizedAppUrl = appUrl.replace(/\/+$/, "");
+  let relative = urlOrPath;
+
+  if (urlOrPath.startsWith(normalizedAppUrl)) {
+    relative = urlOrPath.substring(normalizedAppUrl.length);
+  }
+
+  const pathPart = relative.split("?")[0].split("#")[0];
+  return pathPart.startsWith("/") ? pathPart : `/${pathPart}`;
+}
+
 /**
  * Task 35-F — Server-Authoritative Stripe Redirect URL Sanitization & Origin Integrity Verification.
  *
@@ -236,6 +273,13 @@ export function sanitizeRedirectUrl(candidateUrl: any, appUrl: string, fallbackP
     return defaultFallbackUrl;
   }
 
+  // Extract pathname and assert it belongs to explicit allowed route list (R1-C)
+  const pathname = extractPathname(trimmed, normalizedAppUrl);
+  if (!isPathAllowed(pathname)) {
+    console.warn(`[Task 35-F Redirect Defense] Rejected non-allowlisted same-origin redirect path: ${pathname}`);
+    return defaultFallbackUrl;
+  }
+
   // Handle relative paths starting with /
   if (trimmed.startsWith("/")) {
     return `${normalizedAppUrl}${trimmed}`;
@@ -266,4 +310,25 @@ export function sanitizeRedirectUrl(candidateUrl: any, appUrl: string, fallbackP
     return defaultFallbackUrl;
   }
 }
+
+/**
+ * Task 35-F — Centralized, server-authoritative application URL retrieval.
+ * Eliminates client-controlled header.origin fallback to prevent spoofing.
+ */
+export function getAuthoritativeAppUrl(): string {
+  const isProd = process.env.NODE_ENV === "production";
+  const appUrl = process.env.APP_URL;
+
+  if (isProd) {
+    if (!appUrl || appUrl.trim() === "" || appUrl.toLowerCase().includes("localhost") || appUrl.includes("127.0.0.1")) {
+      throw new InternalServerError(
+        "Authoritative Stripe redirect origin is not configured or contains invalid production origin (localhost fallback blocked)."
+      );
+    }
+  }
+
+  const finalUrl = appUrl || "http://localhost:3000";
+  return finalUrl.replace(/\/+$/, "");
+}
+
 

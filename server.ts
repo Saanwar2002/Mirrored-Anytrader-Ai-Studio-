@@ -19,7 +19,7 @@ import { sendHttpError, BadRequestError, UnauthorizedError, ForbiddenError, NotF
 import { runProductionChecks } from "./src/server/productionChecks.ts";
 import { validateJobTransition, validateMilestoneTransition, validateRideTransition, validateQuoteTransition, JobStatus } from "./src/server/stateMachine.ts";
 import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
-import { sanitizeRedirectUrl } from "./src/server/paymentVerification.ts";
+import { sanitizeRedirectUrl, getAuthoritativeAppUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
 import {
   listAuthoritativeNotifications,
@@ -2196,7 +2196,7 @@ async function startServer() {
       const authUid = (req as any).user.uid;
       const { successUrl, cancelUrl } = req.body;
       const userId = authUid; // Derive strictly from verified Firebase token
-      const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
+      const appUrl = getAuthoritativeAppUrl();
 
       const finalSuccessUrl = sanitizeRedirectUrl(successUrl, appUrl, `/profile?session_id={CHECKOUT_SESSION_ID}`);
       const finalCancelUrl = sanitizeRedirectUrl(cancelUrl, appUrl, `/profile`);
@@ -2467,7 +2467,7 @@ async function startServer() {
       const authUid = (req as any).user.uid;
       const { successUrl, cancelUrl } = req.body;
       const userId = authUid; // Derive strictly from verified token
-      const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
+      const appUrl = getAuthoritativeAppUrl();
 
       const finalSuccessUrl = sanitizeRedirectUrl(successUrl, appUrl, `/profile?setup=success`);
       const finalCancelUrl = sanitizeRedirectUrl(cancelUrl, appUrl, `/profile`);
@@ -2612,7 +2612,7 @@ async function startServer() {
   app.post("/api/create-customer-portal-session", requireAuth, paymentLimiter, async (req, res) => {
     try {
       const authUid = (req as any).user.uid;
-      const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
+      const appUrl = getAuthoritativeAppUrl();
       const { returnUrl } = req.body;
       const finalReturnUrl = sanitizeRedirectUrl(returnUrl, appUrl, `/billing`);
 
@@ -3153,7 +3153,7 @@ async function startServer() {
         console.warn("Stripe missing. Mocking Trip QR link for development testing.");
       }
 
-      const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
+      const appUrl = getAuthoritativeAppUrl();
 
       const result = await executeCreateTripPaymentCommand({
         db,
@@ -3413,7 +3413,7 @@ async function startServer() {
       if (!userDoc.exists) throw new NotFoundError("User profile not found");
       const userData = userDoc.data() || {};
 
-      const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
+      const appUrl = getAuthoritativeAppUrl();
       let stripe;
       try {
         stripe = getStripe();
@@ -3562,12 +3562,12 @@ async function startServer() {
       try {
         stripe = getStripe();
       } catch (e) {
-        const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
+        const appUrl = getAuthoritativeAppUrl();
         return res.json({ url: `${appUrl}/billing?dashboard=mock_express` });
       }
 
       if (accountId.startsWith("acct_mock_")) {
-        const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
+        const appUrl = getAuthoritativeAppUrl();
         return res.json({ url: `${appUrl}/billing?dashboard=mock_express` });
       }
 
@@ -3726,6 +3726,8 @@ async function startServer() {
         return res.status(400).json({ error: "No fees to settle" });
       }
 
+      const appUrl = getAuthoritativeAppUrl();
+
       let stripe;
       try {
         stripe = getStripe();
@@ -3736,8 +3738,12 @@ async function startServer() {
         }
         // Stripe not connected/configured, redirect direct to success path in Sandbox Mode
         console.log("Stripe not connected. Directing to sandbox platform fee success pathway.");
-        return res.json({ url: `${process.env.APP_URL || ''}/platform-fee-success?sandbox=true&amount=${pendingPlatformFees}` });
+        const sandboxUrl = sanitizeRedirectUrl(`/platform-fee-success?sandbox=true&amount=${pendingPlatformFees}`, appUrl, `/platform-fee-success`);
+        return res.json({ url: sandboxUrl });
       }
+
+      const finalSuccessUrl = sanitizeRedirectUrl(`/platform-fee-success?amount=${pendingPlatformFees}`, appUrl, `/platform-fee-success`);
+      const finalCancelUrl = sanitizeRedirectUrl(`/driver-dashboard`, appUrl, `/driver-dashboard`);
 
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -3757,8 +3763,8 @@ async function startServer() {
           driverId,
           type: 'fee_settlement'
         },
-        success_url: `${process.env.APP_URL || ''}/platform-fee-success?amount=${pendingPlatformFees}`,
-        cancel_url: `${process.env.APP_URL || ''}/driver-dashboard`,
+        success_url: finalSuccessUrl,
+        cancel_url: finalCancelUrl,
       });
 
       res.json({ url: session.url });

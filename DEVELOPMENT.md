@@ -98,17 +98,20 @@
   - **Task 35-C / 35-C-R1**: **VERIFIED & CLOSED**.
   - **Task 35-D / 35-D-R1**: **VERIFIED & CLOSED**.
   - **Task 35-E / 35-E-R1 / 35-E-R2 / 35-E-R3 / 35-E-R4 / 35-E-R4-R1**: **VERIFIED & CLOSED — 100% REMEDIATED**.
-  - **Task 35-F**: **VERIFIED & CLOSED — 100% CERTIFIED**.
+  - **Task 35-F / 35-F-R1-A-B-C-D-E**: **VERIFIED & CLOSED — 100% CERTIFIED**.
 
-## 🛡️ AnyTrader — Task 35-F: Stripe Redirect URL Integrity & Open Redirect Defense (October 7, 2026)
-- **1. Server-Authoritative Redirect Sanitizer (`src/server/paymentVerification.ts`)**:
+## 🛡️ AnyTrader — Task 35-F / 35-F-R1-A-B-C-D-E: Stripe Redirect URL Integrity & Open Redirect Defense (October 7, 2026)
+- **1. Server-Authoritative Redirect Sanitizer, Central Config & Path Allowlist (`src/server/paymentVerification.ts`)**:
   - Implemented `sanitizeRedirectUrl(candidateUrl, appUrl, fallbackPath)` to sanitize and validate all client-supplied success, cancel, and return URLs.
+  - **R1-C Route Allowlist Enforced**: Rejects arbitrary same-origin paths. Implemented `isPathAllowed` utilizing an explicit allowlist of legitimate endpoints (`/profile`, `/billing`, `/corporate`, `/dashboard`, `/portfolio`, `/banner-ads`, `/payment-success`, `/payment-failed`, `/payment-complete`, `/platform-fee-success`, `/driver-dashboard` and pattern-matched `/job/:jobId` paths), preventing same-origin open redirect exploits.
+  - Standardized `getAuthoritativeAppUrl()` to retrieve a centralized, server-authoritative application URL. Completely removed client-controlled request `Origin` fallback to prevent host-header spoofing across all flows including Stripe Connect onboarding (**R1-E**).
+  - **R1-B Strict Environment Gating**: Fails closed in production environments by throwing an `InternalServerError` if `APP_URL` is missing, unconfigured, or set to a localhost/loopback address.
   - Rejects external domain hijacking attempts (`https://evil.com`), protocol-relative exploits (`//attacker.com`), dangerous URI schemes (`javascript:`, `data:`, `vbscript:`, `file:`, `ftp:`), and CRLF control characters.
 - **2. Universal Payment Endpoint Integration (`server.ts`, `src/server/tripPaymentAuthorization.ts`)**:
-  - Integrated `sanitizeRedirectUrl` across `/api/create-checkout-session`, `/api/create-setup-session`, `/api/create-customer-portal-session`, and `executeCreateTripPaymentCommand`.
+  - Integrated `sanitizeRedirectUrl` and `getAuthoritativeAppUrl` across `/api/create-checkout-session`, `/api/create-setup-session`, `/api/create-customer-portal-session`, `/api/driver/settle-fees` (Platform Fee Checkout secured), `/api/stripe/create-connect-account` (Stripe Connect Onboarding origin secured), and `executeCreateTripPaymentCommand`.
 - **3. Automated Test Verification (`tests/unit/task35FStripeRedirectIntegrity.test.ts`)**:
-  - **8/8 Security Tests Passing (100% success)**.
-  - **Full Unit Test Suite (`npm test`)**: **984/984 tests passing** across 59 test files (100% clean).
+  - **24/24 Security Tests Passing (100% success)**.
+  - **Full Unit Test Suite (`npm test`)**: **1000/1000 tests passing** across 59 test files (100% clean).
   - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
   - **Clean Applet Build (`compile_applet`)**: Succeeded cleanly.
 
