@@ -55,6 +55,8 @@ function createMockSsoDb() {
     },
   };
 
+  let activeTxPromise: Promise<any> = Promise.resolve();
+
   return {
     _store: store,
     collection(colName: string) {
@@ -87,40 +89,73 @@ function createMockSsoDb() {
           };
         },
         where(field: string, op: string, val: any) {
-          let currentDocs = Object.entries(store)
-            .filter(([k]) => k.startsWith(`${colName}/`))
-            .map(([_, v]) => v)
-            .filter((doc: any) => {
-              if (field.startsWith("providers.")) {
-                const provKey = field.split(".")[1];
-                return doc.providers?.[provKey] === val;
-              }
-              if (op === "==") return doc[field] === val;
-              return true;
-            });
+          const evalWhere = () => {
+            return Object.entries(store)
+              .filter(([k]) => k.startsWith(`${colName}/`))
+              .map(([_, v]) => v)
+              .filter((doc: any) => {
+                if (field.startsWith("providers.")) {
+                  const provKey = field.split(".")[1];
+                  return doc.providers?.[provKey] === val;
+                }
+                if (op === "==") return doc[field] === val;
+                return true;
+              });
+          };
 
           return {
             limit(max: number) {
               return {
-                get: async () => ({
-                  empty: currentDocs.length === 0,
-                  docs: currentDocs.slice(0, max).map((d: any) => ({
-                    id: d.uid || d.id,
-                    data: () => JSON.parse(JSON.stringify(d)),
-                  })),
-                }),
+                get: async () => {
+                  const currentDocs = evalWhere();
+                  return {
+                    empty: currentDocs.length === 0,
+                    docs: currentDocs.slice(0, max).map((d: any) => ({
+                      id: d.uid || d.id,
+                      data: () => JSON.parse(JSON.stringify(d)),
+                    })),
+                  };
+                },
               };
             },
-            get: async () => ({
-              empty: currentDocs.length === 0,
-              docs: currentDocs.map((d: any) => ({
-                id: d.uid || d.id,
-                data: () => JSON.parse(JSON.stringify(d)),
-              })),
-            }),
+            get: async () => {
+              const currentDocs = evalWhere();
+              return {
+                empty: currentDocs.length === 0,
+                docs: currentDocs.map((d: any) => ({
+                  id: d.uid || d.id,
+                  data: () => JSON.parse(JSON.stringify(d)),
+                })),
+              };
+            },
           };
         },
       };
+    },
+    async runTransaction(cb: (tx: any) => Promise<any>) {
+      const currentLock = activeTxPromise;
+      let release: (value?: any) => void = () => {};
+      activeTxPromise = new Promise((resolve) => { release = resolve; });
+
+      await currentLock;
+      try {
+        const tx = {
+          get: async (refOrQuery: any) => {
+            if (typeof refOrQuery.get === "function") {
+              return await refOrQuery.get();
+            }
+            return refOrQuery;
+          },
+          set: async (ref: any, data: any, options?: any) => {
+            if (typeof ref.set === "function") {
+              return await ref.set(data, options);
+            }
+          },
+        };
+        return await cb(tx);
+      } finally {
+        release();
+      }
     },
   };
 }
@@ -846,6 +881,9 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
               sub: "firebase_verified_sub_123",
               email: "test@example.com",
               email_verified: true,
+              firebase: {
+                sign_in_provider: "google.com",
+              },
             };
           }
           throw new Error("Decoding Firebase ID token failed");
@@ -1046,6 +1084,149 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
       expect(result.providerId).toBe("github");
       expect(transactionRun).toBe(true);
       expect(transactionalDb.runTransaction).toHaveBeenCalled();
+    });
+
+    it("Test R4-R1-A — Missing verified provider + forged client provider: Token without provider identity cannot be assigned client provider", async () => {
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async () => ({
+          sub: "user_sub_no_provider",
+          uid: "user_uid_no_provider",
+          email: "test@example.com",
+          email_verified: true,
+          // NO firebase.sign_in_provider or iss!
+        })),
+      };
+
+      await expect(
+        verifyProviderCredentialCryptographically(
+          "valid_token_without_provider_identity",
+          "github",
+          mockAdminAuth
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R4-R1-B — Missing provider identity with NO client provider: Token without provider identity fails closed", async () => {
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async () => ({
+          sub: "user_sub_no_provider",
+          uid: "user_uid_no_provider",
+          email: "test@example.com",
+          email_verified: true,
+        })),
+      };
+
+      await expect(
+        verifyProviderCredentialCryptographically(
+          "valid_token_without_provider_identity",
+          undefined,
+          mockAdminAuth
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R4-R1-C — Verified provider + matching client provider: ALLOWED and claims.providerId comes from token", async () => {
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async () => ({
+          sub: "google_sub_100",
+          email: "test@example.com",
+          email_verified: true,
+          firebase: {
+            sign_in_provider: "google.com",
+          },
+        })),
+      };
+
+      const claims = await verifyProviderCredentialCryptographically(
+        "valid_google_token",
+        "google",
+        mockAdminAuth
+      );
+
+      expect(claims.providerId).toBe("google");
+      expect(claims.sub).toBe("google_sub_100");
+    });
+
+    it("Test R4-R1-D — Verified provider + conflicting client provider: DENIED", async () => {
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async () => ({
+          sub: "google_sub_100",
+          email: "test@example.com",
+          email_verified: true,
+          firebase: {
+            sign_in_provider: "google.com",
+          },
+        })),
+      };
+
+      await expect(
+        verifyProviderCredentialCryptographically(
+          "valid_google_token",
+          "apple", // Conflicting requested provider
+          mockAdminAuth
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R4-R1-E — Genuine concurrent provider-link race: exactly one winner, exactly one ConflictError", async () => {
+      const userA = { uid: "user_alice", email: "alice@example.com" };
+      const userB = { uid: "attacker_eve", email: "eve@example.com" };
+
+      // Shared verified provider credential claiming github_race_sub_999
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async () => ({
+          sub: "user_firebase_id",
+          email: "race@example.com",
+          email_verified: true,
+          firebase: {
+            sign_in_provider: "github.com",
+            identities: {
+              "github.com": ["github_race_sub_999"],
+            },
+          },
+        })),
+      };
+
+      // Concurrent link attempts by userA and userB for the SAME credential
+      const results = await Promise.allSettled([
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller: userA,
+          providerCredential: "shared_race_credential",
+          adminAuthInstance: mockAdminAuth,
+        }),
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller: userB,
+          providerCredential: "shared_race_credential",
+          adminAuthInstance: mockAdminAuth,
+        }),
+      ]);
+
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+
+      // Required race assertions:
+      // 1. Exactly one operation succeeds
+      expect(fulfilled.length).toBe(1);
+      // 2. Exactly one operation loses
+      expect(rejected.length).toBe(1);
+      // 3. Loser receives ConflictError
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ConflictError);
+
+      // 4. Final provider binding exists exactly once in store
+      const aliceHasBinding = mockDb._store["users/user_alice"]?.providers?.github === "github_race_sub_999";
+      const eveHasBinding = mockDb._store["users/attacker_eve"]?.providers?.github === "github_race_sub_999";
+
+      // Exactly 1 winner holds the binding
+      expect(aliceHasBinding !== eveHasBinding).toBe(true);
+      if (aliceHasBinding) {
+        // Winning user is Alice, losing user Eve has no binding
+        expect(mockDb._store["users/attacker_eve"]?.providers?.github).toBeUndefined();
+      } else {
+        // Winning user is Eve, losing user Alice has no binding
+        expect(mockDb._store["users/user_alice"]?.providers?.github).toBeUndefined();
+      }
     });
   });
 });

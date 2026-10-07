@@ -161,7 +161,8 @@ export async function evaluateAccountLinkingEligibility(
   db: any,
   caller: AuthenticatedUser | null | undefined,
   providerInput: ProviderIdentityInput,
-  verifiedClaims?: VerifiedProviderClaims | null
+  verifiedClaims?: VerifiedProviderClaims | null,
+  transaction?: any
 ): Promise<{ eligible: boolean; providerId: string; sub: string }> {
   if (!caller || !caller.uid) {
     throw new UnauthorizedError("Authentication required for account linking.");
@@ -208,30 +209,39 @@ export async function evaluateAccountLinkingEligibility(
 
   if (db) {
     try {
-      // 1. Query if this providerId + sub is already linked to another account
-      const existingQuery = await db
+      const getDocs = async (query: any) => {
+        if (transaction && typeof transaction.get === "function") {
+          return await transaction.get(query);
+        }
+        return await query.get();
+      };
+
+      // 1. Transactional Query: Check if this providerId + sub is already linked to another account
+      const existingQuery = db
         .collection("users")
         .where(`providers.${providerId}`, "==", sub)
-        .limit(1)
-        .get();
+        .limit(1);
 
-      if (existingQuery && !existingQuery.empty) {
-        const linkedDoc = existingQuery.docs[0];
+      const existingSnapshot = await getDocs(existingQuery);
+
+      if (existingSnapshot && !existingSnapshot.empty) {
+        const linkedDoc = existingSnapshot.docs[0];
         if (linkedDoc.id !== callerUid) {
           throw new ConflictError("This provider identity is already linked to another AnyTrader account.");
         }
       }
 
-      // 2. If email is provided, check for account collision
+      // 2. Transactional Query: Check if targetEmail belongs to another account
       if (targetEmail.length > 0) {
-        const emailMatchQuery = await db
+        const emailMatchQuery = db
           .collection("users")
           .where("email", "==", targetEmail)
-          .limit(1)
-          .get();
+          .limit(1);
 
-        if (emailMatchQuery && !emailMatchQuery.empty) {
-          const emailOwnerDoc = emailMatchQuery.docs[0];
+        const emailMatchSnapshot = await getDocs(emailMatchQuery);
+
+        if (emailMatchSnapshot && !emailMatchSnapshot.empty) {
+          const emailOwnerDoc = emailMatchSnapshot.docs[0];
           if (emailOwnerDoc.id !== callerUid) {
             // Cannot link or hijack an email belonging to another user
             // Untrusted providerInput.email_verified is completely rejected
@@ -337,17 +347,20 @@ export async function verifyProviderCredentialCryptographically(
         }
       }
 
-      // If token provides verified providerId, enforce strict match with expectedProviderId if provided
-      if (cleanExpectedProviderId && detectedProviderId && cleanExpectedProviderId !== detectedProviderId) {
+      // Blocker #1 Fix: Provider ID MUST be cryptographically verified from token claims.
+      // A client-supplied expectedProviderId can NEVER be a fallback.
+      if (!detectedProviderId) {
+        throw new BadRequestError("Provider ID could not be cryptographically verified from the credential.");
+      }
+
+      // If client supplied expectedProviderId, enforce strict match against detectedProviderId
+      if (cleanExpectedProviderId && cleanExpectedProviderId !== detectedProviderId) {
         throw new BadRequestError(
           `Requested provider ID '${cleanExpectedProviderId}' does not match cryptographically verified provider ID '${detectedProviderId}'.`
         );
       }
 
-      const effectiveProviderId = detectedProviderId || cleanExpectedProviderId;
-      if (!effectiveProviderId) {
-        throw new BadRequestError("Provider ID could not be cryptographically verified from the token.");
-      }
+      const effectiveProviderId = detectedProviderId;
 
       // 2. Authoritative Subject identifier (sub) extraction
       let sub = "";
@@ -389,14 +402,14 @@ export interface ExecuteLinkAccountParams {
 }
 
 /**
- * Task 35-E-R3/R4: Production Account Linking Service
+ * Task 35-E-R3/R4/R4-R1: Production Account Linking Service
  *
  * Implements the complete production cryptographic trust chain:
  * 1. Authenticate caller (server-derived UID)
  * 2. Require and cryptographically verify external provider credential
  * 3. Construct VerifiedProviderClaims exclusively from cryptographic verifier result
- * 4. Pass verified claims to evaluateAccountLinkingEligibility()
- * 5. Persist provider identity binding atomically in Firestore upon verified eligibility
+ * 4. Transactionally evaluate linking eligibility and collision checks
+ * 5. Transactionally persist provider identity binding in Firestore
  */
 export async function executeAuthoritativeAccountLinking(
   params: ExecuteLinkAccountParams
@@ -429,19 +442,25 @@ export async function executeAuthoritativeAccountLinking(
     throw new UnauthorizedError("Cryptographic provider verification did not yield valid claims.");
   }
 
-  // Step 4: Evaluate linking eligibility using verified claims
-  const eligibility = await evaluateAccountLinkingEligibility(
-    db,
-    caller,
-    providerInput || {},
-    verifiedClaims
-  );
+  let finalEligibility: { eligible: boolean; providerId: string; sub: string } = {
+    eligible: true,
+    providerId: verifiedClaims.providerId,
+    sub: verifiedClaims.sub,
+  };
 
-  // Step 5: Atomically link provider in authoritative database
+  // Step 4 & 5: Transactionally check eligibility AND persist provider identity in database
   if (db) {
     try {
       if (typeof db.runTransaction === "function") {
         await db.runTransaction(async (transaction: any) => {
+          finalEligibility = await evaluateAccountLinkingEligibility(
+            db,
+            caller,
+            providerInput || {},
+            verifiedClaims,
+            transaction
+          );
+
           const userRef = db.collection("users").doc(caller.uid);
           const userDoc = await transaction.get(userRef);
           const userData = userDoc && (typeof userDoc.data === "function" ? userDoc.data() : userDoc.data) || {};
@@ -452,7 +471,7 @@ export async function executeAuthoritativeAccountLinking(
             {
               providers: {
                 ...existingProviders,
-                [eligibility.providerId]: eligibility.sub,
+                [finalEligibility.providerId]: finalEligibility.sub,
               },
               updatedAt: new Date().toISOString(),
             },
@@ -460,10 +479,17 @@ export async function executeAuthoritativeAccountLinking(
           );
         });
       } else {
+        finalEligibility = await evaluateAccountLinkingEligibility(
+          db,
+          caller,
+          providerInput || {},
+          verifiedClaims
+        );
+
         await db.collection("users").doc(caller.uid).set(
           {
             providers: {
-              [eligibility.providerId]: eligibility.sub,
+              [finalEligibility.providerId]: finalEligibility.sub,
             },
             updatedAt: new Date().toISOString(),
           },
@@ -471,6 +497,13 @@ export async function executeAuthoritativeAccountLinking(
         );
       }
     } catch (saveErr: any) {
+      if (
+        saveErr instanceof ConflictError ||
+        saveErr instanceof BadRequestError ||
+        saveErr instanceof UnauthorizedError
+      ) {
+        throw saveErr;
+      }
       console.error("[SSO Engine] Failed to save linked provider:", saveErr);
       throw saveErr;
     }
@@ -478,7 +511,7 @@ export async function executeAuthoritativeAccountLinking(
 
   return {
     success: true,
-    providerId: eligibility.providerId,
-    sub: eligibility.sub,
+    providerId: finalEligibility.providerId,
+    sub: finalEligibility.sub,
   };
 }
