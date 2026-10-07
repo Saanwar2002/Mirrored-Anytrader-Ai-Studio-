@@ -114,6 +114,19 @@ export async function executeCreateTripPaymentCommand(
 
   // 4. Assert caller authorization against authoritative ride record
   const authoritativePassengerId = rideData.passengerId || rideData.userId || rideData.riderId;
+
+  // Driver Source Verification & Conflict Defense:
+  // If both driverId and assignedDriverId exist but disagree, fail closed immediately.
+  if (
+    rideData.driverId &&
+    rideData.assignedDriverId &&
+    typeof rideData.driverId === "string" &&
+    typeof rideData.assignedDriverId === "string" &&
+    rideData.driverId !== rideData.assignedDriverId
+  ) {
+    throw new BadRequestError("Conflicting authoritative driver identities detected on ride record");
+  }
+
   const authoritativeDriverId = rideData.driverId || rideData.assignedDriverId;
 
   const isPassenger = authoritativePassengerId && callerUid === authoritativePassengerId;
@@ -124,7 +137,7 @@ export async function executeCreateTripPaymentCommand(
   }
 
   // 5. Authoritative Driver Verification
-  if (!authoritativeDriverId || typeof authoritativeDriverId !== "string") {
+  if (!authoritativeDriverId || typeof authoritativeDriverId !== "string" || !authoritativeDriverId.trim()) {
     throw new BadRequestError("No assigned driver found for this ride");
   }
 
@@ -157,23 +170,22 @@ export async function executeCreateTripPaymentCommand(
   // NOTE: Any client-supplied stripeAccountId, connectedAccountId, destinationAccountId is completely IGNORED.
   // The payment destination is strictly authoritativeStripeAccountId.
 
-  // 7. Resolve authoritative base fare and sanitized tip
-  let effectiveBaseFare = Number(
+  // 7. Resolve authoritative base fare from server-authoritative trip record ONLY
+  const rawAuthoritativeFare = (
     rideData.finalFare ??
     rideData.fare ??
     rideData.estimatedFare ??
     rideData.totalFare ??
-    rideData.price ??
-    0
+    rideData.price
   );
 
-  if (effectiveBaseFare <= 0 && (body.baseFare || body.amount)) {
-    const rawFare = Number(body.baseFare || body.amount);
-    if (!isNaN(rawFare) && rawFare > 0) {
-      effectiveBaseFare = rawFare;
-    }
+  const effectiveBaseFare = typeof rawAuthoritativeFare === "number" ? rawAuthoritativeFare : Number(rawAuthoritativeFare);
+
+  if (!rawAuthoritativeFare || isNaN(effectiveBaseFare) || effectiveBaseFare <= 0) {
+    throw new BadRequestError("Authoritative trip fare could not be resolved from ride record.");
   }
 
+  // Client amount cannot manufacture or override fare: body.amount and body.baseFare are strictly ignored.
   const rawTip = Number(body.tipAmount) || 0;
   const sanitizedTip = Math.max(0, Math.min(500, isNaN(rawTip) ? 0 : rawTip));
   const totalAmount = effectiveBaseFare + sanitizedTip;

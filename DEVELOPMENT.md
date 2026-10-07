@@ -1,5 +1,31 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Task 35-C-R1: Trip Payment Recipient & Fare Integrity Remediation (October 7, 2026)
+- **1. Driver Ambiguity & Conflict Defense**:
+  - **Eliminated Silent Precedence**: In `src/server/tripPaymentAuthorization.ts`, if both `driverId` and `assignedDriverId` are present on a ride document and disagree (`driverId !== assignedDriverId`), the payment creation operation fails closed immediately with `BadRequestError("Conflicting authoritative driver identities detected on ride record")`.
+  - **Unambiguous Payee Resolution**: Funds are routed strictly to the unambiguous authoritative driver's `users/{driverId}.stripeAccountId`.
+- **2. Fare Integrity & Elimination of Client-Controlled Amount Fallbacks**:
+  - **100% Server-Authoritative Fare**: Base fare is derived exclusively from the authoritative ride record (`rideData.finalFare`, `rideData.fare`, `rideData.estimatedFare`, `rideData.totalFare`, `rideData.price`).
+  - **Fail Closed on Missing Fare**: If authoritative fare is missing or `<= 0`, the operation fails closed with `BadRequestError("Authoritative trip fare could not be resolved from ride record.")`.
+  - **Eliminated Client Override / Manufacturing**: Client-supplied `body.amount` and `body.baseFare` are completely ignored; client cannot manufacture a £1 payment or override an authoritative £100 fare.
+- **3. Automated Test Verification (`tests/unit/task35CTripPaymentIntegrity.test.ts`)**:
+  - **17/17 Security Tests Passing (100% success)** including:
+    - *Original Tests A–M*: Legitimate payment, arbitrary recipient rejected, conflicting driver ID rejected, attacker Stripe account ignored, connected account substitution ignored, conflicting driverUid rejected, missing recipient derived, cross-trip recipient rejected, unauthorized caller 403, unauthenticated 401, unonboarded driver 400, non-existent ride 400, ride without driver 400.
+    - *Test 1 (R1)*: Conflicting `driverId` / `assignedDriverId` fails closed (`BadRequestError`).
+    - *Test 2 (R1)*: Missing authoritative fare + client `amount` fails closed (`BadRequestError`).
+    - *Test 3 (R1)*: Missing authoritative fare + client `baseFare` fails closed (`BadRequestError`).
+    - *Test 4 (R1)*: Client amount £1 cannot override authoritative £100 fare (charges exactly £100 / 10000 pence).
+  - **Task 35-B Security Test Suite**: **11/11 tests passing** (`tests/unit/task35BDriverAuthorization.test.ts`).
+  - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
+  - **Complete Platform Unit Suite (`npm test`)**: **925/925 tests passing** across **56 test files** (100% clean).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
+- **4. Status & Next Step**:
+  - **Task 35-A**: **VERIFIED & CLOSED**.
+  - **Task 35-B / 35-B-R1 / 35-B-R2**: **VERIFIED & CLOSED**.
+  - **Task 35-C / 35-C-R1**: **VERIFIED & CLOSED — 100% REMEDIATED**.
+  - **Task 35-D**: **NOT STARTED — NEXT**.
+
 ## 🛡️ AnyTrader — Task 35-C: Trip Payment Recipient Integrity & Server-Authoritative Payee Resolution (October 7, 2026)
 - **1. Server-Authoritative Payee & Stripe Destination Resolution**:
   - **Eliminated Client-Supplied Recipient Manipulation**: In `src/server/tripPaymentAuthorization.ts` and `server.ts` (`/api/rides/create-trip-payment`), client-supplied recipient fields (`driverId`, `recipientId`, `payeeId`, `driverUid`, `stripeAccountId`, `connectedAccountId`, `destinationAccountId`, `transferDestination`, etc.) are completely untrusted.
