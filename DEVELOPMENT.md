@@ -78,12 +78,18 @@
     - *Test R4-R1-C (R4-R1 Critical)*: Verified provider + matching client provider $\rightarrow$ ALLOWED (`claims.providerId === "google"`).
     - *Test R4-R1-D (R4-R1 Critical)*: Verified provider + conflicting client provider $\rightarrow$ DENIED (`BadRequestError`).
     - *Test R4-R1-E (R4-R1 Critical)*: Genuine concurrent provider-link race: executed with true Optimistic Concurrency Control (OCC) snapshot isolation during `db.runTransaction`. Both concurrent operations observe identical initial state; the first caller commits and bumps store version, while the second caller detects the stale snapshot version, retries against the updated database state, observes the newly committed binding, and rejects with `ConflictError`. Exactly 1 winner succeeds, exactly 1 loser receives `ConflictError`, and provider identity is bound to exactly 1 user.
+    - *Test J (Database Fail-Closed)*: Infrastructure or database lookup failures during eligibility checks fail closed (`UnauthorizedError("Unable to establish authoritative provider-linking state.")`) to prevent unauthorized account-linking bindings upon database/network errors.
+    - *Test R4-R2-A1 (Provider Collision Query Fail-Closed)*: Infrastructure error on provider lookup during `evaluateAccountLinkingEligibility` fails closed (`UnauthorizedError`), asserting 0 provider bindings persisted.
+    - *Test R4-R2-A2 (Email Collision Query Fail-Closed)*: Infrastructure/timeout error on email lookup fails closed (`UnauthorizedError`), asserting 0 provider bindings persisted.
+    - *Test R4-R2-A3 (Transaction Read Fail-Closed)*: Transaction user document read error fails closed, asserting 0 provider bindings persisted.
+    - *Test R4-R2-A4 (Transaction Commit Fail-Closed)*: Transaction lock conflict or abort during commit phase fails closed, asserting 0 provider bindings persisted.
+    - *Verifier Fallback Security Boundary*: Documented explicitly in `verifyProviderCredentialCryptographically` that falling back to `verifyIdToken(credential, false)` on Identity Toolkit API error retains full cryptographic authenticity (JWT signature/claims verification) while token revocation status check is unperformed due to environment API unavailability.
   - **Task 35-E Real Firestore Emulator Concurrency Suite**: **Passing** (`tests/unit/task35EFirestoreConcurrency.test.ts` via `npm run test:task35e-emulator`). Executes genuine concurrent account linking for identical provider subjects directly against the local Firebase Firestore emulator process.
   - **Task 35-D Notification Suite**: **11/11 tests passing** (`tests/unit/task35DNotificationAuthorization.test.ts`).
   - **Task 35-C Payment Integrity Suite**: **17/17 tests passing** (`tests/unit/task35CTripPaymentIntegrity.test.ts`).
   - **Task 35-B Driver Authorization Suite**: **11/11 tests passing** (`tests/unit/task35BDriverAuthorization.test.ts`).
   - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
-  - **Complete Platform Unit Suite (`npm test`)**: **971/971 tests passing** across **58 test files** (100% clean).
+  - **Complete Platform Unit Suite (`npm test`)**: **976/976 tests passing** across **58 test files** (100% clean).
   - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
   - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
 - **9. Status & Next Step**:

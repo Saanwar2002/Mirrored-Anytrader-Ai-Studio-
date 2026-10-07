@@ -254,9 +254,23 @@ export async function evaluateAccountLinkingEligibility(
         }
       }
     } catch (err: any) {
-      if (err instanceof ConflictError) throw err;
-      if (err instanceof BadRequestError) throw err;
-      console.warn("[SSO Engine] Provider linking lookup warning:", err?.message);
+      if (
+        err instanceof ConflictError ||
+        err instanceof BadRequestError ||
+        err instanceof UnauthorizedError ||
+        err instanceof ForbiddenError
+      ) {
+        throw err;
+      }
+
+      console.error(
+        "[SSO Engine] Provider linking authorization lookup failed:",
+        err
+      );
+
+      throw new UnauthorizedError(
+        "Unable to establish authoritative provider-linking state."
+      );
     }
   }
 
@@ -310,7 +324,11 @@ export async function verifyProviderCredentialCryptographically(
       try {
         decoded = await adminAuthInstance.verifyIdToken(credential.trim(), true);
       } catch (err: any) {
-        // Fallback for environments with Identity Toolkit API service restrictions
+        // Fallback for environments with Identity Toolkit API service restrictions or disabled endpoint.
+        // SECURITY BOUNDARY DOCUMENTATION:
+        // Falling back to verifyIdToken(credential, false) retains full cryptographic authenticity (JWT signature
+        // and claims verification via public keys), but token revocation status is NOT guaranteed because the
+        // backend Identity Toolkit API check is unreachable/disabled in this execution environment.
         if (
           err?.message?.includes("identitytoolkit.googleapis.com") ||
           err?.code === "auth/internal-error" ||

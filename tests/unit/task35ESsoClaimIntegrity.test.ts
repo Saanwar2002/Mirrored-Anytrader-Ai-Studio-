@@ -609,7 +609,37 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
     expect(ssoResult.role).toBe("homeowner");
   });
 
-  it("Test J — Privilege claims remain server-authoritative: Identity resolution enforces server authority", async () => {
+  it("Test J — Database lookup infrastructure failure: FAILS CLOSED with UnauthorizedError", async () => {
+    const caller = {
+      uid: "user_alice",
+      email: "alice@example.com",
+    };
+
+    const faultyDb = {
+      collection: () => {
+        throw new Error("PERMISSION_DENIED: Firestore emulator unavailable");
+      },
+    };
+
+    await expect(
+      evaluateAccountLinkingEligibility(
+        faultyDb,
+        caller,
+        {
+          providerId: "github",
+          sub: "github_sub_alice_789",
+        },
+        {
+          providerId: "github",
+          sub: "github_sub_alice_789",
+          email: "alice@example.com",
+          email_verified: true,
+        }
+      )
+    ).rejects.toThrow(UnauthorizedError);
+  });
+
+  it("Test K — Privilege claims remain server-authoritative: Identity resolution enforces server authority", async () => {
     const requestWithSpoofedBody = {
       auth: {
         uid: "user_alice",
@@ -1358,6 +1388,272 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
 
       const occRejectedEvents = mockDb._txLog.filter((e: any) => e.event === "TX_REJECTED" && e.error === "ConflictError");
       expect(occRejectedEvents.length).toBe(1); // Retried transaction failed with ConflictError after reading updated state
+    });
+
+    describe("Task 35-E-R4-R2: Granular Fail-Closed Infrastructure & Transaction Security Invariants", () => {
+      it("Test R4-R2-A1 — Provider collision query failure fails closed: no provider binding persisted", async () => {
+        const caller = { uid: "user_alice", email: "alice@example.com" };
+        const mockAdminAuth = {
+          verifyIdToken: vi.fn(async () => ({
+            sub: "user_firebase_id",
+            email: "alice@example.com",
+            email_verified: true,
+            firebase: {
+              sign_in_provider: "github.com",
+              identities: { "github.com": ["github_sub_fail_1"] },
+            },
+          })),
+        };
+
+        const store: Record<string, any> = {
+          "users/user_alice": { id: "user_alice", uid: "user_alice", email: "alice@example.com", providers: {} },
+        };
+
+        const failingProviderDb = {
+          collection: (colName: string) => ({
+            doc: (docId: string) => ({
+              path: `${colName}/${docId}`,
+              get: async () => ({ id: docId, exists: true, data: () => store[`${colName}/${docId}`] }),
+            }),
+            where: (field: string) => ({
+              field,
+              limit: () => ({
+                field,
+                get: async () => {
+                  if (field.startsWith("providers.")) {
+                    throw new Error("PERMISSION_DENIED: Provider collision query failed");
+                  }
+                  return { empty: true, docs: [] };
+                },
+              }),
+            }),
+          }),
+          runTransaction: async (cb: (tx: any) => Promise<any>) => {
+            const tx = {
+              get: async (refOrQuery: any) => {
+                if (refOrQuery?.field?.startsWith("providers.")) {
+                  throw new Error("PERMISSION_DENIED: Provider collision query failed in transaction");
+                }
+                if (refOrQuery?.path) {
+                  const data = store[refOrQuery.path];
+                  return { id: refOrQuery.id, exists: !!data, data: () => data };
+                }
+                return { empty: true, docs: [] };
+              },
+              set: (ref: any, data: any) => {
+                store[ref.path] = data;
+              },
+            };
+            return await cb(tx);
+          },
+        };
+
+        await expect(
+          executeAuthoritativeAccountLinking({
+            db: failingProviderDb,
+            caller,
+            providerCredential: "valid_github_credential",
+            adminAuthInstance: mockAdminAuth,
+          })
+        ).rejects.toThrow();
+
+        // Critical Security Assertion: No provider binding persisted
+        expect(store["users/user_alice"]?.providers?.github).toBeUndefined();
+      });
+
+      it("Test R4-R2-A2 — Email collision query failure fails closed: no provider binding persisted", async () => {
+        const caller = { uid: "user_alice", email: "alice@example.com" };
+        const mockAdminAuth = {
+          verifyIdToken: vi.fn(async () => ({
+            sub: "user_firebase_id",
+            email: "alice@example.com",
+            email_verified: true,
+            firebase: {
+              sign_in_provider: "github.com",
+              identities: { "github.com": ["github_sub_fail_2"] },
+            },
+          })),
+        };
+
+        const store: Record<string, any> = {
+          "users/user_alice": { id: "user_alice", uid: "user_alice", email: "alice@example.com", providers: {} },
+        };
+
+        const failingEmailDb = {
+          collection: (colName: string) => ({
+            doc: (docId: string) => ({
+              path: `${colName}/${docId}`,
+              get: async () => ({ id: docId, exists: true, data: () => store[`${colName}/${docId}`] }),
+            }),
+            where: (field: string) => ({
+              field,
+              limit: () => ({
+                field,
+                get: async () => {
+                  if (field === "email") {
+                    throw new Error("UNAVAILABLE: Email query timeout");
+                  }
+                  return { empty: true, docs: [] };
+                },
+              }),
+            }),
+          }),
+          runTransaction: async (cb: (tx: any) => Promise<any>) => {
+            const tx = {
+              get: async (refOrQuery: any) => {
+                if (refOrQuery?.field === "email") {
+                  throw new Error("UNAVAILABLE: Email query failed in transaction");
+                }
+                if (refOrQuery?.path) {
+                  const data = store[refOrQuery.path];
+                  return { id: refOrQuery.id, exists: !!data, data: () => data };
+                }
+                return { empty: true, docs: [] };
+              },
+              set: (ref: any, data: any) => {
+                store[ref.path] = data;
+              },
+            };
+            return await cb(tx);
+          },
+        };
+
+        await expect(
+          executeAuthoritativeAccountLinking({
+            db: failingEmailDb,
+            caller,
+            providerCredential: "valid_github_credential",
+            adminAuthInstance: mockAdminAuth,
+          })
+        ).rejects.toThrow();
+
+        // Critical Security Assertion: No provider binding persisted
+        expect(store["users/user_alice"]?.providers?.github).toBeUndefined();
+      });
+
+      it("Test R4-R2-A3 — Transaction read failure fails closed: no provider binding persisted", async () => {
+        const caller = { uid: "user_alice", email: "alice@example.com" };
+        const mockAdminAuth = {
+          verifyIdToken: vi.fn(async () => ({
+            sub: "user_firebase_id",
+            email: "alice@example.com",
+            email_verified: true,
+            firebase: {
+              sign_in_provider: "github.com",
+              identities: { "github.com": ["github_sub_fail_3"] },
+            },
+          })),
+        };
+
+        const store: Record<string, any> = {
+          "users/user_alice": { id: "user_alice", uid: "user_alice", email: "alice@example.com", providers: {} },
+        };
+
+        const failingReadDb = {
+          collection: (colName: string) => ({
+            doc: (docId: string) => ({
+              path: `${colName}/${docId}`,
+              get: async () => ({ id: docId, exists: true, data: () => store[`${colName}/${docId}`] }),
+            }),
+            where: (field: string) => ({
+              field,
+              limit: () => ({
+                field,
+                get: async () => ({ empty: true, docs: [] }),
+              }),
+            }),
+          }),
+          runTransaction: async (cb: (tx: any) => Promise<any>) => {
+            const tx = {
+              get: async (refOrQuery: any) => {
+                if (refOrQuery?.path) {
+                  throw new Error("INTERNAL: Transaction user doc read error");
+                }
+                return { empty: true, docs: [] };
+              },
+              set: (ref: any, data: any) => {
+                store[ref.path] = data;
+              },
+            };
+            return await cb(tx);
+          },
+        };
+
+        await expect(
+          executeAuthoritativeAccountLinking({
+            db: failingReadDb,
+            caller,
+            providerCredential: "valid_github_credential",
+            adminAuthInstance: mockAdminAuth,
+          })
+        ).rejects.toThrow();
+
+        // Critical Security Assertion: No provider binding persisted
+        expect(store["users/user_alice"]?.providers?.github).toBeUndefined();
+      });
+
+      it("Test R4-R2-A4 — Transaction commit failure fails closed: no provider binding persisted", async () => {
+        const caller = { uid: "user_alice", email: "alice@example.com" };
+        const mockAdminAuth = {
+          verifyIdToken: vi.fn(async () => ({
+            sub: "user_firebase_id",
+            email: "alice@example.com",
+            email_verified: true,
+            firebase: {
+              sign_in_provider: "github.com",
+              identities: { "github.com": ["github_sub_fail_4"] },
+            },
+          })),
+        };
+
+        const store: Record<string, any> = {
+          "users/user_alice": { id: "user_alice", uid: "user_alice", email: "alice@example.com", providers: {} },
+        };
+
+        const failingCommitDb = {
+          collection: (colName: string) => ({
+            doc: (docId: string) => ({
+              path: `${colName}/${docId}`,
+              get: async () => ({ id: docId, exists: true, data: () => store[`${colName}/${docId}`] }),
+            }),
+            where: (field: string) => ({
+              field,
+              limit: () => ({
+                field,
+                get: async () => ({ empty: true, docs: [] }),
+              }),
+            }),
+          }),
+          runTransaction: async (cb: (tx: any) => Promise<any>) => {
+            const tx = {
+              get: async (refOrQuery: any) => {
+                if (refOrQuery?.path) {
+                  return { id: "user_alice", exists: true, data: () => store["users/user_alice"] };
+                }
+                return { empty: true, docs: [] };
+              },
+              set: () => {
+                // staged write - not committed
+              },
+            };
+            await cb(tx);
+            // Fail during commit phase
+            throw new Error("ABORTED: Transaction commit lock conflict");
+          },
+        };
+
+        await expect(
+          executeAuthoritativeAccountLinking({
+            db: failingCommitDb,
+            caller,
+            providerCredential: "valid_github_credential",
+            adminAuthInstance: mockAdminAuth,
+          })
+        ).rejects.toThrow();
+
+        // Critical Security Assertion: No provider binding persisted
+        expect(store["users/user_alice"]?.providers?.github).toBeUndefined();
+      });
     });
   });
 });
