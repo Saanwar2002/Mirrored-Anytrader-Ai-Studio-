@@ -1,5 +1,24 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Task 35-B-R1: Driver Authorization Remediation & Test Harness Hardening (October 7, 2026)
+- **1. Removed Admin Driver Bypass & Undocumented Heuristics**:
+  - **Admin Driver Bypass Removal**: Removed `isAdmin === true` early-return in `assertAuthoritativeDriverEligibility`. Platform administrators must now possess a valid, server-authoritative driver record in `users/{callerUid}` to operate or accept rides as drivers.
+  - **Undocumented Heuristics Removal**: Removed `memberId.startsWith("D-")` fallback in driver role evaluation. Driver eligibility is strictly determined by canonical schema fields (`role` in `["driver", "fleet_driver", "taxi_driver"]`, `isDriver: true`, or `accountType: "driver"`).
+- **2. Test Harness & Concurrency Hardening (`tests/unit/task35BDriverAuthorization.test.ts`)**:
+  - **Fixed Firestore/Domain-Event Mock**: Extended document reference mocks in test harness with `set` and `update` implementations, completely eliminating domain event persistence notices (`set is not a function`).
+  - **Strengthened Concurrent Race Testing**: Refactored Test I to execute genuine concurrent racing via `Promise.allSettled`, with serialized transaction execution (`txChain`) ensuring atomic lock simulation. Verified that exactly 1 claim succeeds and 1 fails with `ConflictError`.
+  - **Added Remediation Tests J & K**: Test J verifies admins without driver records are rejected (`ForbiddenError`). Test K verifies `memberId` heuristics without driver flags are rejected (`ForbiddenError`).
+- **3. Full Suite Regression Results**:
+  - **Task 35-B Security Test Suite**: **11/11 tests passing (100% success)**.
+  - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
+  - **Complete Platform Unit Suite (`npm test`)**: **908/908 tests passing** across **55 test files** (100% success rate).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
+- **4. Status & Next Step**:
+  - **Task 35-A**: **VERIFIED & CLOSED**.
+  - **Task 35-B / 35-B-R1**: **VERIFIED & CLOSED — 100% REMEDIATED**.
+  - **Task 35-C**: **NOT STARTED — NEXT**.
+
 ## 🛡️ AnyTrader — Task 35-B: Driver Authorization & Ride Claiming Security Remediation (October 6, 2026)
 - **1. Server-Authoritative Driver Eligibility & Identity Binding**:
   - **Elimination of Request-Body Authority**: In `src/server/driverAuthorization.ts` and `server.ts` (`/api/rides/accept`), request body flags (`isDriver`, `role`, `accountType`, `capabilities`, `status`, etc.) are completely ignored. Driver status is determined strictly from the server-authoritative `users/{callerUid}` document.

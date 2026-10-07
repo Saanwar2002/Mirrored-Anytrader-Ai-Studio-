@@ -25,14 +25,8 @@ export interface AuthenticatedDriverUser {
  */
 export function assertAuthoritativeDriverEligibility(
   userData: Record<string, any> | null | undefined,
-  callerUid: string,
-  isAdmin?: boolean
+  callerUid: string
 ): void {
-  // Platform administrators bypass standard driver eligibility checks
-  if (isAdmin === true) {
-    return;
-  }
-
   if (!userData) {
     throw new ForbiddenError("User record not found or not authorized as a driver.");
   }
@@ -43,8 +37,7 @@ export function assertAuthoritativeDriverEligibility(
     userData.role === "fleet_driver" ||
     userData.role === "taxi_driver" ||
     userData.isDriver === true ||
-    userData.accountType === "driver" ||
-    (typeof userData.memberId === "string" && userData.memberId.startsWith("D-"));
+    userData.accountType === "driver";
 
   if (!isDriverRole) {
     throw new ForbiddenError("Caller is not authorized to operate as a driver.");
@@ -134,7 +127,7 @@ export async function executeAcceptRideCommand(
     const userData = userDoc.exists ? userDoc.data() : null;
 
     // 2. Pre-claim Driver Authorization Check
-    assertAuthoritativeDriverEligibility(userData, callerUid, isAdmin);
+    assertAuthoritativeDriverEligibility(userData, callerUid);
 
     // 3. Ride Request Lookup (Read)
     const rideRef = db.collection("ride_requests").doc(rideId);
