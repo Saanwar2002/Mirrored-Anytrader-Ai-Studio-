@@ -1,5 +1,28 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Task 35-C: Trip Payment Recipient Integrity & Server-Authoritative Payee Resolution (October 7, 2026)
+- **1. Server-Authoritative Payee & Stripe Destination Resolution**:
+  - **Eliminated Client-Supplied Recipient Manipulation**: In `src/server/tripPaymentAuthorization.ts` and `server.ts` (`/api/rides/create-trip-payment`), client-supplied recipient fields (`driverId`, `recipientId`, `payeeId`, `driverUid`, `stripeAccountId`, `connectedAccountId`, `destinationAccountId`, `transferDestination`, etc.) are completely untrusted.
+  - **Authoritative Flow**: Authenticated Caller -> Authoritative Trip Record (`ride_requests/{rideId}`) -> Authoritative Assigned Driver (`rideData.driverId || rideData.assignedDriverId`) -> Authoritative Driver Stripe Account (`users/{authoritativeDriverId}.stripeAccountId`) -> Server-Controlled Destination Transfer.
+  - **Redirection Rejection**: Any client attempt to provide a conflicting recipient ID (`driverId`, `recipientId`, `payeeId`, `driverUid`) triggers immediate `ForbiddenError("Cannot redirect trip payment to a different driver or recipient.")`.
+  - **Authoritative Destination Routing**: Funds are routed strictly to the driver's verified `stripeAccountId` stored in Firestore; any client-supplied Stripe account IDs in the request body are ignored and discarded.
+- **2. Caller Relationship & Trip Authorization**:
+  - Validates that caller is either the trip's passenger (`passengerId`), the assigned driver (`driverId`), or a platform admin. Third parties are rejected with `ForbiddenError`.
+  - Rides without assigned drivers or non-existent rides fail-closed with `BadRequestError`.
+  - Drivers without completed Stripe onboarding are rejected with `BadRequestError("Driver has not completed Stripe onboarding.")`.
+- **3. Automated Test Verification (`tests/unit/task35CTripPaymentIntegrity.test.ts`)**:
+  - **13/13 Security Tests Passing (100% success)** covering: Test A (legitimate payment), Test B (arbitrary recipient rejected), Test C (conflicting driver ID rejected), Test D (arbitrary stripeAccountId ignored & authoritative used), Test E (connectedAccountId substitution ignored), Test F (conflicting driverUid rejected), Test G (missing recipient safely derived), Test H (cross-trip recipient rejected), Test I (unauthorized caller 403), Test J (unauthenticated 401), Test K (unonboarded driver rejected), Test L (non-existent ride 400), Test M (ride without assigned driver 400).
+  - **Task 35-B Security Test Suite**: **11/11 tests passing** (`tests/unit/task35BDriverAuthorization.test.ts`).
+  - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
+  - **Complete Platform Unit Suite (`npm test`)**: **921/921 tests passing** across **56 test files** (100% clean).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
+- **4. Status & Next Step**:
+  - **Task 35-A**: **VERIFIED & CLOSED**.
+  - **Task 35-B / 35-B-R1 / 35-B-R2**: **VERIFIED & CLOSED**.
+  - **Task 35-C**: **VERIFIED & CLOSED — 100% PASS**.
+  - **Task 35-D**: **NOT STARTED — NEXT**.
+
 ## 🛡️ AnyTrader — Task 35-B-R2: Genuine Concurrent Ride-Claim Race Verification (October 7, 2026)
 - **1. Genuine Concurrency & Optimistic Concurrency Control (OCC) Harness**:
   - **Elimination of Serialized Mocking**: Completely eliminated serialized `txChain` promises in `tests/unit/task35BDriverAuthorization.test.ts`.

@@ -28,6 +28,7 @@ import { resolveTrustedCanonicalIdentity } from "./src/server/identity.ts";
 import { executeCreateJobCommand, resolveCreateJobQuota } from "./src/server/createJobCommand.ts";
 import { executeQuoteCommand, executeAcceptQuoteCommand } from "./src/server/quoteCommands.ts";
 import { executeAcceptRideCommand } from "./src/server/driverAuthorization.ts";
+import { executeCreateTripPaymentCommand } from "./src/server/tripPaymentAuthorization.ts";
 import { executeJobLifecycleCommand } from "./src/server/jobLifecycleCommands.ts";
 import { 
   startPublicJobCardsSync, 
@@ -3139,186 +3140,39 @@ async function startServer() {
     }
   });
 
-  // Server-Authoritative Direct-to-Driver Taxi Payment (QR Handshake)
+  // Server-Authoritative Direct-to-Driver Taxi Payment (V8.3 Task 35-C Recipient Integrity)
   app.post("/api/rides/create-trip-payment", requireAuth, async (req, res) => {
     try {
-      const callerUid = (req as any).user.uid;
-      const { rideId, driverId, tipAmount = 0 } = req.body;
-      
       if (!db) {
         return res.status(503).json({ error: "Database backend unavailable" });
       }
-      
-      if (!driverId) return res.status(400).json({ error: "Driver ID is required" });
 
-      // Retrieve authoritative ride record from Firestore (either 'rides' or 'ride_requests')
-      let rideData: any = null;
-      let effectiveBaseFare = 0;
-
-      if (rideId && db) {
-        try {
-          const rideSnap = await db.collection("ride_requests").doc(rideId).get();
-          if (rideSnap.exists) {
-            rideData = rideSnap.data();
-          } else {
-            const legacySnap = await db.collection("rides").doc(rideId).get();
-            if (legacySnap.exists) {
-              rideData = legacySnap.data();
-            }
-          }
-        } catch (rideErr) {
-          console.warn("Could not query ride record from Firestore:", rideErr);
-        }
-      }
-
-      if (rideData) {
-        // Authorize caller
-        const isCallerAdmin = await checkIsAdmin((req as any).user);
-        const isParticipant =
-          callerUid === rideData?.driverId ||
-          callerUid === rideData?.assignedDriverId ||
-          callerUid === rideData?.passengerId ||
-          callerUid === rideData?.riderId ||
-          callerUid === driverId ||
-          isCallerAdmin;
-        
-        if (!isParticipant) {
-          return res.status(403).json({ error: "Forbidden: You are not authorized to process payment for this trip." });
-        }
-
-        // Server-authoritative base fare derivation from document
-        effectiveBaseFare = Number(
-          rideData?.finalFare || 
-          rideData?.fare || 
-          rideData?.estimatedFare || 
-          rideData?.totalFare || 
-          rideData?.price || 
-          0
-        );
-      } else {
-        // If no pre-existing ride document found, validate supplied base fare with security bounds
-        const rawFare = Number(req.body.baseFare);
-        if (!rawFare || isNaN(rawFare) || rawFare < 1.0) {
-          return res.status(400).json({ error: "Valid trip fare could not be resolved." });
-        }
-        effectiveBaseFare = rawFare;
-      }
-
-      // Sanitize tip amount
-      const sanitizedTip = Math.max(0, Math.min(500, Number(tipAmount) || 0));
-      const totalAmount = effectiveBaseFare + sanitizedTip;
-
-      if (totalAmount <= 0) {
-        return res.status(400).json({ error: "Trip amount must be greater than zero." });
-      }
-
-      console.log("Authoritative Trip Payment Resolution:", {
-        rideId,
-        driverId,
-        effectiveBaseFare,
-        sanitizedTip,
-        totalAmount,
-        callerUid
-      });
-
-      // 1. Get Driver's Stripe Account
-      let driverDoc;
-      try {
-        driverDoc = await db.collection("users").doc(driverId).get();
-      } catch (dbErr: any) {
-        return res.json({ url: `${process.env.APP_URL || ''}/payment-success?rideId=${rideId}` });
-      }
-      
-      if (!driverDoc.exists) {
-        console.warn(`Driver doc not found for ID: ${driverId}.`);
-        return res.status(404).json({ error: "Driver profile not found. Please ensure you are logged in as a registered driver." });
-      }
-
-      const driverData = driverDoc.data();
-      const stripeAccountId = driverData?.stripeAccountId;
-
-      // Fallback for local testing if Stripe is not configured
-      let stripe;
+      const caller = (req as any).user;
+      let stripe: Stripe | null = null;
       try {
         stripe = getStripe();
       } catch (e) {
-        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
+        if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCK_PAYMENTS !== "true") {
           console.error("Stripe is not configured in production. Refusing mock trip payment bypass.");
           return res.status(503).json({ error: "Trip payment processing is currently unavailable: Stripe gateway is unconfigured." });
         }
         console.warn("Stripe missing. Mocking Trip QR link for development testing.");
-        return res.json({ url: `${process.env.APP_URL || ''}/payment-success?rideId=${rideId}&fare=${effectiveBaseFare}&tip=${sanitizedTip}` });
       }
 
-      if (!stripeAccountId) {
-        return res.status(400).json({ error: "Driver has not completed Stripe onboarding." });
-      }
+      const appUrl = process.env.APP_URL || (req.headers.origin as string) || "http://localhost:3000";
 
-      // 2. Dynamic Platform Commission
-      let commissionRate = 0.12;
-      let fixedTripFee = 0;
-      try {
-        const configData = await getCachedConfig("rides");
-        if (configData) {
-          if (configData.commissionRate !== undefined) {
-            commissionRate = Number(configData.commissionRate);
-          }
-          if (configData.fixedTripFee !== undefined) {
-            fixedTripFee = Number(configData.fixedTripFee);
-          }
-        }
-      } catch (err) {
-        console.warn("Failed to fetch dynamic fare config for checkout:", err);
-      }
-      
-      const feeAmount = Math.round((effectiveBaseFare * commissionRate + fixedTripFee) * 100);
-      
-      let session;
-      try {
-        session = await stripe.checkout.sessions.create({
-          mode: 'payment',
-          payment_method_types: ['card'],
-          line_items: [{
-            price_data: {
-              currency: 'gbp',
-              product_data: {
-                name: `Trip Payment (Ride #${(rideId || 'DIRECT').substring(0, 8)})`,
-                description: `Direct transport payment (Base: £${effectiveBaseFare.toFixed(2)}, Tip: £${sanitizedTip.toFixed(2)})`
-              },
-              unit_amount: Math.round(totalAmount * 100),
-            },
-            quantity: 1,
-          }],
-          payment_intent_data: {
-            application_fee_amount: feeAmount,
-            transfer_data: {
-              destination: stripeAccountId,
-            },
-          },
-          metadata: {
-            rideId: rideId || '',
-            driverId,
-            baseFare: effectiveBaseFare.toString(),
-            tipAmount: sanitizedTip.toString(),
-            type: 'taxi_trip'
-          },
-          success_url: `${process.env.APP_URL || ''}/payment-success?rideId=${rideId}`,
-          cancel_url: `${process.env.APP_URL || ''}/payment-failed?rideId=${rideId}`,
-        });
-        res.json({ url: session.url });
-      } catch (stripeErr: any) {
-        console.warn("Stripe session creation failed:", stripeErr.message);
-        if (process.env.NODE_ENV === 'production') {
-          return res.status(502).json({ error: "Payment gateway error during session creation." });
-        }
-        res.json({ url: `${process.env.APP_URL || ''}/payment-success?rideId=${rideId}` });
-      }
+      const result = await executeCreateTripPaymentCommand({
+        db,
+        caller,
+        body: req.body || {},
+        stripeClient: stripe,
+        appUrl,
+      });
+
+      res.json({ url: result.url });
     } catch (error: any) {
       console.error("Trip Payment Creation Error:", error);
-      res.status(500).json({ 
-        error: error.message || "Failed to generate payment link",
-        debugCode: error.code 
-      });
+      sendHttpError(res, error, req);
     }
   });
   
