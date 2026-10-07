@@ -870,5 +870,182 @@ describe("Task 35-E / 35-E-R1: SSO Claim Integrity & Server-Authoritative Identi
         verifyProviderCredentialCryptographically("invalid_jwt", "google", mockAdminAuth)
       ).rejects.toThrow(UnauthorizedError);
     });
+
+    it("Test R4-A — Authoritative Provider ID extraction from token: sign_in_provider='google.com' derives 'google' without client input", async () => {
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async (token: string) => {
+          return {
+            sub: "firebase_user_999",
+            email: "verified@google.com",
+            email_verified: true,
+            firebase: {
+              sign_in_provider: "google.com",
+              identities: {
+                "google.com": ["google_federated_sub_12345"],
+              },
+            },
+          };
+        }),
+      };
+
+      // Call without specifying expectedProviderId
+      const claims = await verifyProviderCredentialCryptographically(
+        "real_google_jwt",
+        undefined,
+        mockAdminAuth
+      );
+
+      expect(claims.providerId).toBe("google");
+      expect(claims.sub).toBe("google_federated_sub_12345");
+      expect(claims.email).toBe("verified@google.com");
+      expect(claims.email_verified).toBe(true);
+    });
+
+    it("Test R4-B — Zero-client-input linking: Request with only providerCredential derives provider and links", async () => {
+      const caller = { uid: "user_alice", email: "alice@example.com" };
+
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async (token: string) => {
+          return {
+            sub: "alice_firebase_id",
+            email: "alice@example.com",
+            email_verified: true,
+            firebase: {
+              sign_in_provider: "apple.com",
+              identities: {
+                "apple.com": ["apple_sub_alice_777"],
+              },
+            },
+          };
+        }),
+      };
+
+      // Call executeAuthoritativeAccountLinking with NO providerInput
+      const result = await executeAuthoritativeAccountLinking({
+        db: mockDb,
+        caller,
+        providerCredential: "valid_apple_token",
+        adminAuthInstance: mockAdminAuth,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.providerId).toBe("apple");
+      expect(result.sub).toBe("apple_sub_alice_777");
+      expect(mockDb._store["users/user_alice"].providers.apple).toBe("apple_sub_alice_777");
+    });
+
+    it("Test R4-C — Conflicting client provider ID rejected: Token is Google but client claims Apple", async () => {
+      const caller = { uid: "user_alice", email: "alice@example.com" };
+
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async (token: string) => {
+          return {
+            sub: "google_user_sub",
+            email: "alice@example.com",
+            email_verified: true,
+            firebase: {
+              sign_in_provider: "google.com",
+            },
+          };
+        }),
+      };
+
+      // Client requests Apple with a Google token -> Must fail closed
+      await expect(
+        executeAuthoritativeAccountLinking({
+          db: mockDb,
+          caller,
+          providerCredential: "google_token",
+          providerInput: {
+            providerId: "apple", // Conflicts with token's google.com!
+          },
+          adminAuthInstance: mockAdminAuth,
+        })
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R4-D — Non-federated provider rejected: anonymous or password auth cannot link as SSO provider", async () => {
+      const mockAdminAuthAnon = {
+        verifyIdToken: vi.fn(async () => ({
+          sub: "anon_sub_123",
+          firebase: { sign_in_provider: "anonymous" },
+        })),
+      };
+
+      await expect(
+        verifyProviderCredentialCryptographically("anon_token", undefined, mockAdminAuthAnon)
+      ).rejects.toThrow(BadRequestError);
+
+      const mockAdminAuthPassword = {
+        verifyIdToken: vi.fn(async () => ({
+          sub: "pwd_sub_123",
+          firebase: { sign_in_provider: "password" },
+        })),
+      };
+
+      await expect(
+        verifyProviderCredentialCryptographically("pwd_token", undefined, mockAdminAuthPassword)
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R4-E — Conflicting client email_verified=true rejected when verified claims do not prove it", async () => {
+      const caller = { uid: "user_alice", email: "alice@example.com" };
+
+      await expect(
+        evaluateAccountLinkingEligibility(
+          mockDb,
+          caller,
+          {
+            providerId: "google",
+            sub: "google_sub_123",
+            email_verified: true, // Untrusted client claims true!
+          },
+          {
+            providerId: "google",
+            sub: "google_sub_123",
+            email: "alice@example.com",
+            email_verified: false, // Token claims prove false!
+          }
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it("Test R4-F — Transactional persistence: runTransaction used when available for atomic linking", async () => {
+      const caller = { uid: "user_alice", email: "alice@example.com" };
+      let transactionRun = false;
+
+      const transactionalDb = {
+        ...mockDb,
+        runTransaction: vi.fn(async (cb: (tx: any) => Promise<any>) => {
+          transactionRun = true;
+          const tx = {
+            get: vi.fn(async (ref: any) => ref.get()),
+            set: vi.fn(async (ref: any, data: any, opts: any) => ref.set(data, opts)),
+          };
+          return await cb(tx);
+        }),
+      };
+
+      const mockAdminAuth = {
+        verifyIdToken: vi.fn(async () => ({
+          sub: "tx_sub_123",
+          firebase: {
+            sign_in_provider: "github.com",
+          },
+        })),
+      };
+
+      const result = await executeAuthoritativeAccountLinking({
+        db: transactionalDb,
+        caller,
+        providerCredential: "valid_github_jwt",
+        adminAuthInstance: mockAdminAuth,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.providerId).toBe("github");
+      expect(transactionRun).toBe(true);
+      expect(transactionalDb.runTransaction).toHaveBeenCalled();
+    });
   });
 });

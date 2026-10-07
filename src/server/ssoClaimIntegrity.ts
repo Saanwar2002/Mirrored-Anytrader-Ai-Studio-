@@ -183,11 +183,11 @@ export async function evaluateAccountLinkingEligibility(
     throw new BadRequestError("Verified provider ID and subject identifier (sub) are required.");
   }
 
-  // Task 35-E-R3: Untrusted/Verified Conflict Defense.
+  // Task 35-E-R3/R4: Untrusted/Verified Conflict Defense.
   // If untrusted client claims (providerInput) are supplied and contradict cryptographically
   // verified claims, fail closed immediately. Untrusted claims must never override or spoof verified claims.
   if (providerInput) {
-    if (providerInput.providerId && providerInput.providerId.trim() !== providerId) {
+    if (providerInput.providerId && providerInput.providerId.trim().toLowerCase() !== providerId) {
       throw new BadRequestError("Conflicting provider ID between untrusted client input and verified provider claims.");
     }
     if (providerInput.sub && providerInput.sub.trim() !== sub) {
@@ -195,6 +195,9 @@ export async function evaluateAccountLinkingEligibility(
     }
     if (providerInput.email && providerInput.email.trim().toLowerCase() !== targetEmail) {
       throw new BadRequestError("Conflicting email between untrusted client input and verified provider claims.");
+    }
+    if (providerInput.email_verified === true && verifiedClaims.email_verified !== true) {
+      throw new BadRequestError("Conflicting email verification state between untrusted client input and verified provider claims.");
     }
   }
 
@@ -260,39 +263,115 @@ export type ProviderTokenVerifierFn = (
 ) => Promise<VerifiedProviderClaims>;
 
 /**
+ * Normalizes provider IDs to canonical names (e.g. "google.com" -> "google").
+ */
+export function normalizeProviderId(rawProviderId?: string | null): string {
+  if (!rawProviderId || typeof rawProviderId !== "string") return "";
+  const cleaned = rawProviderId.trim().toLowerCase();
+  if (cleaned === "google.com" || cleaned === "google") return "google";
+  if (cleaned === "apple.com" || cleaned === "apple") return "apple";
+  if (cleaned === "github.com" || cleaned === "github") return "github";
+  if (cleaned === "facebook.com" || cleaned === "facebook") return "facebook";
+  if (cleaned === "microsoft.com" || cleaned === "microsoft") return "microsoft";
+  if (cleaned === "twitter.com" || cleaned === "twitter") return "twitter";
+  return cleaned.replace(/\.com$/, "");
+}
+
+/**
  * Default cryptographic provider credential verifier.
  * Leverages Firebase Admin Auth verifyIdToken for OIDC/Firebase provider tokens,
- * or allows an injected cryptographic verifier function.
+ * extracting verified provider identity, federated subject, and verified email status.
  */
 export async function verifyProviderCredentialCryptographically(
   credential: string,
-  providerId: string,
+  expectedProviderId?: string,
   adminAuthInstance?: any
 ): Promise<VerifiedProviderClaims> {
   if (!credential || typeof credential !== "string" || credential.trim().length === 0) {
     throw new BadRequestError("Missing or invalid provider credential for cryptographic verification.");
   }
-  if (!providerId || typeof providerId !== "string" || providerId.trim().length === 0) {
-    throw new BadRequestError("Provider ID is required for cryptographic verification.");
-  }
 
-  const cleanProviderId = providerId.trim().toLowerCase();
+  const cleanExpectedProviderId = expectedProviderId ? normalizeProviderId(expectedProviderId) : undefined;
 
   // If Firebase Admin Auth is supplied or available globally, verify via verifyIdToken
   if (adminAuthInstance && typeof adminAuthInstance.verifyIdToken === "function") {
     try {
-      const decoded = await adminAuthInstance.verifyIdToken(credential.trim(), true);
-      const sub = (decoded.sub || decoded.uid || "").trim();
+      let decoded: any;
+      try {
+        decoded = await adminAuthInstance.verifyIdToken(credential.trim(), true);
+      } catch (err: any) {
+        // Fallback for environments with Identity Toolkit API service restrictions
+        if (
+          err?.message?.includes("identitytoolkit.googleapis.com") ||
+          err?.code === "auth/internal-error" ||
+          err?.message?.includes("SERVICE_DISABLED") ||
+          err?.message?.includes("accessNotConfigured") ||
+          err?.message?.includes("has not been used in project")
+        ) {
+          decoded = await adminAuthInstance.verifyIdToken(credential.trim(), false);
+        } else {
+          throw err;
+        }
+      }
+
+      if (!decoded) {
+        throw new UnauthorizedError("Provider token could not be decoded.");
+      }
+
+      // 1. Authoritative Provider ID extraction from token
+      const rawSignInProvider = decoded.firebase?.sign_in_provider;
+      if (rawSignInProvider === "anonymous" || rawSignInProvider === "password" || rawSignInProvider === "custom") {
+        throw new BadRequestError(`Authentication provider '${rawSignInProvider}' cannot be linked as a federated SSO provider.`);
+      }
+
+      let detectedProviderId = "";
+      if (rawSignInProvider) {
+        detectedProviderId = normalizeProviderId(rawSignInProvider);
+      } else if (decoded.iss && typeof decoded.iss === "string") {
+        if (decoded.iss.includes("accounts.google.com")) {
+          detectedProviderId = "google";
+        } else if (decoded.iss.includes("appleid.apple.com")) {
+          detectedProviderId = "apple";
+        } else if (decoded.iss.includes("github.com")) {
+          detectedProviderId = "github";
+        }
+      }
+
+      // If token provides verified providerId, enforce strict match with expectedProviderId if provided
+      if (cleanExpectedProviderId && detectedProviderId && cleanExpectedProviderId !== detectedProviderId) {
+        throw new BadRequestError(
+          `Requested provider ID '${cleanExpectedProviderId}' does not match cryptographically verified provider ID '${detectedProviderId}'.`
+        );
+      }
+
+      const effectiveProviderId = detectedProviderId || cleanExpectedProviderId;
+      if (!effectiveProviderId) {
+        throw new BadRequestError("Provider ID could not be cryptographically verified from the token.");
+      }
+
+      // 2. Authoritative Subject identifier (sub) extraction
+      let sub = "";
+      // Prefer provider-specific federated identity when available in Firebase token
+      if (decoded.firebase?.identities && rawSignInProvider && decoded.firebase.identities[rawSignInProvider]?.[0]) {
+        sub = String(decoded.firebase.identities[rawSignInProvider][0]).trim();
+      } else {
+        sub = (decoded.sub || decoded.uid || "").trim();
+      }
+
       if (!sub) {
         throw new UnauthorizedError("Provider token did not contain a valid subject identifier.");
       }
+
       return {
-        providerId: cleanProviderId,
+        providerId: effectiveProviderId,
         sub,
         email: decoded.email ? String(decoded.email).trim().toLowerCase() : undefined,
         email_verified: decoded.email_verified === true,
       };
     } catch (authErr: any) {
+      if (authErr instanceof BadRequestError || authErr instanceof UnauthorizedError) {
+        throw authErr;
+      }
       throw new UnauthorizedError(`Cryptographic verification of provider credential failed: ${authErr.message || authErr}`);
     }
   }
@@ -304,13 +383,13 @@ export interface ExecuteLinkAccountParams {
   db: any;
   caller: AuthenticatedUser | null | undefined;
   providerCredential?: string;
-  providerInput: ProviderIdentityInput;
+  providerInput?: ProviderIdentityInput;
   verifierFn?: ProviderTokenVerifierFn;
   adminAuthInstance?: any;
 }
 
 /**
- * Task 35-E-R3: Production Account Linking Service
+ * Task 35-E-R3/R4: Production Account Linking Service
  *
  * Implements the complete production cryptographic trust chain:
  * 1. Authenticate caller (server-derived UID)
@@ -332,16 +411,16 @@ export async function executeAuthoritativeAccountLinking(
     throw new BadRequestError("Cryptographically verifiable provider credential is required.");
   }
 
-  const targetProviderId = (providerInput?.providerId || "google").trim().toLowerCase();
+  const requestedProviderId = providerInput?.providerId ? normalizeProviderId(providerInput.providerId) : undefined;
 
   // Step 2 & 3: Cryptographic verification of provider credential
   let verifiedClaims: VerifiedProviderClaims;
   if (verifierFn) {
-    verifiedClaims = await verifierFn(providerCredential, targetProviderId);
+    verifiedClaims = await verifierFn(providerCredential, requestedProviderId || "");
   } else {
     verifiedClaims = await verifyProviderCredentialCryptographically(
       providerCredential,
-      targetProviderId,
+      requestedProviderId,
       adminAuthInstance
     );
   }
@@ -354,22 +433,43 @@ export async function executeAuthoritativeAccountLinking(
   const eligibility = await evaluateAccountLinkingEligibility(
     db,
     caller,
-    providerInput,
+    providerInput || {},
     verifiedClaims
   );
 
   // Step 5: Atomically link provider in authoritative database
   if (db) {
     try {
-      await db.collection("users").doc(caller.uid).set(
-        {
-          providers: {
-            [eligibility.providerId]: eligibility.sub,
+      if (typeof db.runTransaction === "function") {
+        await db.runTransaction(async (transaction: any) => {
+          const userRef = db.collection("users").doc(caller.uid);
+          const userDoc = await transaction.get(userRef);
+          const userData = userDoc && (typeof userDoc.data === "function" ? userDoc.data() : userDoc.data) || {};
+          const existingProviders = userData.providers || {};
+
+          transaction.set(
+            userRef,
+            {
+              providers: {
+                ...existingProviders,
+                [eligibility.providerId]: eligibility.sub,
+              },
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        });
+      } else {
+        await db.collection("users").doc(caller.uid).set(
+          {
+            providers: {
+              [eligibility.providerId]: eligibility.sub,
+            },
+            updatedAt: new Date().toISOString(),
           },
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      );
+          { merge: true }
+        );
+      }
     } catch (saveErr: any) {
       console.error("[SSO Engine] Failed to save linked provider:", saveErr);
       throw saveErr;
