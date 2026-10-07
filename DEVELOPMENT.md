@@ -1,5 +1,27 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Task 35-B-R2: Genuine Concurrent Ride-Claim Race Verification (October 7, 2026)
+- **1. Genuine Concurrency & Optimistic Concurrency Control (OCC) Harness**:
+  - **Elimination of Serialized Mocking**: Completely eliminated serialized `txChain` promises in `tests/unit/task35BDriverAuthorization.test.ts`.
+  - **Authentic OCC Transaction Engine**: Replaced with high-fidelity `createMockFirestore()` supporting document read-version tracking (`_version`), overlapping async reads, staged writes, and atomic commit-phase conflict detection with automatic OCC retries.
+  - **Genuine Simultaneous Execution**: Test I executes genuine simultaneous asynchronous claims via `Promise.allSettled`. Both transactions enter and overlap in their read phases before either commits. The first transaction commits atomically (`_version` 1 -> 2), and the second transaction detects a version conflict, retries against the freshly committed state, and throws `ConflictError`.
+- **2. Proved Concurrency Invariants in Test I**:
+  - **Contenders**: Exactly 2 legitimate drivers.
+  - **Outcomes**: Exactly 1 fulfilled claim, exactly 1 rejected claim (`ConflictError`).
+  - **Final State**: Final ride is assigned to the winner; loser cannot overwrite winner in `ride_requests` or `driver_status`.
+  - **Conflict & Retries**: `stats.totalAttempts >= 3` and `stats.totalConflicts >= 1` proved transaction contention and OCC retry were genuinely exercised.
+  - **Mock Warnings**: Zero domain event persistence warnings.
+- **3. Full Suite Regression Results**:
+  - **Task 35-B Security Test Suite**: **11/11 tests passing (100% success)**.
+  - **Task 33 Scale Resilience Suite**: **20/20 tests passing** (`tests/unit/task33ScaleResilience.test.ts`).
+  - **Complete Platform Unit Suite (`npm test`)**: **908/908 tests passing** across **55 test files** (100% clean).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Successfully built and verified.
+- **4. Status & Next Step**:
+  - **Task 35-A**: **VERIFIED & CLOSED**.
+  - **Task 35-B / 35-B-R1 / 35-B-R2**: **VERIFIED & CLOSED — 100% PASS**.
+  - **Task 35-C**: **NOT STARTED — PENDING INDEPENDENT VERIFICATION**.
+
 ## 🛡️ AnyTrader — Task 35-B-R1: Driver Authorization Remediation & Test Harness Hardening (October 7, 2026)
 - **1. Removed Admin Driver Bypass & Undocumented Heuristics**:
   - **Admin Driver Bypass Removal**: Removed `isAdmin === true` early-return in `assertAuthoritativeDriverEligibility`. Platform administrators must now possess a valid, server-authoritative driver record in `users/{callerUid}` to operate or accept rides as drivers.
