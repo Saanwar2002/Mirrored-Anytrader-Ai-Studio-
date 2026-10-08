@@ -620,7 +620,11 @@ service cloud.firestore {
       allow update: if isAdmin() || (
         isSignedIn() && 
         resource.data.get('status', '') == 'active' && 
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clicks', 'leads'])
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clicks', 'leads']) &&
+        (
+          (!request.resource.data.keys().hasAll(['clicks']) || request.resource.data.clicks == resource.data.get('clicks', 0) + 1) &&
+          (!request.resource.data.keys().hasAll(['leads']) || request.resource.data.leads == resource.data.get('leads', 0) + 1)
+        )
       );
     }
 
@@ -1227,7 +1231,10 @@ service cloud.firestore {
       );
       allow update: if isSignedIn() && (
         resource.data.traderId == request.auth.uid || 
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['claimedCount', 'status', 'updatedAt']) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['claimedCount', 'status', 'updatedAt']) &&
+          request.resource.data.claimedCount == resource.data.get('claimedCount', 0) + 1
+        ) ||
         isAdmin()
       );
       allow delete: if isSignedIn() && (

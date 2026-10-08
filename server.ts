@@ -1548,14 +1548,14 @@ async function startServer() {
     // 2. Comprehensive Content-Security-Policy (CSP)
     const csp = [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://apis.google.com https://*.googleapis.com https://js.stripe.com https://maps.googleapis.com https://*.firebaseapp.com",
+      "script-src 'self' 'unsafe-inline' https://apis.google.com https://*.googleapis.com https://js.stripe.com https://maps.googleapis.com https://*.firebaseapp.com",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' data: https://fonts.gstatic.com",
       "img-src 'self' data: blob: https:",
       "media-src 'self' data: blob: https:",
-      "connect-src 'self' https://*.googleapis.com https://*.google.com https://*.firebaseio.com https://api.stripe.com https://*.cloudfunctions.net https://*.run.app wss://*.firebaseio.com https://api.postcodes.io",
+      "connect-src 'self' https://*.googleapis.com https://*.google.com https://*.firebaseio.com https://api.stripe.com https://*.cloudfunctions.net https://ais-dev-vumupz44ljjitc6rsqobbz-437256678397.europe-west2.run.app https://ais-pre-vumupz44ljjitc6rsqobbz-437256678397.europe-west2.run.app wss://*.firebaseio.com https://api.postcodes.io",
       "frame-src 'self' https://js.stripe.com https://accounts.google.com https://*.firebaseapp.com https://*.google.com",
-      "frame-ancestors 'self' https://*.run.app https://*.google.com https://ai.studio https://studio.google.com",
+      "frame-ancestors 'self' https://ais-dev-vumupz44ljjitc6rsqobbz-437256678397.europe-west2.run.app https://ais-pre-vumupz44ljjitc6rsqobbz-437256678397.europe-west2.run.app https://*.google.com https://ai.studio https://studio.google.com",
       "object-src 'none'",
       "base-uri 'self'",
     ].join('; ');
@@ -4552,7 +4552,7 @@ async function startServer() {
   // Postcode lookup proxy cache
   const postcodeCache = new Map<string, { data: any; expiresAt: number }>();
 
-  // Postcode lookup proxy with rate limiting and strict alphanumeric format validation
+  // Postcode lookup proxy with rate limiting, strict alphanumeric format validation, 5s fetch timeout, and conditional caching
   app.get("/api/postcode/:postcode", postcodeLimiter, async (req, res) => {
     try {
       const rawPostcode = req.params.postcode || "";
@@ -4569,9 +4569,22 @@ async function startServer() {
       }
 
       const encoded = encodeURIComponent(formattedPostcode);
-      const response = await fetch(`https://api.postcodes.io/postcodes/${encoded}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+      let response: Response;
+      try {
+        response = await fetch(`https://api.postcodes.io/postcodes/${encoded}`, {
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
       const data = await response.json();
-      
+      const isSuccess = response.ok && data && (data.status === 200 || data.result);
+      const isNotFound = response.status === 404 || (data && data.status === 404);
+
       // Prevent memory leaks - enforce a safe 1000-entry peak limit
       if (postcodeCache.size >= 1000) {
         let deleted = false;
@@ -4592,13 +4605,20 @@ async function startServer() {
         }
       }
 
-      postcodeCache.set(formattedPostcode, {
-        data,
-        expiresAt: Date.now() + 24 * 60 * 60 * 1000
-      });
+      // Cache successful responses for 24h, 404s for 5m, and do not cache errors/server failures
+      const cacheDuration = isSuccess ? 24 * 60 * 60 * 1000 : (isNotFound ? 5 * 60 * 1000 : 0);
+      if (cacheDuration > 0) {
+        postcodeCache.set(formattedPostcode, {
+          data,
+          expiresAt: Date.now() + cacheDuration
+        });
+      }
 
-      res.json(data);
-    } catch (error) {
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        return res.status(504).json({ error: "Postcode lookup timed out" });
+      }
       res.status(500).json({ error: "Failed to lookup postcode" });
     }
   });

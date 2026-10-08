@@ -5801,4 +5801,9 @@ The prefix is determined by the user's primary registration role:
   - **Firestore Rules Hardening**: Closed direct client `/jobs` creation (`allow create: if false;`), ensuring all job creations occur via the server command with verified Firebase Auth tokens.
   - **Client Bypass Remediation**: Migrated all client job creation call sites (`PostJobWizard.tsx`, `EmergencyJobWizard.tsx`, `MyJobs.tsx`, `JobDetails.tsx`, `PropertyPassportModal.tsx`, `Portfolio.tsx`, `bomMerchantService.ts`, `recurringJobs.ts`) to `createJobViaCommand()`. Source scan verified 0 direct client `/jobs` creation calls remaining.
   - **Verification**: 47/47 unit test files passing (763/763 tests), `tsc --noEmit` clean, production build clean, release audit passed with 0 critical errors.
+- 2026-10-08: AnyTrader Platform Security Hardening & Vulnerability Remediation (`server.ts`, `firestore.rules`).
+  - **CSP Hardening (`server.ts`)**: Removed `unsafe-eval` from `script-src` and eliminated broad `*.run.app` wildcards in `connect-src` and `frame-ancestors`, replacing them with explicit application deployment origins.
+  - **Postcode Proxy Hardening (`server.ts`)**: Added 5-second `AbortController` timeout and conditional response caching (24h for success, 5m for 404, 0s for errors/5xx) preventing hanging requests and error caching.
+  - **Counters & Flash-Deals / Campaigns Firestore Rules (`firestore.rules`)**: Restricted client updates on `flash_deals` and `campaigns` counters (`claimedCount`, `clicks`, `leads`) to strict `+1` increment delta rules, preventing arbitrary value inflation or mass-assignment.
+  - **Verification**: `tsc --noEmit` clean, `npm run lint` clean, `compile_applet` succeeded successfully.
 
