@@ -15,7 +15,7 @@ import twilio from 'twilio';
 import rateLimit from "express-rate-limit";
 import { startInstantMatchEngine } from "./instantMatchWorker.ts";
 import * as geminiServer from "./src/services/geminiServer.ts";
-import { sendHttpError, BadRequestError, UnauthorizedError, ForbiddenError, NotFoundError, ConflictError } from "./src/server/httpErrors.ts";
+import { sendHttpError, BadRequestError, UnauthorizedError, ForbiddenError, NotFoundError, ConflictError, InternalServerError } from "./src/server/httpErrors.ts";
 import { runProductionChecks } from "./src/server/productionChecks.ts";
 import { validateJobTransition, validateMilestoneTransition, validateRideTransition, validateQuoteTransition, JobStatus } from "./src/server/stateMachine.ts";
 import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
@@ -94,6 +94,7 @@ import {
   DataRetentionSecurityError,
   DataRetentionValidationError,
 } from "./src/server/intelligence/index.ts";
+import { executeDriverPayoutOrchestrationCommand } from "./src/server/driverPayoutOrchestration.ts";
 import {
   runBootstrapSequence,
   verifyFirestoreReadiness,
@@ -732,102 +733,18 @@ async function processSmsQueue() {
 // Scheduled task: Background Orchestration for Automated Driver Payouts
 async function runDriverPayoutOrchestration() {
   if (!db) return { success: false, error: "Firebase not initialized" };
-  console.log("Running automated Stripe payout orchestration for drivers...");
-  
-  let processedCount = 0;
-  let totalDisbursed = 0;
-
+  let stripe: any = null;
   try {
-    const ridesSnapshot = await db.collection("ride_requests")
-      .where("status", "==", "completed")
-      .where("paymentStatus", "==", "paid")
-      .where("payoutTransferred", "==", false)
-      .get();
-      
-    if (ridesSnapshot.empty) {
-      console.log("No pending automated payouts found.");
-      return { success: true, processedCount, totalDisbursed };
-    }
-
-    let stripe;
-    try {
-      stripe = getStripe();
-    } catch(e) {
-      console.warn("Stripe missing in orchestrator. Skipping actual transfers.");
-    }
-
-    for (const rideDoc of ridesSnapshot.docs) {
-      const ride = rideDoc.data();
-      const { assignedDriverId, finalFare = 0, fareEstimate = 0, tipAmount = 0 } = ride;
-      
-      const baseFare = finalFare || fareEstimate;
-      if (baseFare <= 0 && tipAmount <= 0) continue;
-
-      if (!assignedDriverId) continue;
-      
-      const driverDoc = await db.collection("users").doc(assignedDriverId).get();
-      if (!driverDoc.exists) continue;
-      
-      const stripeAccountId = driverDoc.data()?.stripeAccountId;
-      if (!stripeAccountId) {
-        console.warn(`Driver ${assignedDriverId} has no connected Stripe account. Skipping transfer for ride ${rideDoc.id}.`);
-        continue;
-      }
-
-      // Calculate 88% of base fare + 100% of tip
-      const driverEarnings = (baseFare * 0.88) + tipAmount;
-      const transferAmountPence = Math.round(driverEarnings * 100);
-
-      try {
-        if (!db) continue;
-        await db.runTransaction(async (t) => {
-           const rSnap = await t.get(rideDoc.ref);
-           if (rSnap.data()?.payoutTransferred) throw new Error("Already paid");
-           t.update(rideDoc.ref, {
-              payoutTransferred: true, 
-              payoutTransferredAt: admin.firestore.FieldValue.serverTimestamp()
-           });
-        });
-
-        if (stripe) {
-          // Perform transfer
-          const transfer = await stripe.transfers.create({
-            amount: transferAmountPence,
-            currency: "gbp",
-            destination: stripeAccountId,
-            metadata: {
-              rideId: rideDoc.id,
-              type: "orchestrated_driver_payout"
-            }
-          });
-          
-          await rideDoc.ref.update({
-             stripeTransferId: transfer.id
-          });
-        } else {
-          // Mock transfer
-          await rideDoc.ref.update({
-            stripeTransferId: "mock_transfer_" + rideDoc.id
-          });
-        }
-        
-        processedCount++;
-        totalDisbursed += driverEarnings;
-        console.log(`Disbursed £${driverEarnings.toFixed(2)} to driver ${assignedDriverId} for ride ${rideDoc.id}.`);
-      } catch (transferErr: any) {
-         console.error(`Transfer failed for ride ${rideDoc.id}:`, transferErr.message);
-      }
-    }
-
-    console.log(`Automated payout orchestration complete. Processed ${processedCount} payouts totaling £${totalDisbursed.toFixed(2)}.`);
-    return { success: true, processedCount, totalDisbursed };
-  } catch (error: any) {
-    const msg = error?.message || String(error);
-    if (!msg.includes("PERMISSION_DENIED") && !msg.includes("UNAUTHENTICATED") && !msg.includes("Could not load the default credentials")) {
-      console.error("Orchestration error:", error.message);
-    }
-    return { success: false, error: error.message };
+    stripe = getStripe();
+  } catch (e) {
+    console.warn("Stripe missing in orchestrator. Running in mock/verification mode.");
   }
+
+  return await executeDriverPayoutOrchestrationCommand({
+    db,
+    stripeClient: stripe,
+    logger: console,
+  });
 }
 
 // Scheduled task: Consultancy Recurring Session Creator
@@ -1380,9 +1297,10 @@ async function verifyTokenSafely(token: string) {
       }
 
       // 2. Database verification: ensure account is not suspended, banned, disabled, or revoked in Firestore
-      if (db) {
+      const targetDb = db || (admin.apps.length > 0 ? admin.firestore() : null);
+      if (targetDb) {
         try {
-          const userDoc = await db.collection("users").doc(decodedToken.uid).get();
+          const userDoc = await targetDb.collection("users").doc(decodedToken.uid).get();
           if (userDoc.exists) {
             const userData = userDoc.data() || {};
             if (
@@ -1408,15 +1326,7 @@ async function verifyTokenSafely(token: string) {
           if (dbErr instanceof UnauthorizedError) {
             throw dbErr;
           }
-          const msg = dbErr?.message || String(dbErr);
-          if (
-            !msg.includes("PERMISSION_DENIED") &&
-            !msg.includes("UNAUTHENTICATED") &&
-            !msg.includes("Could not load the default credentials") &&
-            dbErr?.code !== 7
-          ) {
-            console.warn("[Auth Fallback Warning] Database user status check failed:", msg);
-          }
+          console.warn("[Auth Fallback Warning] Database user status check encountered issue:", dbErr?.message || dbErr);
         }
       }
 
@@ -1735,6 +1645,7 @@ async function startServer() {
 
   // Stripe Webhook MUST come before express.json()
   app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    let event: Stripe.Event | undefined;
     try {
       let stripeClient;
       try {
@@ -1747,8 +1658,6 @@ async function startServer() {
 
       const sig = req.headers['stripe-signature'];
       const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-      
-      let event;
 
       if (!webhookSecret || !sig) {
         console.error("Stripe Webhook rejected: missing STRIPE_WEBHOOK_SECRET or stripe-signature header");
@@ -1803,7 +1712,13 @@ async function startServer() {
 
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object as Stripe.Checkout.Session;
-          const userId = session.client_reference_id;
+        if (session.payment_status !== 'paid') {
+          console.warn(`[Webhook Warning] Checkout session ${session.id} completed with payment_status '${session.payment_status}'. Skipping fulfillment until paid.`);
+          await eventRef.update({ status: 'completed', skippedReason: 'payment_not_paid' });
+          return res.status(200).json({ received: true, status: 'skipped_unpaid' });
+        }
+
+        const userId = session.client_reference_id;
           
           let meta = session.metadata || {};
           if (session.metadata?.intentId && db) {
@@ -2000,11 +1915,17 @@ async function startServer() {
               const driverId = meta.driverId;
               const amount = session.amount_total ? session.amount_total / 100 : 0;
               
-              // Clear the driver's pending platform fees safely
-              await db.collection("users").doc(driverId).update({
-                pendingPlatformFees: 0 // Assume it settles the full accumulated amount for now
-              });
-              console.log(`Driver ${driverId} settled £${amount} in platform fees`);
+              if (driverId && amount > 0) {
+                const driverRef = db.collection("users").doc(driverId);
+                const driverDoc = await driverRef.get();
+                const currentPending = Number(driverDoc.data()?.pendingPlatformFees || 0);
+                const newPending = Math.max(0, Number((currentPending - amount).toFixed(2)));
+                await driverRef.update({
+                  pendingPlatformFees: newPending,
+                  lastFeeSettlementAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                console.log(`Driver ${driverId} settled £${amount} in platform fees (remaining pending: £${newPending})`);
+              }
             } else if (meta?.type === 'taxi_trip' && meta?.rideId && db) {
               const rideId = meta.rideId;
               const driverId = meta.driverId;
@@ -2135,6 +2056,54 @@ async function startServer() {
              });
            }
          }
+      } else if (event.type === 'charge.refunded') {
+         const charge = event.data.object as Stripe.Charge;
+         if (db && charge.payment_intent) {
+           console.log(`[Webhook] Processing refund for payment_intent ${charge.payment_intent}`);
+           await db.collection("refund_events").doc(`ref_${event.id}`).set({
+             chargeId: charge.id,
+             paymentIntentId: charge.payment_intent,
+             amountRefunded: charge.amount_refunded,
+             currency: charge.currency,
+             status: "refunded",
+             createdAt: admin.firestore.FieldValue.serverTimestamp()
+           }, { merge: true });
+         }
+      } else if (event.type === 'payment_intent.payment_failed') {
+         const pi = event.data.object as Stripe.PaymentIntent;
+         if (db && pi.id) {
+           console.warn(`[Webhook] PaymentIntent ${pi.id} failed: ${pi.last_payment_error?.message || "Unknown error"}`);
+           await db.collection("failed_payments").doc(`fail_${event.id}`).set({
+             paymentIntentId: pi.id,
+             lastError: pi.last_payment_error?.message || "Failed",
+             status: "failed",
+             createdAt: admin.firestore.FieldValue.serverTimestamp()
+           }, { merge: true });
+         }
+      } else if (event.type === 'checkout.session.expired') {
+         const expiredSession = event.data.object as Stripe.Checkout.Session;
+         if (db && expiredSession.id) {
+           console.log(`[Webhook] Checkout session ${expiredSession.id} expired.`);
+           await db.collection("expired_checkout_sessions").doc(`exp_${event.id}`).set({
+             sessionId: expiredSession.id,
+             clientReferenceId: expiredSession.client_reference_id || null,
+             status: "expired",
+             createdAt: admin.firestore.FieldValue.serverTimestamp()
+           }, { merge: true });
+         }
+      } else if (event.type === 'charge.dispute.created') {
+         const dispute = event.data.object as Stripe.Dispute;
+         if (db && dispute.id) {
+           console.warn(`[Webhook Alert] Charge dispute created: ${dispute.id} for charge ${dispute.charge}`);
+           await db.collection("dispute_events").doc(`disp_${event.id}`).set({
+             disputeId: dispute.id,
+             chargeId: dispute.charge,
+             amount: dispute.amount,
+             reason: dispute.reason,
+             status: dispute.status,
+             createdAt: admin.firestore.FieldValue.serverTimestamp()
+           }, { merge: true });
+         }
       }
       
       // Mark as completed idempotently
@@ -2142,17 +2111,27 @@ async function startServer() {
       res.status(200).json({ received: true });
     } catch (err: any) {
       console.error("Webhook processing error:", err.message);
-      // Mark as failed so it can be retried or debugged
       if (db) {
-        await db.collection("processed_stripe_events").doc(req.body.id || 'unknown').update({ 
-           status: 'failed',
-           error: err.message
-        }).catch(e => console.error("Could not update failed status", e));
+        let rawEventId = event?.id;
+        if (!rawEventId && req.body && Buffer.isBuffer(req.body)) {
+          try {
+            const parsed = JSON.parse(req.body.toString('utf8'));
+            rawEventId = parsed.id;
+          } catch (_) {}
+        }
+        if (rawEventId) {
+          await db.collection("processed_stripe_events").doc(rawEventId).set({ 
+             status: 'failed',
+             error: err.message,
+             failedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true }).catch(e => console.error("Could not update failed status", e));
+        }
       }
       res.status(500).json({ error: 'Webhook processing failed' });
     }
   });
 
+  app.use("/api/gemini/call", express.json({ limit: "10mb" }));
   app.use(express.json({ limit: "1mb" }));
 
   // API Routes
@@ -3418,7 +3397,11 @@ async function startServer() {
       try {
         stripe = getStripe();
       } catch (e) {
-        // Fallback for dev / mock testing
+        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
+          console.error("Stripe is not configured in production/live environment. Refusing mock Connect onboarding bypass.");
+          return res.status(503).json({ error: "Stripe Connect onboarding is currently unavailable: Stripe gateway is unconfigured." });
+        }
+        // Fallback for dev / mock testing ONLY when ALLOW_MOCK_PAYMENTS === "true"
         const mockAccountId = userData.stripeAccountId || `acct_mock_${authUid.substring(0, 12)}`;
         await db.collection("users").doc(authUid).set({
           stripeAccountId: mockAccountId,
@@ -3481,21 +3464,30 @@ async function startServer() {
   app.get("/api/stripe/account-status", requireAuth, async (req, res) => {
     try {
       const authUid = (req as any).user.uid;
-      if (!db) return res.json({ connected: false, payoutsEnabled: false, chargesEnabled: false });
+      if (!db) return res.json({ connected: false, payoutsEnabled: false, chargesEnabled: false, detailsSubmitted: false });
 
       const userDoc = await db.collection("users").doc(authUid).get();
-      if (!userDoc.exists) return res.json({ connected: false, payoutsEnabled: false, chargesEnabled: false });
+      if (!userDoc.exists) return res.json({ connected: false, payoutsEnabled: false, chargesEnabled: false, detailsSubmitted: false });
       const userData = userDoc.data() || {};
       const accountId = userData.stripeAccountId;
 
       if (!accountId) {
-        return res.json({ connected: false, payoutsEnabled: false, chargesEnabled: false });
+        return res.json({ connected: false, payoutsEnabled: false, chargesEnabled: false, detailsSubmitted: false });
       }
 
-      let stripe;
-      try {
-        stripe = getStripe();
-      } catch (e) {
+      const isMockDisallowed = process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true';
+
+      if (accountId.startsWith("acct_mock_")) {
+        if (isMockDisallowed) {
+          return res.json({
+            connected: false,
+            stripeAccountId: accountId,
+            payoutsEnabled: false,
+            chargesEnabled: false,
+            detailsSubmitted: false,
+            error: "Mock Stripe account is invalid in live environments."
+          });
+        }
         return res.json({
           connected: true,
           mock: true,
@@ -3506,7 +3498,19 @@ async function startServer() {
         });
       }
 
-      if (accountId.startsWith("acct_mock_")) {
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        if (isMockDisallowed) {
+          return res.status(503).json({
+            connected: false,
+            payoutsEnabled: false,
+            chargesEnabled: false,
+            detailsSubmitted: false,
+            error: "Stripe service is unavailable: Gateway is unconfigured."
+          });
+        }
         return res.json({
           connected: true,
           mock: true,
@@ -3558,15 +3562,23 @@ async function startServer() {
         throw new BadRequestError("No connected Stripe account found for this user");
       }
 
-      let stripe;
-      try {
-        stripe = getStripe();
-      } catch (e) {
+      const isMockDisallowed = process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true';
+
+      if (accountId.startsWith("acct_mock_")) {
+        if (isMockDisallowed) {
+          return res.status(400).json({ error: "Mock Stripe accounts do not have an Express Dashboard in live environments." });
+        }
         const appUrl = getAuthoritativeAppUrl();
         return res.json({ url: `${appUrl}/billing?dashboard=mock_express` });
       }
 
-      if (accountId.startsWith("acct_mock_")) {
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        if (isMockDisallowed) {
+          return res.status(503).json({ error: "Stripe service is unavailable: Gateway is unconfigured." });
+        }
         const appUrl = getAuthoritativeAppUrl();
         return res.json({ url: `${appUrl}/billing?dashboard=mock_express` });
       }
@@ -3583,7 +3595,7 @@ async function startServer() {
   app.get("/api/stripe/balance", requireAuth, async (req, res) => {
     try {
       const authUid = (req as any).user.uid;
-      if (!db) return res.json({ available: 0, pending: 0, currency: 'gbp', mock: true });
+      if (!db) return res.status(503).json({ error: "Database backend unavailable" });
 
       const userDoc = await db.collection("users").doc(authUid).get();
       if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
@@ -3591,15 +3603,23 @@ async function startServer() {
       const stripeAccountId = userDoc.data()?.stripeAccountId;
       if (!stripeAccountId) return res.status(400).json({ error: "No Stripe account connected" });
 
+      const isMockDisallowed = process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true';
+
+      if (stripeAccountId.startsWith("acct_mock_")) {
+        if (isMockDisallowed) {
+          return res.status(400).json({ error: "Mock Stripe accounts are not supported in live environments." });
+        }
+        return res.json({ available: 150.00, pending: 45.00, currency: 'gbp', mock: true });
+      }
+
       let stripe;
       try {
         stripe = getStripe();
       } catch (e) {
+        if (isMockDisallowed) {
+          return res.status(503).json({ error: "Stripe service is unavailable: Gateway is unconfigured." });
+        }
         return res.json({ available: 0, pending: 0, currency: 'gbp', mock: true });
-      }
-
-      if (stripeAccountId.startsWith("acct_mock_")) {
-        return res.json({ available: 150.00, pending: 45.00, currency: 'gbp', mock: true });
       }
 
       const balance = await stripe.balance.retrieve({
@@ -3633,14 +3653,22 @@ async function startServer() {
       const stripeAccountId = userDoc.data()?.stripeAccountId;
       if (!stripeAccountId) throw new BadRequestError("No Stripe account connected");
 
+      const isMockDisallowed = process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true';
+
+      if (stripeAccountId.startsWith("acct_mock_")) {
+        if (isMockDisallowed) {
+          return res.status(400).json({ error: "Payouts cannot be requested for mock Stripe accounts in live environments." });
+        }
+        return res.json({ success: true, mock: true, payout: { id: `po_mock_${Date.now()}`, amount: (amount || 50) * 100 } });
+      }
+
       let stripe;
       try {
         stripe = getStripe();
       } catch (e) {
-        return res.json({ success: true, mock: true, payout: { id: `po_mock_${Date.now()}`, amount: (amount || 50) * 100 } });
-      }
-
-      if (stripeAccountId.startsWith("acct_mock_")) {
+        if (isMockDisallowed) {
+          return res.status(503).json({ error: "Stripe payout service is unavailable: Gateway is unconfigured." });
+        }
         return res.json({ success: true, mock: true, payout: { id: `po_mock_${Date.now()}`, amount: (amount || 50) * 100 } });
       }
 
@@ -3810,6 +3838,7 @@ async function startServer() {
   app.post("/api/release-milestone", requireAuth, async (req, res) => {
     try {
       const { jobId, quoteId, milestoneId, isQrHandshake } = req.body;
+      const handshakeCode = req.body.handshakeCode || req.body.pin || req.body.verificationPin;
       const authUser = (req as any).user;
       const authUid = authUser.uid;
       if (!db) throw new BadRequestError("Database not initialized");
@@ -3825,6 +3854,16 @@ async function startServer() {
         throw new BadRequestError("A stable, non-empty Idempotency-Key is required for payment operations (minimum 8 characters)");
       }
 
+      // Check Stripe integration readiness
+      let stripeClient = null;
+      try {
+        stripeClient = getStripe();
+      } catch (e) {}
+
+      if (process.env.NODE_ENV === "production" && !stripeClient) {
+        throw new InternalServerError("Stripe integration unavailable for escrow transfer");
+      }
+
       // Delegate to canonical authority
       const result = await PaymentLedgerEngine.releaseEscrowFunds(firestoreDb, {
         jobId,
@@ -3833,15 +3872,11 @@ async function startServer() {
         authUid,
         idempotencyKey,
         isQrHandshake: Boolean(isQrHandshake),
+        handshakeCode: typeof handshakeCode === "string" ? handshakeCode : undefined,
         isAdmin: await checkIsAdmin(authUser)
       });
 
-      // Handle Stripe side-effects strictly AFTER database state is committed transactionally
-      let stripeClient = null;
-      try {
-        stripeClient = getStripe();
-      } catch (e) {}
-
+      // Execute Stripe side-effects
       const stripeTransferResult = await PaymentLedgerEngine.executeStripeEscrowTransfer(
         firestoreDb,
         {
@@ -3858,6 +3893,53 @@ async function startServer() {
         },
         { stripe: stripeClient }
       );
+
+      // Curing premature release marking:
+      // If Stripe transfer failed, roll back the milestone status so it does not remain marked as released!
+      if (stripeTransferResult.transferStatus === "failed") {
+        await firestoreDb.runTransaction(async (tx: any) => {
+          const qRef = firestoreDb.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+          const qSnap = await tx.get(qRef);
+          if (qSnap.exists) {
+            const qData = qSnap.data();
+            const milestones = (qData?.milestones || []).map((m: any) => {
+              if (m.id === (result.milestoneId || milestoneId)) {
+                return {
+                  ...m,
+                  status: "funded", // Revert back to funded!
+                  releaseStatus: "failed",
+                  lastTransferError: stripeTransferResult.error,
+                  releaseOperationId: null, // Clear operation ID so it can be retried safely!
+                };
+              }
+              return m;
+            });
+            tx.update(qRef, { milestones });
+          }
+          const jRef = firestoreDb.collection("jobs").doc(jobId);
+          tx.update(jRef, { paymentStatus: "funded", isPaid: false });
+        });
+
+        // Also update ledger
+        const ledgerSnap = await firestoreDb
+          .collection("payment_ledger")
+          .where("idempotencyKey", "==", idempotencyKey)
+          .get();
+        if (!ledgerSnap.empty) {
+          await ledgerSnap.docs[0].ref.update({
+            status: "failed",
+            transferStatus: "failed",
+            transferError: stripeTransferResult.error,
+          });
+        }
+
+        return res.status(502).json({
+          success: false,
+          error: `Stripe escrow transfer failed: ${stripeTransferResult.error}. Milestone remains funded and can be retried.`,
+          stripeTransferStatus: "failed",
+          stripeError: stripeTransferResult.error,
+        });
+      }
 
       // Notify Trader (outside transaction) with status-aware notification messaging
       if (result.traderId) {
@@ -4820,6 +4902,15 @@ Limit your response to just the text of the tip. Do not use quotes.`;
     runServerAutonomousAgentTask: geminiServer.runServerAutonomousAgentTask,
   };
 
+  const ADMIN_ONLY_GEMINI_FUNCTIONS = new Set([
+    "getPlatformHealthInsights",
+    "analyzeSecurityThreat",
+    "getMonetizationOpportunities",
+    "runServerPlatformMisuseDeepScan",
+    "runServerAutonomousAgentTask",
+    "suggestNewCategories"
+  ]);
+
   // Secure Gemini API Service Call Proxy
   app.post("/api/gemini/call", express.json({ limit: "10mb" }), requireAuth, aiLimiter, async (req, res) => {
     try {
@@ -4833,6 +4924,11 @@ Limit your response to just the text of the tip. Do not use quotes.`;
       if (!targetFunc || typeof targetFunc !== "function") {
         console.warn(`[Gemini RPC Blocked] Function '${functionName}' is not in the explicit allowlist.`);
         return res.status(403).json({ error: `Function '${functionName}' is not permitted or does not exist` });
+      }
+
+      if (ADMIN_ONLY_GEMINI_FUNCTIONS.has(functionName) && !(req as any).user?.isAdmin) {
+        console.warn(`[Gemini RPC Blocked] Admin function '${functionName}' invoked by non-admin user '${(req as any).user?.uid}'`);
+        return res.status(403).json({ error: `Function '${functionName}' requires administrator privileges` });
       }
 
       const result = await targetFunc(...(args || []));
@@ -4862,6 +4958,11 @@ Limit your response to just the text of the tip. Do not use quotes.`;
           res.write(`data: ${JSON.stringify(event)}\n\n`);
         }
       } else if (task === "streamDiagnostic") {
+        if (!(req as any).user?.isAdmin) {
+          res.write(`data: ${JSON.stringify({ type: "error", error: "streamDiagnostic requires administrator privileges" })}\n\n`);
+          res.write("data: [DONE]\n\n");
+          return res.end();
+        }
         const [prompt, systemInstruction] = args || [];
         const generator = geminiServer.streamGeminiDiagnostic(prompt, systemInstruction);
         for await (const event of generator) {

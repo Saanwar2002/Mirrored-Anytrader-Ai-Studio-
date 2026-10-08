@@ -8,14 +8,34 @@ export default function GuestJobs({ jobs, users, showToast }: { jobs: any[], use
     return !homeowner || homeowner.isAnonymous || !homeowner.email;
   });
 
+  const isJobDeletable = (job: any) => Boolean(
+    job &&
+    !job.funded &&
+    !job.isPaid &&
+    (!job.escrowBalance || Number(job.escrowBalance) === 0) &&
+    (!job.amountPaid || Number(job.amountPaid) === 0) &&
+    (!job.escrowStatus || ["none", "unfunded"].includes(String(job.escrowStatus).toLowerCase())) &&
+    !job.acceptedTradespersonId &&
+    !job.acceptedTraderId &&
+    !job.assignedTraderId &&
+    !job.tradespersonId &&
+    !job.traderId &&
+    !job.acceptedQuoteId &&
+    (!job.disputeStatus || ["none", ""].includes(String(job.disputeStatus).toLowerCase())) &&
+    !job.disputedAt &&
+    !job.disputeId &&
+    ["draft", "open", "cancelled"].includes(job.status)
+  );
+
   const handleDeleteAll = async () => {
     // Custom confirm logic is better for mobile than window.confirm
     if (window.confirm("Are you sure you want to delete ALL guest jobs? This cannot be undone.")) {
       try {
-        for (const job of filteredGuestJobs) {
+        const deletableJobs = filteredGuestJobs.filter(isJobDeletable);
+        for (const job of deletableJobs) {
           await deleteDoc(doc(db, "jobs", job.id));
         }
-        showToast("Success", "Deleted all guest jobs", "success");
+        showToast("Success", `Deleted ${deletableJobs.length} guest jobs`, "success");
       } catch (error) {
         showToast("Error", "Failed to delete jobs", "error");
       }
@@ -23,6 +43,11 @@ export default function GuestJobs({ jobs, users, showToast }: { jobs: any[], use
   };
 
   const handleDeleteJob = async (id: string) => {
+    const job = jobs.find(j => j.id === id);
+    if (job && !isJobDeletable(job)) {
+      showToast("Error", "Protected, funded, or disputed jobs cannot be deleted.", "error");
+      return;
+    }
     try {
       await deleteDoc(doc(db, "jobs", id));
       showToast("Success", "Deleted job", "success");

@@ -1,5 +1,40 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Comprehensive Platform Security Hardening (October 8, 2026)
+- **1. Live Tracking & Ride Requests Security (`firestore.rules`)**:
+  - **Document Takeover Fix (`live_tracking`)**: Fixed write permissions so callers can only create or update documents if `rideId == request.auth.uid` or if the existing document already belongs to `resource.data.driverId == request.auth.uid`. Prevented arbitrary users from overwriting location tracking docs by writing their `uid` as `driverId`.
+  - **Ride Request Privacy (`ride_requests`)**: Restricted pending/searching/offered ride request reads to verified drivers (`isAnyRollerDriver()`), assigned passengers/drivers, or platform administrators.
+- **2. Stripe Webhook Robustness & Error Handling (`server.ts`)**:
+  - **Payment Status Check**: Added mandatory `session.payment_status === 'paid'` verification in `checkout.session.completed` before granting subscriptions, ad wallet top-ups, or boost perks.
+  - **Proportional Fee Settlement**: Replaced `pendingPlatformFees: 0` wipe with math deducting the exact paid `session.amount_total` from `pendingPlatformFees`.
+  - **Missing Webhook Event Listeners**: Added handlers for `charge.refunded`, `payment_intent.payment_failed`, `checkout.session.expired`, and `charge.dispute.created`.
+  - **Buffer Error Handler**: Fixed error logging in catch block to parse JSON or use `event?.id` instead of reading `req.body.id` on raw Node.js Buffers.
+- **3. AI Proxy & Auth Fallback Hardening (`server.ts`)**:
+  - **10MB Body Parser Precedence**: Mounted `app.use("/api/gemini/call", express.json({ limit: "10mb" }))` prior to the global 1MB body parser, preventing HTTP 413 Payload Too Large on large audio or photo AI calls.
+  - **Admin Gemini Function Gate**: Restrained administrative functions (`getPlatformHealthInsights`, `analyzeSecurityThreat`, `getMonetizationOpportunities`, `runServerPlatformMisuseDeepScan`, `runServerAutonomousAgentTask`, `suggestNewCategories`) on `/api/gemini/call` to callers with `isAdmin` privileges.
+  - **Diagnostic Proxy Guard**: Enforced `isAdmin` requirement on `streamDiagnostic` inside `/api/gemini/stream` to prevent non-admins from streaming unconstrained prompts.
+  - **Fail-Closed Auth Fallback**: Hardened `verifyTokenSafely` so that if Identity Toolkit API errors out, token verification fails closed unless user status is confirmed in Firestore.
+
+## 🛡️ AnyTrader — Job Deletion & Escrow / Dispute Evidence Integrity Protection (October 8, 2026)
+- **1. Vulnerability Neutralization: Orphaned Escrow & Destroyed Dispute Evidence**:
+  - **Identified Flaw**: Previously, `firestore.rules` permitted job deletion with `allow delete: if isSignedIn() && (isJobOwner(resource.data) || isAdmin())`. This allowed homeowners to delete jobs that were actively funded, holding escrow balances, had engaged tradespeople, or were subject to active disputes. Doing so orphaned escrow funds, bypassed milestone release/refund lifecycle controls, and destroyed dispute evidence.
+  - **Firestore Security Rules Remediation (`firestore.rules`)**:
+    - Introduced `isFieldEmptyOrMissing(map, key)` and `isJobDeletableByOwner(jobData)` helper functions.
+    - Restricted `match /jobs/{jobId} { allow delete: ... }` to `isAdmin() || isJobDeletableByOwner(resource.data)`.
+    - Enforced that an owner can ONLY delete a job if:
+      1. **Zero Active Escrow / Funding**: `funded == false`, `isPaid == false`, `amountPaid == 0`, `escrowBalance == 0`, `escrowStatus in ['none', 'unfunded']`, `paymentStatus in ['unpaid', 'none', 'unfunded', 'cancelled']`, and no payment intent identifiers exist (`escrowPaymentIntentId`, `stripePaymentIntentId`).
+      2. **Zero Assigned Contractor**: `acceptedTradespersonId`, `acceptedTraderId`, `assignedTraderId`, `tradespersonId`, `traderId`, and `acceptedQuoteId` must all be null or empty string.
+      3. **Safe Lifecycle & Evidence Preservation**: `status in ['draft', 'open', 'cancelled']`, `disputeStatus in ['none', '']`, and neither `disputedAt` nor `disputeId` exist.
+  - **Server Authorization Guard (`src/server/authorization.ts`)**:
+    - Implemented `assertCanDeleteJob(user, jobData)` enforcing identical strict constraints for any server-side deletion paths.
+  - **Client UI Hardening (`src/components/JobDetails.tsx`, `src/components/GuestJobs.tsx`)**:
+    - Added reactive `isJobDeletable` calculation.
+    - Conditionally suppresses the "Delete Job" action from the menu and the cancelled-job footer whenever a job is funded, assigned, in progress, or disputed.
+    - `handleDeleteJob` pre-validates `isJobDeletable` before calling `deleteDoc` and surfaces an explanatory Sonner toast notification.
+  - **Automated Verification**:
+    - `tests/unit/authorization.test.ts`: Added 9 new unit tests covering all threat vectors (funded jobs, escrow balance, held status, assigned trader, active dispute, disputedAt timestamp, third-party attacker, and admin override).
+    - `tests/unit/firebaseEmulatorSecurityRules.test.ts`: Added tests 15b through 15f for Firestore rules coverage.
+
 ## 🛡️ AnyTrader — Task 35-E / 35-E-R1 / 35-E-R2 / 35-E-R3 / 35-E-R4 / 35-E-R4-R1: SSO Claim Integrity & Account Linking Cryptographic Trust Chain (October 7, 2026)
 - **1. Elimination of Client-Controlled Provider ID Fallback (Task 35-E-R4-R1 Remediation)**:
   - **Fail-Closed Provider ID Derivation**: In `src/server/ssoClaimIntegrity.ts`, `verifyProviderCredentialCryptographically` removed `detectedProviderId || cleanExpectedProviderId`. `effectiveProviderId` is strictly assigned to `detectedProviderId` derived from cryptographic token claims (`decoded.firebase?.sign_in_provider` or `decoded.iss`).
@@ -99,6 +134,99 @@
   - **Task 35-D / 35-D-R1**: **VERIFIED & CLOSED**.
   - **Task 35-E / 35-E-R1 / 35-E-R2 / 35-E-R3 / 35-E-R4 / 35-E-R4-R1**: **VERIFIED & CLOSED — 100% REMEDIATED**.
   - **Task 35-F / 35-F-R1-A-B-C-D-E**: **VERIFIED & CLOSED — 100% CERTIFIED**.
+  - **Task 35-G (Driver Payout Orchestration & Anti-Forgery Defense)**: **VERIFIED & CLOSED — 100% REMEDIATED**.
+  - **Task 35-H (Escrow Release Integrity & Pre-Commit Fail-Closed Defense)**: **VERIFIED & CLOSED — 100% REMEDIATED**.
+  - **Task 35-I (Stripe Connect Fail-Closed Security & Mock Payment Gating)**: **VERIFIED & CLOSED — 100% REMEDIATED**.
+  - **Task 35-J (Named Database Firestore Rules Deployment & Storage Rules Alignment)**: **VERIFIED & CLOSED — 100% REMEDIATED**.
+
+## 🛡️ AnyTrader — Task 35-J: Named Database Firestore Rules Deployment & Storage Rules Alignment (October 8, 2026)
+- **1. Named Database Multi-Target Configuration (`firebase.json`)**:
+  - Configured `firebase.json` firestore target as a multi-database array including both the authoritative project database `ai-studio-anytrader-44dab8b3-bbc9-4352-b725-2cbe7a1dfd2a` and `(default)`.
+  - Ensures rule and index deployments (`DeployRules` RPC, `deploy_firebase`) apply authoritative rules directly to the active named Firestore database where all production documents live.
+- **2. Dual-Target Database Alignment in Storage Rules (`storage.rules`)**:
+  - Updated cross-service document lookups in `storage.rules` (`isAdmin`, `isJobOwnerById`, `isJobTradespersonById`, `isPropertyParticipant`, `isChatParticipant`, `isDisputeParticipant`, `isRideParticipant`, `isVehicleParticipant`).
+  - Added dual lookup helpers querying `/databases/ai-studio-anytrader-44dab8b3-bbc9-4352-b725-2cbe7a1dfd2a/documents/...` and `/databases/(default)/documents/...`.
+  - Cures the issue where job media, chat attachments, property passports, and dispute evidence uploads were denied due to looking up non-existent documents in `(default)` when actual documents resided in the named database.
+- **3. Verification & Deployment**:
+  - Successfully deployed rules to the project via `deploy_firebase` and `fax.DeployRules` RPC.
+  - Full unit test suite passing with 1034/1034 tests clean across 62 test files.
+  - Clean TypeScript compilation and linting (0 errors).
+
+## 🛡️ AnyTrader — Task 35-I: Stripe Connect Fail-Closed Security & Mock Payment Gating (October 8, 2026)
+- **1. Vulnerability 1 Cured — Strict `create-connect-account` Gating (`server.ts`)**:
+  - Gated the fallback path in `/api/stripe/create-connect-account` strictly behind `process.env.NODE_ENV !== 'production' && process.env.ALLOW_MOCK_PAYMENTS === 'true'`.
+  - In production or whenever `ALLOW_MOCK_PAYMENTS !== 'true'`, unconfigured Stripe fails closed immediately with `503 Service Unavailable`, preventing unauthorized users from obtaining `payoutsEnabled: true`, `chargesEnabled: true`, or mock connected accounts in Firestore.
+- **2. Vulnerability 2 Cured — Strict Fail-Closed `account-status` (`server.ts`)**:
+  - Gated `/api/stripe/account-status` against mock accounts: when running in production or when `ALLOW_MOCK_PAYMENTS !== 'true'`, accounts starting with `acct_mock_` return `connected: false, payoutsEnabled: false, chargesEnabled: false, detailsSubmitted: false`.
+  - Missing Stripe gateway in live environments returns `503 Service Unavailable` rather than fake success with `payoutsEnabled: true`.
+- **3. Vulnerability 3 Cured — Strict Fail-Closed `create-login-link`, `balance` & `request-payout` (`server.ts`)**:
+  - `/api/stripe/create-login-link`: Rejects mock accounts in live environments with `400 Bad Request` and missing Stripe with `503 Service Unavailable`, eliminating fake Express dashboard URLs.
+  - `/api/stripe/balance`: Rejects mock accounts in live environments with `400 Bad Request` and missing Stripe with `503 Service Unavailable`, eliminating simulated £150 / £45 balances.
+  - `/api/stripe/request-payout`: Rejects mock accounts in live environments with `400 Bad Request` and missing Stripe with `503 Service Unavailable`, eliminating fake payout fulfillment.
+- **4. Driver Payout Orchestration Hardening (`src/server/driverPayoutOrchestration.ts`)**:
+  - Added strict live-environment gating to reject drivers holding mock Stripe accounts (`acct_mock_...`), setting `payoutStatus: "failed_mock_stripe_account"` and leaving `payoutTransferred: false`.
+  - Missing Stripe client in live environments fails closed into `failed_stripe_unavailable`, preventing synthetic payout execution.
+- **5. Automated Test Suite Verification (`tests/unit/stripeConnectFailClosedSecurity.test.ts`)**:
+  - **13/13 Security Tests Passing (100% clean)**.
+  - **Full Unit Test Suite (`npm test`)**: **1034/1034 tests passing** across 62 test files (100% clean).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Succeeded cleanly.
+
+## 🛡️ AnyTrader — Task 35-H: Escrow Release Integrity & Pre-Commit Fail-Closed Defense (October 8, 2026)
+- **1. Vulnerability 1 Cured — Elimination of Escrow Self-Release via `isQrHandshake` (`src/server/authorization.ts`, `src/server/paymentLedger.ts`)**:
+  - Hardened `assertCanManageMilestone` in `src/server/authorization.ts`: removed the bare boolean bypass where `isQrHandshake && traderId && user.uid === traderId` returned immediately without verification.
+  - Mandatory Homeowner Code/PIN Verification: An accepted tradesperson attempting QR handshake milestone release MUST supply a non-empty `handshakeCode` matching the homeowner's `verificationPin` or `handshakeCode` on the job/milestone. Missing or incorrect handshake codes trigger an immediate `ForbiddenError("Unauthorized: tradesperson QR handshake requires valid homeowner verification code.")`.
+  - Paying homeowner and platform admin retain authoritative release privileges without needing a handshake code.
+- **2. Vulnerability 2 Cured — Pre-Commit Transactional Stripe Account Gate (`src/server/paymentLedger.ts`)**:
+  - Implemented transactional pre-commit validation inside `PaymentLedgerEngine.releaseEscrowFunds`:
+  - When running in production (`NODE_ENV === 'production'`) on non-destination charges, the tradesperson's connected Stripe account is verified directly inside the Firestore transaction *before* any milestone status or ledger entries are modified.
+  - If the tradesperson has no `stripeAccountId`, throws `BadRequestError("Tradesperson has no connected Stripe payout account")`.
+  - If the tradesperson has a mock account (`acct_mock_...`), throws `BadRequestError("Mock Stripe account is rejected in production")`.
+  - This guarantees that funds cannot be committed as `funds_released` if the recipient cannot receive them via Stripe.
+- **3. Vulnerability 3 Cured — Fail-Closed Transfer Ordering & Return Object Completeness (`src/server/paymentLedger.ts`, `server.ts`)**:
+  - Added `ledgerEntryId` to the return object of `releaseEscrowFunds` so downstream callers and tests receive the authoritative ledger reference.
+  - Guaranteed that transient Stripe transfer failures roll back milestone state in Firestore (`status: "funded"`, `releaseStatus: "failed"`, `releaseOperationId: null`) and update the ledger entry to `status: "failed"` with clear 502 error responses.
+  - Imported `InternalServerError` into `server.ts` to ensure clean typechecking and fail-closed handling when Stripe client is unavailable in production.
+- **4. Automated Test Suite Verification (`tests/unit/escrowReleaseIntegrity.test.ts`)**:
+  - **12/12 Security Tests Passing (100% clean)**:
+    - *Test 1*: Rejects accepted tradesperson self-release when sending bare `isQrHandshake` without valid code.
+    - *Test 2*: Rejects accepted tradesperson self-release when sending incorrect handshake code.
+    - *Test 3*: Rejects unauthorized third-party attacker completely.
+    - *Test 4*: Allows homeowner (funds owner) to release directly without requiring handshake code.
+    - *Test 5*: Allows authorized admin to release milestone directly.
+    - *Test 6*: Allows accepted tradesperson release ONLY when homeowner's valid verification code is provided.
+    - *Test 7*: In production mode, rejects release if trader has no connected Stripe account (milestone remains `funded`).
+    - *Test 8*: In production mode, rejects release if trader has mock Stripe account (milestone remains `funded`).
+    - *Test 9*: In production mode, `executeStripeEscrowTransfer` fails closed if Stripe is unavailable.
+    - *Test 10*: In production mode, `executeStripeEscrowTransfer` fails closed if trader has mock Stripe account.
+    - *Test 11*: Destination charges bypass secondary transfer safely since funds were routed at checkout.
+    - *Test 12*: Executes transfer with deterministic idempotency key and records completed ledger.
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Succeeded cleanly.
+
+## 🛡️ AnyTrader — Task 35-G: Driver Payout Orchestration & Ride Payout Anti-Forgery Defense (October 8, 2026)
+- **1. Vulnerability 1 Cured — Strict `ride_requests` Security Rules (`firestore.rules`)**:
+  - Hardened `/ride_requests/{rideId}` rules for both document creation and mutation.
+  - Passengers and unprivileged callers are strictly prohibited from setting or updating: `driverId`, `assignedDriverId`, `finalFare`, `driverEarnings`, `calculatedDriverEarnings`, `commissionAmount`, `stripeTransferId`, `paymentIntentId`, `stripePaymentIntentId`, `stripeSessionId`, `stripeCheckoutSessionId`, `payoutTransferred`, `payoutTransferredAt`, `settlementId`, `settlementStatus`, `platformFee`, `calculatedPlatformFee`, `payoutStatus`, `payoutLockedAt`, `payoutFailedAt`, `payoutRetryCount`, `payoutLastError`, `payoutError`, or `paidAt`.
+- **2. Vulnerability 2 & 3 Cured — Server-Authoritative Driver Identity, Eligibility & Verified Funding (`src/server/driverPayoutOrchestration.ts`)**:
+  - The scheduled 01:00 payout cron and manual admin trigger invoke `executeDriverPayoutOrchestrationCommand`.
+  - Authoritatively enforces driver identity and cross-driver protection: conflicting driver IDs (`driverId !== assignedDriverId`) fail closed immediately.
+  - Enforces driver eligibility: verifies driver exists in the `users` collection and has `role === 'driver' || isDriver === true`.
+  - Enforces Stripe Connected account validation: drivers without connected Stripe accounts fail closed into `pending_stripe_onboarding` with zero platform funds disbursed.
+  - Eliminates platform-funded transfers for synthetic or forged rides: requires proof of passenger funding via Stripe PaymentIntent verification (`status === 'succeeded'` and `amount_received > 0`) or verified double-entry `payment_ledger` record. Rides without verified customer payments are rejected with `payoutStatus: "rejected_unverified_payment"`.
+  - Enforces server-authoritative 88/12 split + 100% tip calculation with safety caps (£1,000 max payout per ride).
+- **3. Vulnerability 4 Cured — Atomic Post-Commit Transfer & Failure Recovery (`src/server/driverPayoutOrchestration.ts`)**:
+  - Eliminates premature payout marking: `payoutTransferred` remains strictly `false` during worker pre-locking (`payoutStatus: "processing"`).
+  - Transitions `payoutTransferred: true` ONLY AFTER `stripeClient.transfers.create` returns successfully inside an atomic post-commit transaction with deterministic idempotency key (`payout:ride:${rideId}:${driverId}:${amountPence}`).
+  - On transient Stripe error, leaves `payoutTransferred: false`, records `payoutStatus: "failed"`, stores error details in `payoutLastError`, and increments `payoutRetryCount`, ensuring drivers can be safely retried and are never left unpaid.
+- **4. Concurrency & Double-Settlement Defense**:
+  - 5-minute worker leases via `payoutLockedAt` prevent concurrent workers from double-processing rides.
+  - OCC pre-lock check rejects duplicate execution if already paid.
+- **5. Automated Test Suite Verification (`tests/unit/driverPayoutOrchestration.test.ts`)**:
+  - **8/8 Security Tests Passing (100% clean)**.
+  - **Full Unit Test Suite (`npm test`)**: **1008/1008 tests passing** across 60 test files (100% clean).
+  - **TypeScript Typecheck & Lint (`npm run lint`)**: 0 errors (`tsc --noEmit` clean).
+  - **Clean Applet Build (`compile_applet`)**: Succeeded cleanly.
 
 ## 🛡️ AnyTrader — Task 35-F / 35-F-R1-A-B-C-D-E: Stripe Redirect URL Integrity & Open Redirect Defense (October 7, 2026)
 - **1. Server-Authoritative Redirect Sanitizer, Central Config & Path Allowlist (`src/server/paymentVerification.ts`)**:

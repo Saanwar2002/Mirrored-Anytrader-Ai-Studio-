@@ -1560,7 +1560,8 @@ const libraries: any[] = ['places', 'geometry'];
           jobId: id,
           quoteId: quote.id,
           milestoneId: quote.milestones?.[0]?.id || "deposit",
-          isQrHandshake: true
+          isQrHandshake: true,
+          handshakeCode: job.verificationPin || job.handshakeCode
         })
       });
 
@@ -1839,7 +1840,30 @@ const libraries: any[] = ['places', 'geometry'];
     }
   };
 
+  const isJobDeletable = Boolean(
+    job &&
+    !job.funded &&
+    !job.isPaid &&
+    (!job.escrowBalance || Number(job.escrowBalance) === 0) &&
+    (!job.amountPaid || Number(job.amountPaid) === 0) &&
+    (!job.escrowStatus || ["none", "unfunded"].includes(String(job.escrowStatus).toLowerCase())) &&
+    !job.acceptedTradespersonId &&
+    !job.acceptedTraderId &&
+    !job.assignedTraderId &&
+    !job.tradespersonId &&
+    !job.traderId &&
+    !job.acceptedQuoteId &&
+    (!job.disputeStatus || ["none", ""].includes(String(job.disputeStatus).toLowerCase())) &&
+    !job.disputedAt &&
+    !job.disputeId &&
+    ["draft", "open", "cancelled"].includes(job.status)
+  );
+
   const handleDeleteJobClick = () => {
+    if (!isJobDeletable) {
+      toast.error("Funded, assigned, or disputed jobs cannot be deleted to protect escrow and dispute evidence.");
+      return;
+    }
     if (confirmDelete) {
       handleDeleteJob();
       setConfirmDelete(false);
@@ -1850,13 +1874,19 @@ const libraries: any[] = ['places', 'geometry'];
   };
 
   const handleDeleteJob = async () => {
-    if (!id) return;
+    if (!id || !job) return;
+    if (!isJobDeletable) {
+      toast.error("Funded, assigned, or disputed jobs cannot be deleted to protect escrow and dispute evidence.");
+      return;
+    }
     setIsProcessing(true);
     try {
       await deleteDoc(doc(db, "jobs", id));
+      toast.success("Job deleted successfully.");
       navigate("/my-jobs");
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      toast.error(err?.message || "Failed to delete job. Protected or funded jobs cannot be deleted.");
     } finally {
       setIsProcessing(false);
     }
@@ -2242,21 +2272,25 @@ const libraries: any[] = ['places', 'geometry'];
                           </button>
                         )}
                         
-                        <div className="h-px bg-slate-100 my-1" />
-                        <button
-                          onClick={handleDeleteJobClick}
-                          disabled={isProcessing}
-                          className="w-full px-4 py-2 text-left text-sm font-semibold text-red-600 hover:bg-red-50 flex items-center gap-2 disabled:opacity-50"
-                        >
-                          {isProcessing ? (
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : confirmDelete ? (
-                              <AlertTriangle className="w-4 h-4 text-red-600" />
-                          ) : (
-                              <Trash2 className="w-4 h-4" />
-                          )}
-                          {confirmDelete ? "Confirm Delete" : "Delete Job"}
-                        </button>
+                        {isJobDeletable && (
+                          <>
+                            <div className="h-px bg-slate-100 my-1" />
+                            <button
+                              onClick={handleDeleteJobClick}
+                              disabled={isProcessing}
+                              className="w-full px-4 py-2 text-left text-sm font-semibold text-red-600 hover:bg-red-50 flex items-center gap-2 disabled:opacity-50"
+                            >
+                              {isProcessing ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : confirmDelete ? (
+                                  <AlertTriangle className="w-4 h-4 text-red-600" />
+                              ) : (
+                                  <Trash2 className="w-4 h-4" />
+                              )}
+                              {confirmDelete ? "Confirm Delete" : "Delete Job"}
+                            </button>
+                          </>
+                        )}
 
                         {/* Delete Job option removed as requested (except for cancelled now) */}
                       </motion.div>
@@ -5668,7 +5702,7 @@ const libraries: any[] = ['places', 'geometry'];
           </div>
         )}
 
-        {isHomeowner && job.status === "cancelled" && (
+        {isHomeowner && job.status === "cancelled" && isJobDeletable && (
           <div className="space-y-4 mb-4 mt-6">
             <button
                onClick={handleDeleteJobClick}

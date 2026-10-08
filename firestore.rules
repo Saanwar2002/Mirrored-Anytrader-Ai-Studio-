@@ -38,6 +38,34 @@ service cloud.firestore {
       return isJobOwner(jobData) || isJobTradesperson(jobData);
     }
 
+    function isFieldEmptyOrMissing(map, key) {
+      return map.get(key, null) == null || map.get(key, '') == '';
+    }
+
+    // Prevents deletion of jobs that are funded, hold escrow balances, have an assigned/accepted tradesperson,
+    // are in progress or completed, or have active/pending disputes. Deleting in these states orphans escrow and destroys evidence.
+    function isJobDeletableByOwner(jobData) {
+      return isJobOwner(jobData) &&
+        // Strict Escrow & Funding Protection: Cannot delete if funded, paid, or holding escrow balances
+        jobData.get('funded', false) == false &&
+        jobData.get('isPaid', false) == false &&
+        jobData.get('amountPaid', 0) == 0 &&
+        jobData.get('escrowBalance', 0) == 0 &&
+        jobData.get('escrowStatus', 'none') in ['none', 'unfunded'] &&
+        jobData.get('paymentStatus', 'unpaid') in ['unpaid', 'none', 'unfunded', 'cancelled'] &&
+        // Assigned / Accepted Tradesperson Protection: Cannot delete if a tradesperson is engaged or quote accepted
+        isFieldEmptyOrMissing(jobData, 'acceptedTradespersonId') &&
+        isFieldEmptyOrMissing(jobData, 'acceptedTraderId') &&
+        isFieldEmptyOrMissing(jobData, 'assignedTraderId') &&
+        isFieldEmptyOrMissing(jobData, 'tradespersonId') &&
+        isFieldEmptyOrMissing(jobData, 'traderId') &&
+        isFieldEmptyOrMissing(jobData, 'acceptedQuoteId') &&
+        // Lifecycle & Dispute Evidence Protection: Cannot delete if in progress, completed, or in dispute
+        jobData.get('status', 'open') in ['draft', 'open', 'cancelled'] &&
+        jobData.get('disputeStatus', 'none') in ['none', ''] &&
+        !jobData.keys().hasAny(['disputedAt', 'disputeId', 'escrowPaymentIntentId', 'stripePaymentIntentId']);
+    }
+
     function isPropertyOwner(propData) {
       return isSignedIn() && (
         propData.get('ownerId', '') == request.auth.uid || 
@@ -286,20 +314,68 @@ service cloud.firestore {
     }
 
     match /ride_requests/{rideId} {
-      allow create: if isSignedIn() && (request.resource.data.get('passengerId', '') == request.auth.uid || request.resource.data.get('riderId', '') == request.auth.uid);
-      allow read: if isSignedIn() && (resource == null || resource.data.get('passengerId', '') == request.auth.uid || resource.data.get('riderId', '') == request.auth.uid || resource.data.get('driverId', '') == request.auth.uid || resource.data.get('assignedDriverId', '') == request.auth.uid || isAdmin() || (resource.data.status in ["pending", "searching", "offered", "draft"]));
+      allow create: if isSignedIn() && (
+        isAdmin() || (
+          (request.resource.data.get('passengerId', '') == request.auth.uid || request.resource.data.get('riderId', '') == request.auth.uid) &&
+          request.resource.data.get('status', 'pending') in ['pending', 'searching', 'offered', 'draft'] &&
+          request.resource.data.get('paymentStatus', 'unpaid') in ['unpaid', 'pending'] &&
+          request.resource.data.get('paid', false) == false &&
+          request.resource.data.get('isPaid', false) == false &&
+          request.resource.data.get('payoutTransferred', false) == false &&
+          request.resource.data.get('payoutStatus', 'unpaid') in ['unpaid', 'pending', 'none', 'draft'] &&
+          !request.resource.data.keys().hasAny([
+            'driverId', 'assignedDriverId',
+            'finalFare', 'driverEarnings', 'calculatedDriverEarnings', 'commissionAmount', 'stripeTransferId', 
+            'paymentIntentId', 'stripePaymentIntentId', 'stripeSessionId', 'stripeCheckoutSessionId', 
+            'payoutTransferredAt', 'settlementId', 'settlementStatus', 'platformFee', 'calculatedPlatformFee',
+            'payoutLockedAt', 'payoutFailedAt', 'payoutRetryCount', 'payoutLastError', 'payoutError', 'paidAt'
+          ])
+        )
+      );
+      allow read: if isSignedIn() && (
+        resource == null || 
+        resource.data.get('passengerId', '') == request.auth.uid || 
+        resource.data.get('riderId', '') == request.auth.uid || 
+        resource.data.get('driverId', '') == request.auth.uid || 
+        resource.data.get('assignedDriverId', '') == request.auth.uid || 
+        isAdmin() || 
+        (isAnyRollerDriver() && resource.data.status in ["pending", "searching", "offered"])
+      );
       allow update: if isAdmin() || (
         isSignedIn() && (
-          resource.data.get('passengerId', '') == request.auth.uid ||
-          resource.data.get('riderId', '') == request.auth.uid ||
+          // Passenger updates:
+          (
+            (resource.data.get('passengerId', '') == request.auth.uid || resource.data.get('riderId', '') == request.auth.uid) &&
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+              'paymentStatus', 'paid', 'isPaid', 'payoutTransferred', 'payoutTransferredAt', 'stripeTransferId', 
+              'stripePaymentIntentId', 'stripeSessionId', 'stripeCheckoutSessionId', 'finalFare', 
+              'driverEarnings', 'calculatedDriverEarnings', 'commissionAmount', 'assignedDriverId', 'driverId', 'settlementId', 
+              'settlementStatus', 'platformFee', 'calculatedPlatformFee', 'baseFare', 'payoutStatus',
+              'payoutLockedAt', 'payoutFailedAt', 'payoutRetryCount', 'payoutLastError', 'payoutError', 'paidAt'
+            ]) &&
+            (
+              !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status']) ||
+              (request.resource.data.status in ['cancelled', 'draft'] && resource.data.status in ['pending', 'searching', 'offered', 'draft'])
+            )
+          ) ||
+          // Assigned driver updates:
           (
             (resource.data.get('driverId', '') == request.auth.uid || resource.data.get('assignedDriverId', '') == request.auth.uid) &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'location', 'updatedAt'])
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'location', 'updatedAt']) &&
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+              'paymentStatus', 'paid', 'isPaid', 'payoutTransferred', 'payoutTransferredAt', 'stripeTransferId', 
+              'stripePaymentIntentId', 'stripeSessionId', 'stripeCheckoutSessionId', 'finalFare', 
+              'driverEarnings', 'calculatedDriverEarnings', 'commissionAmount', 'assignedDriverId', 'driverId', 'settlementId', 
+              'settlementStatus', 'platformFee', 'calculatedPlatformFee', 'baseFare', 'payoutStatus',
+              'payoutLockedAt', 'payoutFailedAt', 'payoutRetryCount', 'payoutLastError', 'payoutError', 'paidAt'
+            ])
           ) ||
+          // Driver accepting a pending ride:
           (
             isAnyRollerDriver() &&
             resource.data.status in ["pending", "searching", "offered"] &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'driverId', 'assignedDriverId', 'updatedAt'])
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'driverId', 'assignedDriverId', 'updatedAt']) &&
+            (request.resource.data.get('driverId', '') == request.auth.uid || request.resource.data.get('assignedDriverId', '') == request.auth.uid)
           )
         )
       );
@@ -331,13 +407,31 @@ service cloud.firestore {
         resource.data.get('isOnline', false) == true ||
         isAdmin()
       );
-      allow write: if isSignedIn() && (
-        resource == null || 
+      allow create: if isSignedIn() && (
+        rideId == request.auth.uid || 
+        request.resource.data.get('driverId', '') == request.auth.uid || 
+        request.resource.data.get('passengerId', '') == request.auth.uid ||
+        isAdmin()
+      );
+      allow update: if isSignedIn() && (
+        isAdmin() || 
+        (
+          rideId == request.auth.uid &&
+          (!request.resource.data.keys().hasAny(['driverId']) || request.resource.data.get('driverId', request.auth.uid) == request.auth.uid)
+        ) || 
+        (
+          resource.data.get('driverId', '') == request.auth.uid &&
+          request.resource.data.get('driverId', '') == request.auth.uid
+        ) || 
+        (
+          resource.data.get('passengerId', '') == request.auth.uid &&
+          request.resource.data.get('passengerId', '') == request.auth.uid
+        )
+      );
+      allow delete: if isSignedIn() && (
         rideId == request.auth.uid || 
         resource.data.get('driverId', '') == request.auth.uid || 
-        request.resource.data.get('driverId', '') == request.auth.uid || 
-        resource.data.get('passengerId', '') == request.auth.uid ||
-        request.resource.data.get('passengerId', '') == request.auth.uid ||
+        resource.data.get('passengerId', '') == request.auth.uid || 
         isAdmin()
       );
     }
@@ -769,7 +863,8 @@ service cloud.firestore {
             'escrowStatus', 'escrowBalance', 'amountPaid', 'amount', 'platformFee',
             'assignedTraderId', 'acceptedTradespersonId', 'acceptedTraderId', 'tradespersonId', 'traderId',
             'ownerId', 'homeownerId', 'userId', 'customerId', 'posterId',
-            'stripeCustomerId', 'stripeAccountId', 'rating', 'trustScore', 'isVerified', 'verified'
+            'stripeCustomerId', 'stripeAccountId', 'rating', 'trustScore', 'isVerified', 'verified',
+            'isBoosted', 'boostTier', 'boostExpiresAt', 'exclusiveUntil', 'isInstantMatch', 'isEmergencyBoost'
           ])
         ) ||
         (
@@ -790,7 +885,10 @@ service cloud.firestore {
           ])
         )
       );
-      allow delete: if isSignedIn() && (isJobOwner(resource.data) || isAdmin());
+      allow delete: if isSignedIn() && (
+        isAdmin() ||
+        isJobDeletableByOwner(resource.data)
+      );
     }
 
     // --- Public Job Cards: Sanitized projection for Anonymous & Public Marketplace Discovery ---

@@ -341,6 +341,7 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
     status: "accepted",
     acceptedTradespersonId: traderId,
     acceptedQuoteId: quoteId,
+    verificationPin: "4321",
   };
 
   const initialQuoteData = {
@@ -877,7 +878,21 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
       ).rejects.toThrow(ForbiddenError);
     });
 
-    it("allows QR handshake when caller IS the verified accepted tradesperson", async () => {
+    it("rejects tradesperson self-release with bare isQrHandshake without valid homeowner verification code", async () => {
+      await expect(
+        PaymentLedgerEngine.releaseEscrowFunds(db, {
+          jobId,
+          quoteId,
+          milestoneId,
+          authUid: traderId,
+          idempotencyKey: "key_trader_self_release_fail",
+          isQrHandshake: true,
+          // Notice: No valid handshakeCode supplied!
+        })
+      ).rejects.toThrow(ForbiddenError);
+    });
+
+    it("allows QR handshake when caller IS the verified accepted tradesperson WITH valid homeowner verification code", async () => {
       const result = await PaymentLedgerEngine.releaseEscrowFunds(db, {
         jobId,
         quoteId,
@@ -885,6 +900,7 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
         authUid: traderId, // trader_dave is acceptedTradespersonId on initialJobData
         idempotencyKey: "key_valid_trader_qr",
         isQrHandshake: true,
+        handshakeCode: "4321", // Matches initialJobData.verificationPin
       });
 
       expect(result.success).toBe(true);

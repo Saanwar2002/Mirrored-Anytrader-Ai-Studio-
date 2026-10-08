@@ -2103,6 +2103,22 @@
         "stripeCheckoutSessionId": {
           "type": "string"
         },
+        "stripePaymentIntentId": {
+          "type": "string",
+          "description": "Authoritative Stripe PaymentIntent ID."
+        },
+        "payoutTransferred": {
+          "type": "boolean",
+          "description": "Whether the driver payout transfer has been executed."
+        },
+        "payoutStatus": {
+          "type": "string",
+          "description": "Driver payout settlement lifecycle status."
+        },
+        "stripeTransferId": {
+          "type": "string",
+          "description": "Authoritative Stripe Transfer ID for driver payout."
+        },
         "rideType": {
           "type": "string",
           "enum": [

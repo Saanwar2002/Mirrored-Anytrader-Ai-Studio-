@@ -230,6 +230,70 @@ export function assertCanModifyJob(user: AuthenticatedUser, jobData: Record<stri
 }
 
 /**
+ * Job Deletion Governance:
+ * Prevents owners from deleting jobs that are funded, have an accepted/assigned trader,
+ * hold escrow funds, are in progress/completed, or have active disputes.
+ * Deleting funded or disputed jobs orphans escrow funds and destroys dispute evidence.
+ */
+export function assertCanDeleteJob(user: AuthenticatedUser, jobData: Record<string, any>): void {
+  assertIsAuthenticated(user);
+  if (isUserAdminClaim(user)) return;
+
+  const ownerId =
+    jobData.homeownerId ||
+    jobData.userId ||
+    jobData.ownerId ||
+    jobData.posterId ||
+    jobData.customerId;
+
+  if (user.uid !== ownerId) {
+    throw new ForbiddenError("Only the job owner can delete this job.");
+  }
+
+  if (jobData.funded === true || jobData.isPaid === true) {
+    throw new ForbiddenError("Funded jobs cannot be deleted as this would orphan escrow funds.");
+  }
+
+  if (Number(jobData.escrowBalance || 0) > 0 || Number(jobData.amountPaid || 0) > 0) {
+    throw new ForbiddenError("Jobs with an active escrow balance or payments cannot be deleted.");
+  }
+
+  if (
+    jobData.escrowStatus &&
+    !["none", "unfunded"].includes(String(jobData.escrowStatus).toLowerCase())
+  ) {
+    throw new ForbiddenError(`Jobs with escrow status '${jobData.escrowStatus}' cannot be deleted.`);
+  }
+
+  const assignedTrader =
+    jobData.acceptedTradespersonId ||
+    jobData.acceptedTraderId ||
+    jobData.assignedTraderId ||
+    jobData.tradespersonId ||
+    jobData.traderId ||
+    jobData.acceptedQuoteId;
+
+  if (assignedTrader) {
+    throw new ForbiddenError("Jobs with an assigned or accepted tradesperson cannot be deleted.");
+  }
+
+  if (["in_progress", "completed", "disputed"].includes(jobData.status)) {
+    throw new ForbiddenError(`Jobs in '${jobData.status}' status cannot be deleted.`);
+  }
+
+  if (
+    jobData.disputeStatus &&
+    !["none", ""].includes(String(jobData.disputeStatus).toLowerCase())
+  ) {
+    throw new ForbiddenError("Jobs with an active or pending dispute cannot be deleted to preserve evidence.");
+  }
+
+  if (jobData.disputedAt || jobData.disputeId) {
+    throw new ForbiddenError("Disputed jobs cannot be deleted to preserve dispute evidence.");
+  }
+}
+
+/**
  * Quote Submission Governance:
  * A user cannot quote their own job; only verified traders can submit quotes on open jobs.
  */
@@ -256,7 +320,8 @@ export function assertCanManageMilestone(
   user: AuthenticatedUser,
   milestoneData: Record<string, any>,
   action: "fund" | "submit_work" | "release" | "dispute" | "refund",
-  isQrHandshake: boolean = false
+  isQrHandshake: boolean = false,
+  handshakeCode?: string
 ): void {
   assertIsAuthenticated(user);
   if (isUserAdminClaim(user)) return;
@@ -272,7 +337,12 @@ export function assertCanManageMilestone(
       break;
     case "release":
       if (isQrHandshake && traderId && user.uid === traderId) {
-        return; // Valid QR handshake by accepted trader
+        const expectedCode = (milestoneData.verificationPin || milestoneData.handshakeCode || "").toString().trim();
+        const suppliedCode = (handshakeCode || "").toString().trim();
+        if (expectedCode !== "" && suppliedCode !== "" && expectedCode === suppliedCode) {
+          return; // Valid QR handshake by accepted trader with verified homeowner code
+        }
+        throw new ForbiddenError("Unauthorized: tradesperson QR handshake requires valid homeowner verification code.");
       }
       if (user.uid !== customerId) {
         throw new ForbiddenError(`Only the paying customer can ${action} milestone funds.`);

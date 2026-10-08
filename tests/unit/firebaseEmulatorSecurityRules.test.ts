@@ -267,6 +267,93 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         })
       );
     });
+
+    it("15b. Owner CAN delete unassigned, unfunded, non-disputed open job", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "jobs", "job_deletable_test"), {
+          id: "job_deletable_test",
+          homeownerId: "user_alice",
+          status: "open",
+          funded: false,
+          isPaid: false,
+          escrowBalance: 0,
+          amountPaid: 0,
+          escrowStatus: "none",
+        });
+      });
+
+      const userADb = testEnv.authenticatedContext("user_alice").firestore();
+      await assertSucceeds(deleteDoc(doc(userADb, "jobs", "job_deletable_test")));
+    });
+
+    it("15c. Owner CANNOT delete funded job or job holding escrow (prevents orphaned escrow)", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "jobs", "job_funded_test"), {
+          id: "job_funded_test",
+          homeownerId: "user_alice",
+          status: "open",
+          funded: true,
+          isPaid: true,
+          escrowBalance: 500,
+          escrowStatus: "held",
+        });
+      });
+
+      const userADb = testEnv.authenticatedContext("user_alice").firestore();
+      await assertFails(deleteDoc(doc(userADb, "jobs", "job_funded_test")));
+    });
+
+    it("15d. Owner CANNOT delete job with assigned/accepted tradesperson", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "jobs", "job_assigned_test"), {
+          id: "job_assigned_test",
+          homeownerId: "user_alice",
+          status: "open",
+          acceptedTradespersonId: "trader_tom",
+          funded: false,
+          isPaid: false,
+        });
+      });
+
+      const userADb = testEnv.authenticatedContext("user_alice").firestore();
+      await assertFails(deleteDoc(doc(userADb, "jobs", "job_assigned_test")));
+    });
+
+    it("15e. Owner CANNOT delete job with active dispute (preserves dispute evidence)", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "jobs", "job_disputed_test"), {
+          id: "job_disputed_test",
+          homeownerId: "user_alice",
+          status: "disputed",
+          disputeStatus: "opened",
+          disputedAt: new Date().toISOString(),
+          funded: false,
+        });
+      });
+
+      const userADb = testEnv.authenticatedContext("user_alice").firestore();
+      await assertFails(deleteDoc(doc(userADb, "jobs", "job_disputed_test")));
+    });
+
+    it("15f. Unauthorized attacker CANNOT delete another user's job", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "jobs", "job_attacker_delete_test"), {
+          id: "job_attacker_delete_test",
+          homeownerId: "user_alice",
+          status: "open",
+          funded: false,
+          isPaid: false,
+        });
+      });
+
+      const attackerDb = testEnv.authenticatedContext("user_attacker").firestore();
+      await assertFails(deleteDoc(doc(attackerDb, "jobs", "job_attacker_delete_test")));
+    });
   });
 
   // ==========================================

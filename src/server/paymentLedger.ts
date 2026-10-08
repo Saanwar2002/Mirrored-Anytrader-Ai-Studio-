@@ -208,10 +208,11 @@ export class PaymentLedgerEngine {
       authUid: string;
       idempotencyKey: string;
       isQrHandshake?: boolean;
+      handshakeCode?: string;
       isAdmin?: boolean;
     }
   ): Promise<any> {
-    const { jobId, quoteId, milestoneId, authUid, idempotencyKey, isQrHandshake, isAdmin } = params;
+    const { jobId, quoteId, milestoneId, authUid, idempotencyKey, isQrHandshake, handshakeCode, isAdmin } = params;
 
     if (!authUid || typeof authUid !== "string" || authUid.trim() === "") {
       throw new ForbiddenError("Unauthorized: authentic caller identity required");
@@ -248,7 +249,19 @@ export class PaymentLedgerEngine {
           )
         );
 
-        if (!isOwner && !isAdmin && !(isQrHandshake && isAcceptedTrader)) {
+        // Curing Escrow Self-Release:
+        // Under no circumstances can a tradesperson self-release escrow funds simply by passing isQrHandshake: true!
+        // An accepted tradesperson can only release if they supply the homeowner's secret handshake code / PIN.
+        let hasValidHandshakeAuth = false;
+        if (isAcceptedTrader && isQrHandshake) {
+          const expectedCode = (jobData?.handshakeCode || jobData?.verificationPin || "").toString().trim();
+          const suppliedCode = (handshakeCode || "").toString().trim();
+          if (expectedCode !== "" && suppliedCode !== "" && expectedCode === suppliedCode) {
+            hasValidHandshakeAuth = true;
+          }
+        }
+
+        if (!isOwner && !isAdmin && !hasValidHandshakeAuth) {
           throw new ForbiddenError("Unauthorized: only the job owner or authorized admin can release milestone funds");
         }
 
@@ -276,6 +289,28 @@ export class PaymentLedgerEngine {
 
         if (!targetMilestone) {
           throw new BadRequestError(`Milestone not found: '${milestoneId || "initial"}' does not exist on quote '${quoteId}'`);
+        }
+
+        // Production Pre-Commit Fail-Closed Gate:
+        // Prevent committing release to Firestore if tradesperson cannot receive funds via Stripe
+        const isProd = process.env.NODE_ENV === "production";
+        if (isProd && !targetMilestone.isDestinationCharge) {
+          const traderId = quoteData?.tradespersonId || jobData?.acceptedTradespersonId;
+          if (!traderId) {
+            throw new BadRequestError("Tradesperson ID missing on quote and job");
+          }
+          const traderRef = db.collection("users").doc(traderId);
+          const traderDoc = await transaction.get(traderRef);
+          const traderData = traderDoc?.exists
+            ? (typeof traderDoc.data === "function" ? traderDoc.data() : traderDoc.data)
+            : null;
+          const traderStripeAccountId = traderData?.stripeAccountId;
+          if (!traderStripeAccountId) {
+            throw new BadRequestError("Tradesperson has no connected Stripe payout account");
+          }
+          if (traderStripeAccountId.startsWith("acct_mock_")) {
+            throw new BadRequestError("Mock Stripe account is rejected in production");
+          }
         }
 
         // Transactional Claim Validation
@@ -425,7 +460,8 @@ export class PaymentLedgerEngine {
         traderId: quoteData?.tradespersonId,
         stripePaymentIntentId: targetMilestone.stripePaymentIntentId,
         isDestinationCharge: targetMilestone.isDestinationCharge,
-        jobNo: jobData?.jobNo
+        jobNo: jobData?.jobNo,
+        ledgerEntryId
       };
     });
 
@@ -490,8 +526,16 @@ export class PaymentLedgerEngine {
       };
     }
 
+    const isProd = process.env.NODE_ENV === "production";
     const stripe = options?.stripe;
     if (!stripe) {
+      if (isProd) {
+        return {
+          transferStatus: "failed",
+          error: "Stripe transfer client unconfigured in production",
+          stripeIdempotencyKey,
+        };
+      }
       return {
         transferStatus: "skipped_no_stripe",
         stripeIdempotencyKey,
@@ -502,10 +546,26 @@ export class PaymentLedgerEngine {
       let traderStripeAccountId: string | undefined;
       if (db) {
         const traderDoc = await db.collection("users").doc(traderId).get();
-        traderStripeAccountId = traderDoc.data()?.stripeAccountId;
+        const traderData = typeof traderDoc.data === "function" ? traderDoc.data() : traderDoc.data;
+        traderStripeAccountId = traderData?.stripeAccountId;
       }
 
-      if (!traderStripeAccountId || traderStripeAccountId.startsWith("acct_mock_")) {
+      if (!traderStripeAccountId) {
+        return {
+          transferStatus: "failed",
+          error: "Tradesperson has no connected Stripe payout account",
+          stripeIdempotencyKey,
+        };
+      }
+
+      if (traderStripeAccountId.startsWith("acct_mock_")) {
+        if (isProd) {
+          return {
+            transferStatus: "failed",
+            error: "Mock Stripe account is rejected in production",
+            stripeIdempotencyKey,
+          };
+        }
         return {
           transferStatus: "skipped_mock_account",
           stripeIdempotencyKey,
