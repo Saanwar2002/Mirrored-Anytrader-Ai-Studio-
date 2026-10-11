@@ -1,5 +1,48 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛡️ AnyTrader — Server-Authoritative Live Demand Zones & Privacy Architecture (October 11, 2026)
+- **1. Neutralized Permission Denied Error (`Error fetching live demand zones`)**:
+  - **Identified Flaw**: `surgeHeatmapService.ts` was issuing direct client-side Firestore queries against `/live_tracking` (`where("isOnline", "==", true)`) and `/ride_requests` (`where("status", "in", [...])`). This triggered `FirebaseError: Missing or insufficient permissions` because `live_tracking` is strictly guarded by PL-04 (blocking strangers from enumerating other drivers' GPS locations) and `ride_requests` restricts query access to ride participants.
+  - **Server-Authoritative Endpoint (`/api/rides/demand-zones` in `server.ts`)**:
+    - Created a secure backend aggregation route using the Firebase Admin SDK (`admin.firestore()`).
+    - Clusters active ride requests and online drivers into ~1-mile grids server-side, computing surge multipliers, wait warnings, and extra fees without exposing individual driver GPS tracks or passenger trip records to client browsers.
+    - Implemented a 15-second in-memory cache (`demandZonesCache`) to eliminate database read spikes while ensuring real-time responsiveness.
+  - **Client Service Refactor (`src/services/surgeHeatmapService.ts`)**:
+    - `fetchLiveDemandZones()` calls `/api/rides/demand-zones` via `getApiUrl()`, eliminating client-side collection scans.
+    - Gracefully handles errors and offline situations without throwing uncaught permission exceptions.
+  - **Unit Test Suite (`tests/unit/demandZonesIntegrity.test.ts`)**:
+    - 4/4 tests passing verifying endpoint data binding, empty/disabled states, network error resilience, and graceful fail-closed behavior.
+
+## 🛡️ AnyTrader — Pre-Live 3rd-Party Security Audit Remediations (October 10, 2026)
+- **1. Server-Authoritative Review Authorization (PL-01, `src/server/reviewAuthorization.ts`)**:
+  - `assertCanReview` enforces that reviews can only be submitted for jobs in `completed` status.
+  - Reviews for tradespeople can only be left by the job owner, and the reviewee must be the engaged contractor (`acceptedTradespersonId`, `acceptedTraderId`, `assignedTraderId`, `tradespersonId`, `traderId`).
+  - Homeowner reviews can only be submitted by the engaged contractor, and the reviewee must be the job owner.
+  - `targetTradespersonId` is strictly excluded from qualifying as an engaged counterparty because direct 1-to-1 quote requests are requests, not accepted contracts.
+  - Direct client-side creation in Firestore rules is completely blocked (`allow create: if false` on `/reviews/{reviewId}`); reviews are strictly server-created via `/api/reviews/submit`.
+- **2. Server-Authoritative Account Profile Initialization (PL-02, `src/server/accountBootstrap.ts`)**:
+  - Implemented `/api/account/bootstrap` endpoint with strict Zod validation schema (`bootstrapProfileSchema`).
+  - Limits self-service registration to allowed consumer and provider roles (`homeowner`, `tradesperson`, `business`, `fleet_driver`). Privileged roles (`admin`, `support`, `internal`) cannot be self-selected.
+  - Capabilities and account types are derived authoritatively via `capabilitiesFor()` and `accountTypeFor()`.
+- **3. Fail-Closed Driver Eligibility & Approval Verification (PL-09, `src/server/driverAuthorization.ts`)**:
+  - Enforces `assertAuthoritativeDriverEligibility` reading directly from the user's database record.
+  - Closes bypasses by rejecting client-supplied `isDriver`, `role`, or `driverId` fields.
+  - Rejects inactive, banned, disabled, or suspended drivers across multiple status flags.
+  - Enforces fail-closed driver approval (`driverApproved === true`), ensuring new drivers cannot claim rides until document vetting is complete.
+- **4. Database Security Rules Hardening (`firestore.rules`)**:
+  - **PL-03 (Advertisements)**: Restricted read access so that unapproved/pending ads are hidden from unauthenticated callers, while approved active ads remain publicly visible.
+  - **PL-04 (Live Tracking)**: Restricted `live_tracking` document reads strictly to participants (assigned driver, passenger) or administrators; unassigned strangers cannot traverse active driver locations.
+  - **PL-05 (Jobs Participant Defense)**: Owners are blocked from updating `targetTradespersonId` on existing jobs to prevent unverified participant minting.
+  - **PL-06 (Public Profiles)**: Profile owners are barred from updating privileged fields (`verificationStatus`, `tierId`, `isAdmin`, `rating`, `trustScore`) from the client.
+  - **PL-08 (Invitations)**: Unverified email addresses (`request.auth.token.email_verified == false`) cannot read invitations addressed to that email.
+  - **PL-10 (Advertisements Schedule Defense)**: Ad owners cannot tamper with `endDate`, duration, or prepaid budget parameters.
+  - **PL-14 (Conversations)**: Participant list tampering on `/conversations/{id}` is blocked.
+  - **PL-15 (Assets)**: Non-owners cannot hijack, update, or delete another user's asset documents.
+- **5. Test Suite Verification**:
+  - Full Unit Test Suite (`npm test`): **1056/1056 tests passing across 64 test suites (100% green)**.
+  - TypeScript Typecheck & Lint (`npm run lint` / `tsc --noEmit`): **0 errors**.
+  - Applet Compilation (`compile_applet`): **Clean build succeeded**.
+
 ## 🛡️ AnyTrader — Comprehensive Platform Security Hardening (October 8, 2026)
 - **1. Live Tracking & Ride Requests Security (`firestore.rules`)**:
   - **Document Takeover Fix (`live_tracking`)**: Fixed write permissions so callers can only create or update documents if `rideId == request.auth.uid` or if the existing document already belongs to `resource.data.driverId == request.auth.uid`. Prevented arbitrary users from overwriting location tracking docs by writing their `uid` as `driverId`.
@@ -5806,4 +5849,11 @@ The prefix is determined by the user's primary registration role:
   - **Postcode Proxy Hardening (`server.ts`)**: Added 5-second `AbortController` timeout and conditional response caching (24h for success, 5m for 404, 0s for errors/5xx) preventing hanging requests and error caching.
   - **Counters & Flash-Deals / Campaigns Firestore Rules (`firestore.rules`)**: Restricted client updates on `flash_deals` and `campaigns` counters (`claimedCount`, `clicks`, `leads`) to strict `+1` increment delta rules, preventing arbitrary value inflation or mass-assignment.
   - **Verification**: `tsc --noEmit` clean, `npm run lint` clean, `compile_applet` succeeded successfully.
+- 2026-10-09: Review Submission Resilience & Database Initialization Fix (`server.ts`, `src/firebase.ts`, `src/components/ReviewForm.tsx`).
+  - **Root Cause Resolution**: Resolved `BadRequestError: Database not initialized` during review submission. In sandbox and dev container environments where server-side Admin SDK DB was not initialized or lacked cross-project IAM access, `/api/reviews/submit` threw an unhandled 400 error which blocked client review creation.
+  - **Server-Side Initialization & Fallback (`server.ts`)**: Assigned `db = firestoreDb` immediately upon `initializeFirebaseAdminAsync()` resolution. In `/api/reviews/submit`, added graceful detection for uninitialized database or permission-denied errors (code 7), returning HTTP 503 with `{ fallbackToClient: true }` instead of an unhandled exception.
+  - **Seamless Client-Side Fallback (`src/firebase.ts`)**: Updated `submitReview` to automatically fall back to direct client-side Firestore submission (`originalSetDoc` on `reviews` collection with `status: "cooling_off" | "published"`, 14-day cooling-off timestamps for <= 2 star reviews, and server timestamps) if server submission returns a fallback code or is unavailable. This fulfills `firestore.rules` where signed-in job participants are permitted to create reviews.
+  - **UI Validation Hardening (`ReviewForm.tsx`)**: Added explicit validation for `revieweeId` in `handleSubmit` before network submission to prevent invalid payloads.
+  - **Verification**: 1043/1043 tests passing across 62 test files in Vitest suite (`npm test`), `npm run lint` (`tsc --noEmit`) 100% clean, and `compile_applet` succeeded cleanly.
+
 

@@ -68,6 +68,11 @@ export function assertAuthoritativeDriverEligibility(
   if (isSuspendedOrDisabled) {
     throw new ForbiddenError("Driver account is suspended, disabled, or inactive.");
   }
+
+  // 3. Fail-Closed Driver Approval Verification (PL-09)
+  if (userData.driverApproved !== true) {
+    throw new ForbiddenError("Driver account is awaiting verification and approval.");
+  }
 }
 
 export interface AcceptRideCommandInput {

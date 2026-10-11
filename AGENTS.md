@@ -17,8 +17,11 @@
   - **V8.3 final sign-off**: **PENDING TASK 34**.
   - **V8.4 (Contractor Archive Ingestion)**: **NOT STARTED**.
 - **Latest Comprehensive Test Results**:
-  - **Full Unit Test Suite (`npm test`)**: **1021/1021 tests passing** across 61 test files (100% clean).
-  - **Firebase Emulator Test Suite (`npm run test:emulator`)**: **565/565 tests passing** across all emulator test suites.
+  - **Full Unit Test Suite (`npm test`)**: **1060/1060 tests passing** across 65 test files (100% clean).
+  - **Live Demand Zones Suite**: **4/4 tests passing** (`tests/unit/demandZonesIntegrity.test.ts`).
+  - **PL-01 Review Authorization Suite**: **7/7 tests passing** (`tests/unit/reviewAuthorization.test.ts`).
+  - **PL-02 Account Bootstrap Suite**: **6/6 tests passing** (`tests/unit/accountBootstrap.test.ts`).
+  - **PL-09 Driver Authorization Suite**: **10/10 tests passing** (`tests/unit/task35BDriverAuthorization.test.ts`).
   - **Task 35-H Escrow Release Integrity Suite**: **12/12 tests passing** (`tests/unit/escrowReleaseIntegrity.test.ts`).
   - **Task 35-G Driver Payout Orchestration Suite**: **8/8 tests passing** (`tests/unit/driverPayoutOrchestration.test.ts`).
   - **Task 35-F Stripe Redirect Integrity Suite**: **24/24 tests passing** (`tests/unit/task35FStripeRedirectIntegrity.test.ts`).

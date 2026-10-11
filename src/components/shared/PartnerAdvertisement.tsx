@@ -378,7 +378,12 @@ export default function PartnerAdvertisement({
     });
 
     // 3. Live advertisements query from Firestore (Traders, Trade Partners & Corporate Sponsors)
-    const unsubs = onSnapshot(query(collection(db, "advertisements")), (snapshot) => {
+    const adsQuery = query(
+      collection(db, "advertisements"),
+      where("approvalStatus", "==", "approved"),
+      where("isActive", "==", true)
+    );
+    const unsubs = onSnapshot(adsQuery, (snapshot) => {
       if (!isMounted) return;
       const activeAds: PartnerAdItem[] = snapshot.docs
         .map(d => {

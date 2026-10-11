@@ -3,6 +3,8 @@ service cloud.firestore {
   match /databases/{database}/documents {
     // --- Global Helpers ---
     function isSignedIn() { return request.auth != null; }
+    function isAnonymousAuth() { return isSignedIn() && request.auth.token.firebase.sign_in_provider == 'anonymous'; }
+    function isRegistered() { return isSignedIn() && !isAnonymousAuth(); }
     function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
     function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
     function isAdmin() { 
@@ -144,8 +146,14 @@ service cloud.firestore {
 
     // --- Advertisements ---
     match /advertisements/{adId} {
-      allow read: if true;
-      allow create: if isSignedIn() && (
+      allow get, list: if
+        (resource.data.get('isActive', false) == true && resource.data.get('approvalStatus', '') == 'approved') ||
+        (isSignedIn() && (
+          resource.data.get('advertiserUid', '') == request.auth.uid ||
+          resource.data.get('advertiserId', '') == request.auth.uid
+        )) ||
+        isAdmin();
+      allow create: if isRegistered() && (
         isAdmin() || (
           request.resource.data.advertiserUid == request.auth.uid &&
           request.resource.data.get('advertiserId', request.auth.uid) == request.auth.uid &&
@@ -186,7 +194,7 @@ service cloud.firestore {
               request.resource.data.impressions <= resource.data.get('impressions', 0) + 1
             ))
           ) ||
-          // 2. Ad Owner Creative/Metadata Updates (Strictly Prohibiting Financial & State Tampering)
+          // 2. Ad Owner Creative/Metadata Updates (Strictly Prohibiting Financial, Schedule, State & Attribution Tampering)
           (
             (resource.data.advertiserUid == request.auth.uid || resource.data.get('advertiserId', '') == request.auth.uid) &&
             request.resource.data.advertiserUid == resource.data.advertiserUid &&
@@ -195,6 +203,8 @@ service cloud.firestore {
               'prepaidBalance', 'isActive', 'lastAutoTopUpAt', 'approvalStatus',
               'totalBudget', 'totalCost', 'dailyRate', 'recurringPrice',
               'advertiserUid', 'advertiserId',
+              'startDate', 'endDate', 'durationDays', 'status', 'type', 'targetRole',
+              'isTraderAd', 'badgeLabel', 'perkText',
               'clicks', 'bannerClicks', 'searchFeedClicks', 'impressions'
             ])
           )
@@ -215,7 +225,8 @@ service cloud.firestore {
           request.resource.data.get('trustScore', 0) == 0 &&
           request.resource.data.get('verifiedTrader', false) == false &&
           request.resource.data.get('isVerified', false) == false &&
-          request.resource.data.get('videoVerified', false) == false
+          request.resource.data.get('videoVerified', false) == false &&
+          request.resource.data.get('verificationStatus', 'unverified') == 'unverified'
         )
       );
       allow update: if isSignedIn() && (
@@ -223,7 +234,8 @@ service cloud.firestore {
           isOwner(userId) &&
           !request.resource.data.diff(resource.data).affectedKeys().hasAny([
             'rating', 'trustScore', 'totalReviews', 'verified', 'isVerified',
-            'verifiedTrader', 'badges', 'videoVerificationStatus', 'videoVerified'
+            'verifiedTrader', 'badges', 'videoVerificationStatus', 'videoVerified',
+            'verificationStatus', 'tierId', 'responseRate', 'recommendedCategories'
           ])
         )
       );
@@ -399,21 +411,20 @@ service cloud.firestore {
     }
     
     match /live_tracking/{rideId} {
-      allow read, list: if isSignedIn() && (
+      allow get, list: if isRegistered() && (
         resource.data.get('driverId', '') == request.auth.uid || 
         resource.data.get('passengerId', '') == request.auth.uid || 
         resource.data.get('riderId', '') == request.auth.uid || 
         rideId == request.auth.uid || 
-        resource.data.get('isOnline', false) == true ||
         isAdmin()
       );
-      allow create: if isSignedIn() && (
+      allow create: if isRegistered() && (
         rideId == request.auth.uid || 
         request.resource.data.get('driverId', '') == request.auth.uid || 
         request.resource.data.get('passengerId', '') == request.auth.uid ||
         isAdmin()
       );
-      allow update: if isSignedIn() && (
+      allow update: if isRegistered() && (
         isAdmin() || 
         (
           rideId == request.auth.uid &&
@@ -428,7 +439,7 @@ service cloud.firestore {
           request.resource.data.get('passengerId', '') == request.auth.uid
         )
       );
-      allow delete: if isSignedIn() && (
+      allow delete: if isRegistered() && (
         rideId == request.auth.uid || 
         resource.data.get('driverId', '') == request.auth.uid || 
         resource.data.get('passengerId', '') == request.auth.uid || 
@@ -507,11 +518,22 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // --- Messaging & Conversations ---
+    // --- Messaging & Conversations (PL-14 Hardened) ---
     match /conversations/{conversationId} {
       allow read, list: if isSignedIn() && (resource == null || request.auth.uid in resource.data.participants || isAdmin());
-      allow create: if isSignedIn() && (request.auth.uid in request.resource.data.participants || isAdmin());
-      allow update: if isSignedIn() && (resource == null || request.auth.uid in resource.data.participants || isAdmin());
+      allow create: if isRegistered() && (
+        isAdmin() || (
+          request.auth.uid in request.resource.data.participants &&
+          request.resource.data.participants.size() >= 2 &&
+          request.resource.data.participants.size() <= 10
+        )
+      );
+      allow update: if isRegistered() && (
+        isAdmin() || (
+          request.auth.uid in resource.data.participants &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['participants'])
+        )
+      );
       
       match /messages/{messageId} {
         allow read, list: if isSignedIn() && (
@@ -537,18 +559,10 @@ service cloud.firestore {
       );
     }
 
-    // --- Reviews ---
+    // --- Reviews (Server-Authoritative Only, PL-05 & PL-01 Hardened) ---
     match /reviews/{reviewId} {
       allow read: if true;
-      allow create: if isSignedIn() && (
-        isAdmin() ||
-        (
-          request.resource.data.reviewerId == request.auth.uid &&
-          request.resource.data.get('jobId', '') != '' &&
-          exists(/databases/$(database)/documents/jobs/$(request.resource.data.jobId)) &&
-          isJobParticipant(get(/databases/$(database)/documents/jobs/$(request.resource.data.jobId)).data)
-        )
-      );
+      allow create: if false; // All reviews must be submitted via /api/reviews/submit with authoritative counterparty validation
       allow update: if isAdmin();
       allow delete: if isAdmin();
     }
@@ -568,19 +582,19 @@ service cloud.firestore {
       allow get, list: if isSignedIn() && (
         isAdmin() || 
         resource == null || 
-        ('email' in request.auth.token && resource.data.get('email', '') != '' && resource.data.get('email', '').lower() == request.auth.token.email.lower()) ||
+        ('email' in request.auth.token && request.auth.token.get('email_verified', false) == true && resource.data.get('email', '') != '' && resource.data.get('email', '').lower() == request.auth.token.email.lower()) ||
         resource.data.get('invitedBy', '') == request.auth.uid
       );
-      allow create: if isSignedIn() && (
+      allow create: if isRegistered() && (
         isAdmin() || 
         request.resource.data.get('invitedBy', '') == request.auth.uid
       );
-      allow update: if isSignedIn() && (
+      allow update: if isRegistered() && (
         isAdmin() || 
         resource.data.get('invitedBy', '') == request.auth.uid ||
-        ('email' in request.auth.token && resource.data.get('email', '') != '' && resource.data.get('email', '').lower() == request.auth.token.email.lower())
+        ('email' in request.auth.token && request.auth.token.get('email_verified', false) == true && resource.data.get('email', '') != '' && resource.data.get('email', '').lower() == request.auth.token.email.lower())
       );
-      allow delete: if isSignedIn() && (
+      allow delete: if isRegistered() && (
         isAdmin() || 
         resource.data.get('invitedBy', '') == request.auth.uid
       );
@@ -647,7 +661,17 @@ service cloud.firestore {
 
     match /assets/{assetId} {
       allow read: if isSignedIn() && (resource == null || resource.data.ownerId == request.auth.uid || isAdmin());
-      allow write: if isSignedIn() && (request.resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isRegistered() && request.resource.data.ownerId == request.auth.uid;
+      allow update: if isRegistered() && (
+        isAdmin() || (
+          resource.data.ownerId == request.auth.uid &&
+          request.resource.data.ownerId == request.auth.uid
+        )
+      );
+      allow delete: if isRegistered() && (
+        isAdmin() ||
+        resource.data.ownerId == request.auth.uid
+      );
     }
 
     match /scheduledRepairs/{taskId} {
@@ -720,14 +744,15 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // --- Tenant Issues (Hardened: Protected from public data extraction) ---
+    // --- Tenant Issues (Hardened: Protected from public data extraction, PL-08) ---
     match /tenant_issues/{issueId} {
-      allow create: if isSignedIn() && request.resource.data.get('tenantName', '') is string && 
+      allow create: if isRegistered() && request.resource.data.get('tenantName', '') is string && 
                        request.resource.data.get('title', '') is string;
       allow get, list: if isSignedIn() && (
         resource.data.get('landlordOwnerId', '') == request.auth.uid || 
         (
           'email' in request.auth.token &&
+          request.auth.token.get('email_verified', false) == true &&
           resource.data.get('tenantEmail', '') != '' &&
           resource.data.get('tenantEmail', '').lower() == request.auth.token.email.lower()
         ) ||
@@ -866,6 +891,8 @@ service cloud.firestore {
             'payoutTransferred', 'payoutStatus', 'paymentStatus', 'funded', 'isPaid',
             'escrowStatus', 'escrowBalance', 'amountPaid', 'amount', 'platformFee',
             'assignedTraderId', 'acceptedTradespersonId', 'acceptedTraderId', 'tradespersonId', 'traderId',
+            'targetTradespersonId', 'targetTradespersonName', 'targetTraderId', 'directTraderId', 'acceptedQuoteId',
+            'hasReview', 'hasTradespersonReview',
             'ownerId', 'homeownerId', 'userId', 'customerId', 'posterId',
             'stripeCustomerId', 'stripeAccountId', 'rating', 'trustScore', 'isVerified', 'verified',
             'isBoosted', 'boostTier', 'boostExpiresAt', 'exclusiveUntil', 'isInstantMatch', 'isEmergencyBoost'

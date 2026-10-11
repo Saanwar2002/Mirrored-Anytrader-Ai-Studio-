@@ -458,9 +458,37 @@ export default function Onboarding() {
         })),
         createdAt: serverTimestamp(),
       };
-      console.log("Saving setDoc, user.uid:", user.uid);
-      await setDoc(doc(db, "users", user.uid), profile);
-      console.log("setDoc success");
+      console.log("Saving profile via /api/account/bootstrap-profile, user.uid:", user.uid);
+      const token = await user.getIdToken();
+      const response = await fetch("/api/account/bootstrap-profile", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          role: finalRole,
+          name: finalName,
+          phone: finalPhone || undefined,
+          postcode: postcode ? postcode.toUpperCase().replace(/\s/g, "") : undefined,
+          city: city || undefined,
+          county: county || undefined,
+          trades: selectedTrades.length > 0 ? selectedTrades : (businessCategory ? [businessCategory] : []),
+          subcategories: selectedSubcategories,
+          businessLayer: role === "business" ? businessLayer : null,
+          businessCategory: role === "business" ? businessCategory : null,
+          vehicleCategories: finalRole === "fleet_driver" ? vehicleCategories : null,
+          isPetFriendly: finalRole === "fleet_driver" ? isPetFriendly : false,
+          referrerUid: referrerUid || null,
+          affiliateCode: appliedAffiliateCode || null,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to create user profile");
+      }
+      console.log("bootstrap-profile success");
 
       // Sync non-PII public profile for trader discovery
       if (role === "business" || (finalRole as string) === "tradesperson") {

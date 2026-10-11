@@ -2513,4 +2513,190 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       });
     });
   });
+
+  // =========================================================================
+  // Category 14: Pre-Live Audit Security Remediations (PL-03 to PL-08, PL-14, PL-15)
+  // =========================================================================
+  describe("Category 14: Pre-Live Audit Security Remediations", () => {
+    it("88. PL-03: Advertisements - pending ads hidden from unauthenticated callers, approved ads readable", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "advertisements", "ad_pending_secret"), {
+          advertiserUid: "user_adv_1",
+          isActive: false,
+          approvalStatus: "pending",
+        });
+        await setDoc(doc(adminDb, "advertisements", "ad_approved_public"), {
+          advertiserUid: "user_adv_1",
+          isActive: true,
+          approvalStatus: "approved",
+        });
+      });
+
+      const unauthDb = testEnv.unauthenticatedContext().firestore();
+      await assertFails(getDoc(doc(unauthDb, "advertisements", "ad_pending_secret")));
+      await assertSucceeds(getDoc(doc(unauthDb, "advertisements", "ad_approved_public")));
+    });
+
+    it("89. PL-10: Advertisements - ad owner cannot tamper with endDate or financial schedule", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "advertisements", "ad_owner_schedule"), {
+          advertiserUid: "user_adv_owner",
+          advertiserId: "user_adv_owner",
+          isActive: true,
+          approvalStatus: "approved",
+          endDate: "2026-10-20",
+        });
+      });
+
+      const ownerDb = testEnv.authenticatedContext("user_adv_owner").firestore();
+      await assertFails(
+        updateDoc(doc(ownerDb, "advertisements", "ad_owner_schedule"), {
+          endDate: "2030-01-01",
+        })
+      );
+    });
+
+    it("90. PL-04: Live Tracking - unassigned stranger cannot read or list online drivers", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "live_tracking", "driver_gps_1"), {
+          driverId: "driver_gps_1",
+          isOnline: true,
+          lat: 51.5074,
+          lng: -0.1278,
+        });
+      });
+
+      const strangerDb = testEnv.authenticatedContext("stranger_user").firestore();
+      await assertFails(getDoc(doc(strangerDb, "live_tracking", "driver_gps_1")));
+    });
+
+    it("91. PL-05: Reviews - direct client creation is denied (server-only)", async () => {
+      const clientDb = testEnv.authenticatedContext("client_reviewer").firestore();
+      await assertFails(
+        setDoc(doc(clientDb, "reviews", "review_direct_1"), {
+          jobId: "job_1",
+          reviewerId: "client_reviewer",
+          rating: 5,
+        })
+      );
+    });
+
+    it("92. PL-05: Jobs - owner cannot mint participant via targetTradespersonId update", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "jobs", "job_owner_test_mint"), {
+          homeownerId: "owner_user_mint",
+          status: "open",
+        });
+      });
+
+      const ownerDb = testEnv.authenticatedContext("owner_user_mint").firestore();
+      await assertFails(
+        updateDoc(doc(ownerDb, "jobs", "job_owner_test_mint"), {
+          targetTradespersonId: "accomplice_trader",
+        })
+      );
+    });
+
+    it("93. PL-06: Public Profiles - owner cannot self-elevate verificationStatus or tierId", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "public_profiles", "trader_self_verify"), {
+          name: "Trader T",
+          verificationStatus: "unverified",
+        });
+      });
+
+      const traderDb = testEnv.authenticatedContext("trader_self_verify").firestore();
+      await assertFails(
+        updateDoc(doc(traderDb, "public_profiles", "trader_self_verify"), {
+          verificationStatus: "verified",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(traderDb, "public_profiles", "trader_self_verify"), {
+          tierId: "Gotham Enterprise VIP",
+        })
+      );
+      // Non-privileged bio update succeeds
+      await assertSucceeds(
+        updateDoc(doc(traderDb, "public_profiles", "trader_self_verify"), {
+          bio: "Updated professional bio description",
+        })
+      );
+    });
+
+    it("94. PL-08: Invitations - unverified email cannot read invitation addressed to that email", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "invitations", "inv_email_test"), {
+          email: "victim@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+      });
+
+      const unverifiedDb = testEnv
+        .authenticatedContext("attacker_fake_email", {
+          email: "victim@example.com",
+          email_verified: false,
+        })
+        .firestore();
+      await assertFails(getDoc(doc(unverifiedDb, "invitations", "inv_email_test")));
+
+      const verifiedDb = testEnv
+        .authenticatedContext("legit_recipient", {
+          email: "victim@example.com",
+          email_verified: true,
+        })
+        .firestore();
+      await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_test")));
+    });
+
+    it("95. PL-14: Conversations - participant tampering is blocked", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "conversations", "conv_tamper_test"), {
+          participants: ["alice_user", "bob_user"],
+        });
+      });
+
+      const aliceDb = testEnv.authenticatedContext("alice_user").firestore();
+      await assertFails(
+        updateDoc(doc(aliceDb, "conversations", "conv_tamper_test"), {
+          participants: ["alice_user"],
+        })
+      );
+    });
+
+    it("96. PL-15: Assets - non-owner cannot hijack or overwrite another user's asset", async () => {
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        const adminDb = context.firestore();
+        await setDoc(doc(adminDb, "assets", "asset_alice_boiler"), {
+          ownerId: "alice_asset_owner",
+          name: "Worcester Bosch Boiler",
+        });
+      });
+
+      const attackerDb = testEnv.authenticatedContext("bob_attacker").firestore();
+      await assertFails(
+        updateDoc(doc(attackerDb, "assets", "asset_alice_boiler"), {
+          ownerId: "bob_attacker",
+        })
+      );
+      await assertFails(deleteDoc(doc(attackerDb, "assets", "asset_alice_boiler")));
+
+      const aliceDb = testEnv.authenticatedContext("alice_asset_owner").firestore();
+      await assertSucceeds(
+        updateDoc(doc(aliceDb, "assets", "asset_alice_boiler"), {
+          ownerId: "alice_asset_owner",
+          name: "Worcester Bosch Boiler 2026",
+        })
+      );
+    });
+  });
 });
+

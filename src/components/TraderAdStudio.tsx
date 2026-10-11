@@ -48,7 +48,6 @@ export default function TraderAdStudio() {
         advertiserUid: user.uid,
         advertiserId: user.uid,
         advertiserName: profile?.name || "Trader",
-        advertiserEmail: profile?.email || user.email,
         title: formData.get("title"),
         description: formData.get("description"),
         url: `${window.location.origin}/profile/${user.uid}`,

@@ -29,6 +29,11 @@ export function ReviewForm({ jobId, reviewerId, revieweeId, type = "tradesperson
       return;
     }
 
+    if (!revieweeId) {
+      setError("Unable to identify the recipient for this review.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
 

@@ -9,8 +9,7 @@
           "/chat/*",
           "/profile/*",
           "/my-jobs",
-          "/messages",
-          "*"
+          "/messages"
         ]
       }
     ]

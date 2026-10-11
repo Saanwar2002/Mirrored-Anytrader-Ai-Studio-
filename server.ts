@@ -21,6 +21,8 @@ import { validateJobTransition, validateMilestoneTransition, validateRideTransit
 import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
 import { sanitizeRedirectUrl, getAuthoritativeAppUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
+import { assertCanReview, ReviewType } from "./src/server/reviewAuthorization.ts";
+import { executeBootstrapProfileCommand } from "./src/server/accountBootstrap.ts";
 import {
   listAuthoritativeNotifications,
   markAuthoritativeNotificationRead,
@@ -195,6 +197,7 @@ export async function initializeFirebaseAdminAsync(): Promise<{ app: admin.app.A
     // settings() throws if the instance has already been initialized or used — safe to ignore.
   }
 
+  db = firestoreDb;
   return { app, db: firestoreDb };
 }
 
@@ -1270,6 +1273,10 @@ async function verifyTokenSafely(token: string) {
       err?.message?.includes("accessNotConfigured") ||
       err?.message?.includes("has not been used in project")
     ) {
+      if (process.env.NODE_ENV === "production" && process.env.ALLOW_DEGRADED_AUTH !== "true") {
+        console.error("[Auth] Identity Toolkit unavailable; refusing unverified token without revocation checks in production.");
+        throw new UnauthorizedError("Authentication service temporarily unavailable. Please retry.");
+      }
       console.warn("[Auth Warning] Identity Toolkit API service unavailable; validating signature and cross-checking user revocation in database.");
       const decodedToken = await admin.auth().verifyIdToken(token, false);
 
@@ -1464,7 +1471,7 @@ async function startServer() {
   const app = express();
   // Set trust proxy to 1 (trust single reverse proxy hop from Nginx / Cloud Run ingress)
   app.set("trust proxy", 1);
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Allowed Origins Configuration for Web, Native Capacitor Mobile Apps (Android/iOS), and Preview
   const defaultAllowedOrigins = [
@@ -1621,6 +1628,14 @@ async function startServer() {
     message: { error: "Too many postcode lookups, please try again after a minute" },
   });
   
+  const reviewLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000,
+    max: 10,
+    keyGenerator: limitKeyGenerator,
+    validate: false,
+    message: { error: "Too many review submissions, please try again shortly" },
+  });
+
   const generalLimiter = rateLimit({
     windowMs: 1 * 60 * 1000,
     max: 1000, // Bounded capacity for rapid navigation, polling, and iframe reloading
@@ -2137,11 +2152,13 @@ async function startServer() {
   // API Routes
   app.get("/api/health", (req, res) => {
     if (!isApplicationReady) {
+      if (bootstrapError) {
+        console.warn("[/api/health] Degraded readiness notice:", bootstrapError);
+      }
       return res.status(200).json({
         status: "degraded",
         ready: true,
         bootstrapReady: false,
-        error: bootstrapError || "Application bootstrap in progress or degraded",
         message: "TradeQuote UK API running (client SPA mode active)"
       });
     }
@@ -3065,7 +3082,6 @@ async function startServer() {
           advertiserId: authUid,
           advertiserUid: authUid,
           advertiserName: businessTitle,
-          advertiserEmail: userData.email || "",
           imageUrl: userData.avatarUrl || "",
           isTraderAd: true,
           badgeLabel: "FEATURED PRO",
@@ -3091,6 +3107,165 @@ async function startServer() {
     } catch (err: any) {
       console.error("Create banner campaign error:", err);
       return res.status(400).json({ error: err.message || "Failed to create banner campaign" });
+    }
+  });
+
+  // In-memory cache for live demand zones (15s TTL) to prevent excessive database read spikes
+  let demandZonesCache: { timestamp: number; zones: any[] } | null = null;
+
+  app.get("/api/rides/demand-zones", async (req, res) => {
+    try {
+      if (!db) {
+        return res.json({ success: true, zones: [] });
+      }
+
+      const now = Date.now();
+      if (demandZonesCache && (now - demandZonesCache.timestamp) < 15000) {
+        return res.json({ success: true, zones: demandZonesCache.zones });
+      }
+
+      let rules: any = {
+        lowWaitMins: 5, mediumWaitMins: 10, highWaitMins: 20,
+        lowFee: 1.0, mediumFee: 2.0, highFee: 3.5,
+        lowMultiplier: 1.1, mediumMultiplier: 1.3, highMultiplier: 1.6,
+        lowColor: "green", mediumColor: "amber", highColor: "red",
+        surgeOpacity: 40
+      };
+      let isFixedModel = true;
+      let autoSurgeEnabled = true;
+
+      try {
+        const configSnap = await db.collection("platform_config").doc("rides").get();
+        if (configSnap.exists) {
+          const cd = configSnap.data() || {};
+          if (cd.surgeRules) rules = { ...rules, ...cd.surgeRules };
+          if (cd.surgeModel !== undefined) isFixedModel = cd.surgeModel === "fixed";
+          if (cd.surgeEnabled !== undefined) autoSurgeEnabled = cd.surgeEnabled;
+        }
+      } catch (err) {
+        console.warn("Could not read platform_config/rides:", err);
+      }
+
+      if (!autoSurgeEnabled) {
+        demandZonesCache = { timestamp: now, zones: [] };
+        return res.json({ success: true, zones: [] });
+      }
+
+      const ridesSnap = await db.collection("ride_requests")
+        .where("status", "in", ["pending", "searching", "offered"])
+        .limit(200)
+        .get();
+      const pendingRides = ridesSnap.docs.map(d => d.data());
+
+      const driversSnap = await db.collection("live_tracking")
+        .where("isOnline", "==", true)
+        .limit(200)
+        .get();
+      const onlineDrivers = driversSnap.docs.map(d => d.data());
+
+      const hotSpots = new Map<string, { rideCount: number; lat: number; lng: number; rides: any[] }>();
+      pendingRides.forEach(ride => {
+        const lat = ride.pickupLat;
+        const lng = ride.pickupLng;
+        if (lat && lng && typeof lat === "number" && typeof lng === "number") {
+          const gridLat = Math.round(lat * 50) / 50;
+          const gridLng = Math.round(lng * 50) / 50;
+          const key = `${gridLat},${gridLng}`;
+          if (!hotSpots.has(key)) {
+            hotSpots.set(key, { rideCount: 0, lat, lng, rides: [] });
+          }
+          const spot = hotSpots.get(key)!;
+          spot.rideCount += 1;
+          spot.rides.push(ride);
+        }
+      });
+
+      const getDistanceMiles = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+        const R = 3958.8;
+        const dLat = (lat2 - lat1) * (Math.PI / 180);
+        const dLon = (lon2 - lon1) * (Math.PI / 180);
+        const a =
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+          Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+      };
+
+      const zones: any[] = [];
+      hotSpots.forEach(spot => {
+        let nearbyDrivers = 0;
+        onlineDrivers.forEach(driver => {
+          if (driver.lat && driver.lng && typeof driver.lat === "number" && typeof driver.lng === "number") {
+            const dist = getDistanceMiles(spot.lat, spot.lng, driver.lat, driver.lng);
+            if (dist <= 3) nearbyDrivers++;
+          }
+        });
+
+        let maxWaitTimeMins = 0;
+        spot.rides.forEach(r => {
+          let createdAtMs = 0;
+          if (r.createdAt?.toMillis) {
+            createdAtMs = r.createdAt.toMillis();
+          } else if (r.createdAt instanceof Date) {
+            createdAtMs = r.createdAt.getTime();
+          } else if (typeof r.createdAt === "string") {
+            createdAtMs = new Date(r.createdAt).getTime();
+          } else if (typeof r.createdAt === "number") {
+            createdAtMs = r.createdAt;
+          }
+          if (createdAtMs > 0) {
+            const waitMins = (now - createdAtMs) / 60000;
+            if (waitMins > maxWaitTimeMins) maxWaitTimeMins = waitMins;
+          }
+        });
+
+        const ratio = nearbyDrivers > 0 ? (spot.rideCount / nearbyDrivers) : spot.rideCount;
+
+        let intensity: "high" | "medium" | "low" | null = null;
+        let multiplier = 1.0;
+        let extraFee = 0.0;
+
+        if (spot.rideCount > 1 || maxWaitTimeMins >= rules.lowWaitMins) {
+          if (maxWaitTimeMins >= rules.highWaitMins || ratio > 3) {
+            intensity = "high";
+            multiplier = rules.highMultiplier;
+            extraFee = rules.highFee;
+          } else if (maxWaitTimeMins >= rules.mediumWaitMins || ratio > 2) {
+            intensity = "medium";
+            multiplier = rules.mediumMultiplier;
+            extraFee = rules.mediumFee;
+          } else if (maxWaitTimeMins >= rules.lowWaitMins || ratio >= 1) {
+            intensity = "low";
+            multiplier = rules.lowMultiplier;
+            extraFee = rules.lowFee;
+          }
+        }
+
+        if (intensity) {
+          zones.push({
+            lat: spot.lat,
+            lng: spot.lng,
+            radius: intensity === "high" ? 800 : intensity === "medium" ? 600 : 400,
+            intensity,
+            label: isFixedModel ? `£${Number(extraFee).toFixed(2)} Surge` : `${multiplier}x Surge`,
+            surgeMultiplier: multiplier,
+            maxWaitTimeMins,
+            waitWarning: maxWaitTimeMins >= rules.highWaitMins,
+            extraFee,
+            isFixedModel,
+            uiColor: intensity === "high" ? (rules.highColor || "red") : intensity === "medium" ? (rules.mediumColor || "amber") : (rules.lowColor || "green"),
+            uiOpacity: rules.surgeOpacity
+          });
+        }
+      });
+
+      zones.sort((a, b) => b.surgeMultiplier - a.surgeMultiplier);
+      demandZonesCache = { timestamp: now, zones };
+      res.json({ success: true, zones });
+    } catch (error: any) {
+      console.error("Error computing demand zones on server:", error);
+      res.json({ success: true, zones: [] });
     }
   });
 
@@ -3162,8 +3337,11 @@ async function startServer() {
 
       const idempotencyKey = (req.headers["x-idempotency-key"] as string) || 
         (req.headers["idempotency-key"] as string) || 
-        req.body.idempotencyKey || 
-        `payout_${driverId}_${amount || 'all'}_${Date.now()}`;
+        req.body.idempotencyKey;
+
+      if (!idempotencyKey || typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) {
+        throw new BadRequestError("Idempotency-Key header is required for payout operations.");
+      }
 
       const { result, wasReplayed } = await PaymentLedgerEngine.executeIdempotentOperation(
         db,
@@ -3973,8 +4151,8 @@ async function startServer() {
     }
   });
 
-  // Server-Authoritative Review Submission & Rating Aggregation (Task 4.4 & V6 Hardened)
-  app.post("/api/reviews/submit", requireAuth, async (req, res) => {
+  // Server-Authoritative Review Submission & Rating Aggregation (PL-01 & Task 4.4 Hardened)
+  app.post("/api/reviews/submit", requireAuth, reviewLimiter, async (req, res) => {
     try {
       const reviewerId = (req as any).user.uid;
       const {
@@ -3983,10 +4161,16 @@ async function startServer() {
         rating,
         comment = "",
         recommended = true,
-        type = "tradesperson_review"
       } = req.body;
+      const type: ReviewType =
+        req.body?.type === "homeowner_review" ? "homeowner_review" : "tradesperson_review";
 
-      if (!db) throw new BadRequestError("Database not initialized");
+      if (!db) {
+        return res.status(503).json({
+          error: "Database not initialized on server",
+          fallbackToClient: true
+        });
+      }
       const firestoreDb = db;
       if (!jobId || !revieweeId) throw new BadRequestError("Job ID and Reviewee ID are required");
 
@@ -3994,24 +4178,39 @@ async function startServer() {
         throw new BadRequestError("Self-reviews are strictly forbidden.");
       }
 
-      const numRating = Math.max(1, Math.min(5, Math.round(Number(rating) || 5)));
-      const isLowRating = numRating <= 2 && type === "tradesperson_review";
+      const numRating = Number(rating);
+      if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
+        throw new BadRequestError("Rating must be a whole number from 1 to 5.");
+      }
 
-      const reviewRef = firestoreDb.collection("reviews").doc();
+      const isLowRating = numRating <= 2 && type === "tradesperson_review";
       const status = isLowRating ? "cooling_off" : "published";
       const publishAt = isLowRating
         ? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000) // 14-day cooling-off
         : new Date();
 
+      // Deterministic document ID ensures one review per job per direction enforced atomically
+      const reviewDocId = `${jobId}_${type}`;
+      const reviewRef = firestoreDb.collection("reviews").doc(reviewDocId);
+      const jobRef = firestoreDb.collection("jobs").doc(jobId);
+      const userRef = firestoreDb.collection("users").doc(revieweeId);
+
       await firestoreDb.runTransaction(async (transaction) => {
-        const userRef = firestoreDb.collection("users").doc(revieweeId);
-        const userDoc = await transaction.get(userRef);
+        const [jobDoc, existingReviewDoc, userDoc] = await Promise.all([
+          transaction.get(jobRef),
+          transaction.get(reviewRef),
+          transaction.get(userRef),
+        ]);
 
-        const jobRef = firestoreDb.collection("jobs").doc(jobId);
-        const jobDoc = await transaction.get(jobRef);
-        if (!jobDoc.exists) throw new BadRequestError(`Job ${jobId} not found`);
+        if (!jobDoc.exists) throw new NotFoundError(`Job ${jobId} not found`);
+        const jobData = jobDoc.data() || {};
 
-        const currentJobStatus = jobDoc.data()?.status || "in_progress";
+        // Authoritative validation: counterparty engagement, ownership, and job status == 'completed'
+        assertCanReview(jobData, reviewerId, revieweeId, type);
+
+        if (existingReviewDoc.exists) {
+          throw new ConflictError("This job has already been reviewed.");
+        }
 
         // 1. Write the review document
         transaction.set(reviewRef, {
@@ -4059,11 +4258,9 @@ async function startServer() {
           }
         }
 
-        // 3. Update Job document status with state machine check
+        // 3. Mark job review indicator (Do not alter status; completion is managed strictly by /api/jobs/:id/complete)
         if (type === "tradesperson_review") {
-          validateJobTransition(currentJobStatus, "completed");
           transaction.update(jobRef, {
-            status: "completed",
             hasReview: true,
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
           });
@@ -4117,7 +4314,32 @@ async function startServer() {
         status
       });
     } catch (error: any) {
+      if (
+        error?.code === 7 ||
+        String(error?.message || error).includes("PERMISSION_DENIED") ||
+        String(error?.message || error).includes("Missing or insufficient permissions")
+      ) {
+        console.warn("[/api/reviews/submit] Server-side Admin SDK lacks database permission in sandbox. Signaling client-side fallback.");
+        return res.status(503).json({
+          error: "Server database permissions unavailable in this environment",
+          fallbackToClient: true
+        });
+      }
       console.error("Review Submission Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Server-Authoritative Account Profile Initialization (PL-02 Hardened)
+  app.post("/api/account/bootstrap-profile", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database not initialized on server");
+      const caller = (req as any).user;
+      const clientIp = req.ip || req.socket.remoteAddress;
+
+      const result = await executeBootstrapProfileCommand(db, caller, req.body, clientIp);
+      res.status(201).json(result);
+    } catch (error: any) {
       sendHttpError(res, error, req);
     }
   });
@@ -6557,6 +6779,13 @@ Limit your response to just the text of the tip. Do not use quotes.`;
       console.log(`TradeQuote UK server running on http://localhost:${PORT}`);
       const preflight = runProductionChecks(process.env, db);
       console.log(`[V6 Pre-Flight Gate] Overall Status: ${preflight.overallStatus} (${preflight.checks.filter(c => c.status === 'FAIL').length} fails, ${preflight.checks.filter(c => c.status === 'WARN').length} warns)`);
+      if (process.env.NODE_ENV === "production" && preflight.overallStatus === "NO_GO") {
+        console.error(
+          "[Pre-Flight] CRITICAL: NO_GO status encountered in production. Terminating process:",
+          preflight.checks.filter((c) => c.status === "FAIL").map((c) => c.name)
+        );
+        process.exit(1);
+      }
       resolve(serverInstance);
     });
     serverInstance.on("error", (err) => {
