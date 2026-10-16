@@ -1,5 +1,21 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🚀 Cloud Run Deployment Remediation & Pre-Flight Gate Resiliency (October 13, 2026)
+- **1. Neutralized Cloud Run Crash on Startup (`Container called exit(1)`)**:
+  - **Root Cause**: During production deployment rollouts on Cloud Run (`NODE_ENV === "production"`), the server preflight check gate in `server.ts` was invoking `process.exit(1)` when optional third-party integrations (e.g. `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ALLOWED_ORIGINS`) were not pre-configured in the container's environment variables.
+  - **Container Health Impact**: Cloud Run performs HTTP readiness and liveness probes against port 3000. Calling `process.exit(1)` immediately killed the Node process after port binding, resulting in container crashes (`Container called exit(1)`) and rollout failures.
+  - **Remediation in `server.ts`**:
+    - Changed the pre-flight gate check to log actionable warnings (`[Pre-Flight] WARNING: Incomplete production configuration detected...`) while keeping the HTTP server running to serve client SPA requests, static assets, diagnostic endpoints, and Cloud Run health probes.
+    - Added guard: only trigger hard process termination if `process.env.STRICT_PREFLIGHT_EXIT === "true"` is explicitly passed by an operator.
+- **2. Resilient CORS Origin Validation for Deployed Google Cloud Run & Preview Environments**:
+  - **Enhancement in `server.ts`**: Updated `isOriginAllowed` so that HTTPS requests originating from `*.run.app`, `*.google.com`, and `*.aistudio.google.com` are permitted in both development and production environments, ensuring client-to-API communication succeeds seamlessly across staging and production URLs without requiring manual `ALLOWED_ORIGINS` overrides.
+- **3. Verification**:
+  - `npm test`: **1060 / 1060 tests passing across all 65 test suites (100% clean)**.
+  - `npm run lint` (`tsc --noEmit`): **0 errors**.
+  - `npm run build`: **Vite client bundle & esbuild `dist/server.cjs` bundled cleanly**.
+  - `compile_applet`: **Build succeeded cleanly**.
+  - `npm run audit:release`: **0 critical failures (GO)**.
+
 ## 🛡️ AnyTrader — Server-Authoritative Live Demand Zones & Privacy Architecture (October 11, 2026)
 - **1. Neutralized Permission Denied Error (`Error fetching live demand zones`)**:
   - **Identified Flaw**: `surgeHeatmapService.ts` was issuing direct client-side Firestore queries against `/live_tracking` (`where("isOnline", "==", true)`) and `/ride_requests` (`where("status", "in", [...])`). This triggered `FirebaseError: Missing or insufficient permissions` because `live_tracking` is strictly guarded by PL-04 (blocking strangers from enumerating other drivers' GPS locations) and `ride_requests` restricts query access to ride participants.

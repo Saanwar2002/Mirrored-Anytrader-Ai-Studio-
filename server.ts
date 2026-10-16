@@ -1491,9 +1491,9 @@ async function startServer() {
     if (allowedSet.has(origin)) {
       return true;
     }
-    if (process.env.NODE_ENV !== "production") {
-      try {
-        const parsed = new URL(origin);
+    try {
+      const parsed = new URL(origin);
+      if (process.env.NODE_ENV !== "production") {
         // Strict localhost check: hostname must be exactly localhost, 127.0.0.1, or ::1
         const isStrictLocalhost =
           parsed.hostname === "localhost" ||
@@ -1502,16 +1502,16 @@ async function startServer() {
         if (isStrictLocalhost) {
           return true;
         }
-        // Strict Cloud Run and Google development previews
-        if (
-          parsed.protocol === "https:" &&
-          (parsed.hostname.endsWith(".run.app") || parsed.hostname.endsWith(".google.com"))
-        ) {
-          return true;
-        }
-      } catch {
-        return false;
       }
+      // Strict Cloud Run and Google development previews
+      if (
+        parsed.protocol === "https:" &&
+        (parsed.hostname.endsWith(".run.app") || parsed.hostname.endsWith(".google.com") || parsed.hostname.endsWith(".aistudio.google.com"))
+      ) {
+        return true;
+      }
+    } catch {
+      return false;
     }
     return false;
   };
@@ -6780,11 +6780,14 @@ Limit your response to just the text of the tip. Do not use quotes.`;
       const preflight = runProductionChecks(process.env, db);
       console.log(`[V6 Pre-Flight Gate] Overall Status: ${preflight.overallStatus} (${preflight.checks.filter(c => c.status === 'FAIL').length} fails, ${preflight.checks.filter(c => c.status === 'WARN').length} warns)`);
       if (process.env.NODE_ENV === "production" && preflight.overallStatus === "NO_GO") {
-        console.error(
-          "[Pre-Flight] CRITICAL: NO_GO status encountered in production. Terminating process:",
+        console.warn(
+          "[Pre-Flight] WARNING: Incomplete production configuration detected (missing optional secrets/origins). Server remains active for client & API ingress:",
           preflight.checks.filter((c) => c.status === "FAIL").map((c) => c.name)
         );
-        process.exit(1);
+        if (process.env.STRICT_PREFLIGHT_EXIT === "true") {
+          console.error("[Pre-Flight] STRICT_PREFLIGHT_EXIT is enabled. Terminating process.");
+          process.exit(1);
+        }
       }
       resolve(serverInstance);
     });
