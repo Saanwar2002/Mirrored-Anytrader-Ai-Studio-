@@ -891,7 +891,7 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       await assertSucceeds(getDoc(doc(aliceDb, "public_profiles/trader_steve")));
     });
 
-    it("41. FINDING 9: User cannot create a review without an associated job they participated in", async () => {
+    it("41. FINDING 9 & PL-01: Direct client-side review creation is blocked for all users (server-authoritative only)", async () => {
       await testEnv.withSecurityRulesDisabled(async (context) => {
         await setDoc(doc(context.firestore(), "jobs/job_verified_review"), {
           homeownerId: "user_alice",
@@ -919,14 +919,29 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         comment: "Fake review",
       }));
 
-      // Alice (job participant) can create a review with valid associated job
-      await assertSucceeds(setDoc(doc(aliceDb, "reviews/rev_legit_alice"), {
+      // PL-01: Direct client-side creation is blocked even for job participants;
+      // reviews must be submitted server-authoritatively via /api/reviews/submit
+      await assertFails(setDoc(doc(aliceDb, "reviews/rev_legit_alice"), {
         reviewerId: "user_alice",
         traderId: "trader_dave",
         jobId: "job_verified_review",
         rating: 5,
         comment: "Excellent service!",
       }));
+
+      // Server-side / Admin SDK creation succeeds (simulating /api/reviews/submit)
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await setDoc(doc(context.firestore(), "reviews/rev_legit_alice"), {
+          reviewerId: "user_alice",
+          traderId: "trader_dave",
+          jobId: "job_verified_review",
+          rating: 5,
+          comment: "Excellent service!",
+        });
+      });
+
+      // Public can read the published review
+      await assertSucceeds(getDoc(doc(aliceDb, "reviews/rev_legit_alice")));
     });
 
     it("42. FINDING 10: Pending property transfer claimer cannot escalate privileges", async () => {

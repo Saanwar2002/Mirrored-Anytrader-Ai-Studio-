@@ -1,5 +1,20 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🛠️ GitHub Actions CI Pipeline Remediation (October 16, 2026)
+- **1. Neutralized CI Failure in `npm run test:security-rules`**:
+  - **Root Cause Identified from CI Failure**: GitHub Actions workflow step `Run Firebase Security Rules & Real Firestore Emulator Concurrency Tests` failed in `tests/unit/firebaseEmulatorSecurityRules.test.ts` on test `41. FINDING 9: User cannot create a review without an associated job they participated in`.
+  - **Failure Details**: The test asserted that an engaged job participant (`aliceDb`) could directly execute client-side `setDoc(doc(aliceDb, "reviews/rev_legit_alice"), ...)` in Firestore. However, during PL-01 security hardening, direct client-side creation on `/reviews/{reviewId}` was locked down (`allow create: if false;`) to enforce server-authoritative review validation (`/api/reviews/submit`). As a result, the test received `FirebaseError: 7 PERMISSION_DENIED: false for 'create' @ L98, false for 'create' @ L565`.
+  - **Remediation**:
+    - Updated test 41 in `tests/unit/firebaseEmulatorSecurityRules.test.ts` to assert that direct client creation on `/reviews` fails closed for ALL clients (`assertFails` for Alice), proving that PL-01's security rule is properly enforced.
+    - Verified that server-authoritative creation via Admin SDK / security rules disabled succeeds and the resulting document is readable by the public.
+- **2. Full Suite Verification**:
+  - `npm run test:security-rules`: **589 / 589 tests passing across all 21 test files (100% green)** under the real Firebase Firestore and Storage emulators.
+  - `npm test`: **1060 / 1060 unit & penetration tests passing across all 65 test suites (100% green)**.
+  - `npm run lint` (`tsc --noEmit`): **0 errors**.
+  - `npm run build`: **Vite client bundle & esbuild `dist/server.cjs` bundled cleanly**.
+  - `npm run audit:release`: **0 critical failures (GO)**.
+  - `compile_applet`: **Build succeeded cleanly**.
+
 ## 🚀 Cloud Run Deployment Remediation & Pre-Flight Gate Resiliency (October 13, 2026)
 - **1. Neutralized Cloud Run Crash on Startup (`Container called exit(1)`)**:
   - **Root Cause**: During production deployment rollouts on Cloud Run (`NODE_ENV === "production"`), the server preflight check gate in `server.ts` was invoking `process.exit(1)` when optional third-party integrations (e.g. `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ALLOWED_ORIGINS`) were not pre-configured in the container's environment variables.
