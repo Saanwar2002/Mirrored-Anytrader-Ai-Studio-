@@ -340,7 +340,8 @@ service cloud.firestore {
             'finalFare', 'driverEarnings', 'calculatedDriverEarnings', 'commissionAmount', 'stripeTransferId', 
             'paymentIntentId', 'stripePaymentIntentId', 'stripeSessionId', 'stripeCheckoutSessionId', 
             'payoutTransferredAt', 'settlementId', 'settlementStatus', 'platformFee', 'calculatedPlatformFee',
-            'payoutLockedAt', 'payoutFailedAt', 'payoutRetryCount', 'payoutLastError', 'payoutError', 'paidAt'
+            'payoutLockedAt', 'payoutFailedAt', 'payoutRetryCount', 'payoutLastError', 'payoutError', 'paidAt',
+            'payoutClaimToken'
           ])
         )
       );
@@ -363,7 +364,8 @@ service cloud.firestore {
               'stripePaymentIntentId', 'stripeSessionId', 'stripeCheckoutSessionId', 'finalFare', 
               'driverEarnings', 'calculatedDriverEarnings', 'commissionAmount', 'assignedDriverId', 'driverId', 'settlementId', 
               'settlementStatus', 'platformFee', 'calculatedPlatformFee', 'baseFare', 'payoutStatus',
-              'payoutLockedAt', 'payoutFailedAt', 'payoutRetryCount', 'payoutLastError', 'payoutError', 'paidAt'
+              'payoutLockedAt', 'payoutFailedAt', 'payoutRetryCount', 'payoutLastError', 'payoutError', 'paidAt',
+              'payoutClaimToken'
             ]) &&
             (
               !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status']) ||

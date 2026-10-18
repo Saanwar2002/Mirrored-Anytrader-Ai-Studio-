@@ -9,7 +9,7 @@
     - Verified that server-authoritative creation via Admin SDK / security rules disabled succeeds and the resulting document is readable by the public.
 - **2. Full Suite Verification**:
   - `npm run test:security-rules`: **589 / 589 tests passing across all 21 test files (100% green)** under the real Firebase Firestore and Storage emulators.
-  - `npm test`: **1060 / 1060 unit & penetration tests passing across all 65 test suites (100% green)**.
+  - `npm test`: **1067 / 1067 unit & penetration tests passing across all 65 test suites (100% green)**.
   - `npm run lint` (`tsc --noEmit`): **0 errors**.
   - `npm run build`: **Vite client bundle & esbuild `dist/server.cjs` bundled cleanly**.
   - `npm run audit:release`: **0 critical failures (GO)**.
