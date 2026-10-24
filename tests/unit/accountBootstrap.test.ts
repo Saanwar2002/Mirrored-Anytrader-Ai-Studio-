@@ -203,4 +203,36 @@ describe("PL-02: Server-Authoritative Account Profile Initialization", () => {
       )
     ).rejects.toThrow(ConflictError);
   });
+
+  it("gracefully falls back to client when server Firestore encounters PERMISSION_DENIED (code 7)", async () => {
+    const errorDb: any = {
+      collection: () => ({
+        doc: () => ({}),
+      }),
+      runTransaction: async () => {
+        const err: any = new Error("7 PERMISSION_DENIED: Missing or insufficient permissions.");
+        err.code = 7;
+        throw err;
+      },
+    };
+
+    const caller = { uid: "user_fallback_1", email: "user@example.com" };
+    const result: any = await executeBootstrapProfileCommand(
+      errorDb,
+      caller,
+      {
+        role: "homeowner",
+        name: "Fallback User",
+        postcode: "E1 6AN",
+      },
+      "127.0.0.1"
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.uid).toBe("user_fallback_1");
+    expect(result.fallbackToClient).toBe(true);
+    expect(result.profileData).toBeDefined();
+    expect(result.profileData.name).toBe("Fallback User");
+    expect(result.profileData.role).toBe("homeowner");
+  });
 });

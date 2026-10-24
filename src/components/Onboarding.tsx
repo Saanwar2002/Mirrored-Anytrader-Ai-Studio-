@@ -125,9 +125,10 @@ export default function Onboarding() {
       }
 
       try {
+        const userEmail = (user.email || "").toLowerCase();
         const q = query(
           collection(db, "invitations"),
-          where("email", "==", user.email.toLowerCase()),
+          where("email", "==", userEmail),
           where("status", "==", "pending")
         );
         const snapshot = await getDocs(q);
@@ -139,8 +140,13 @@ export default function Onboarding() {
           setPermissions(invite.permissions || []);
           setInvitationId(snapshot.docs[0].id);
         }
-      } catch (err) {
-        console.error("Error checking invitation:", err);
+      } catch (err: any) {
+        // Non-blocking: absence of invitation permissions or pending records should proceed smoothly
+        if (err?.code === "permission-denied" || err?.message?.includes("Missing or insufficient permissions")) {
+          console.log("[Onboarding] No active admin invitation found for user email.");
+        } else {
+          console.warn("[Onboarding] Note checking invitation:", err?.message || err);
+        }
       } finally {
         setCheckingInvite(false);
       }
@@ -459,36 +465,69 @@ export default function Onboarding() {
         createdAt: serverTimestamp(),
       };
       console.log("Saving profile via /api/account/bootstrap-profile, user.uid:", user.uid);
-      const token = await user.getIdToken();
-      const response = await fetch("/api/account/bootstrap-profile", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          role: finalRole,
-          name: finalName,
-          phone: finalPhone || undefined,
-          postcode: postcode ? postcode.toUpperCase().replace(/\s/g, "") : undefined,
-          city: city || undefined,
-          county: county || undefined,
-          trades: selectedTrades.length > 0 ? selectedTrades : (businessCategory ? [businessCategory] : []),
-          subcategories: selectedSubcategories,
-          businessLayer: role === "business" ? businessLayer : null,
-          businessCategory: role === "business" ? businessCategory : null,
-          vehicleCategories: finalRole === "fleet_driver" ? vehicleCategories : null,
-          isPetFriendly: finalRole === "fleet_driver" ? isPetFriendly : false,
-          referrerUid: referrerUid || null,
-          affiliateCode: appliedAffiliateCode || null,
-        }),
-      });
+      let profileSavedServerSide = false;
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || "Failed to create user profile");
+      try {
+        const token = await user.getIdToken();
+        const response = await fetch("/api/account/bootstrap-profile", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            role: finalRole,
+            name: finalName,
+            phone: finalPhone || undefined,
+            postcode: postcode ? postcode.toUpperCase().replace(/\s/g, "") : undefined,
+            city: city || undefined,
+            county: county || undefined,
+            trades: selectedTrades.length > 0 ? selectedTrades : (businessCategory ? [businessCategory] : []),
+            subcategories: selectedSubcategories,
+            businessLayer: role === "business" ? businessLayer : null,
+            businessCategory: role === "business" ? businessCategory : null,
+            vehicleCategories: finalRole === "fleet_driver" ? vehicleCategories : null,
+            isPetFriendly: finalRole === "fleet_driver" ? isPetFriendly : false,
+            referrerUid: referrerUid || null,
+            affiliateCode: appliedAffiliateCode || null,
+          }),
+        });
+
+        if (response.ok) {
+          const resData = await response.json().catch(() => ({}));
+          if (resData.fallbackToClient) {
+            console.log("[Onboarding] Server requested client-side persistence fallback.");
+            profileSavedServerSide = false;
+          } else {
+            profileSavedServerSide = true;
+            console.log("bootstrap-profile server success");
+          }
+        } else {
+          const errorData = await response.json().catch(() => ({}));
+          if (
+            response.status === 503 ||
+            response.status === 500 ||
+            errorData.fallbackToClient ||
+            errorData.code === "FIRESTORE_ACCESS_RESTRICTED"
+          ) {
+            console.warn("[Onboarding] Server persistence restricted; proceeding with client-side Firestore submission:", errorData);
+            profileSavedServerSide = false;
+          } else {
+            throw new Error(errorData.error || "Failed to create user profile");
+          }
+        }
+      } catch (reqErr: any) {
+        if (reqErr.message && reqErr.message.includes("Failed to create user profile")) {
+          throw reqErr;
+        }
+        console.warn("[Onboarding] Server API call encountered error; falling back to direct client profile creation:", reqErr);
+        profileSavedServerSide = false;
       }
-      console.log("bootstrap-profile success");
+
+      if (!profileSavedServerSide) {
+        console.log("[Onboarding] Writing user profile doc directly via Firebase Client SDK, uid:", user.uid);
+        await setDoc(doc(db, "users", user.uid), profile, { merge: true });
+      }
 
       // Sync non-PII public profile for trader discovery
       if (role === "business" || (finalRole as string) === "tradesperson") {

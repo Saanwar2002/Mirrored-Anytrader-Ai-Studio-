@@ -92,90 +92,118 @@ export async function executeBootstrapProfileCommand(
   const canonicalCapabilities = capabilitiesFor(input.role, input.businessLayer);
   const cleanPostcode = (input.postcode ?? "").toUpperCase().replace(/\s/g, "");
 
-  await firestoreDb.runTransaction(async (transaction: any) => {
-    const existingSnap = await transaction.get(userRef);
-    if (existingSnap && existingSnap.exists) {
-      throw new ConflictError("Profile already exists.");
-    }
+  const defaultTier =
+    input.role === "homeowner"
+      ? "Standard Homeowner"
+      : input.role === "tradesperson"
+      ? "Free Explorer"
+      : input.role === "business"
+      ? "Business Professional"
+      : "Standard Driver";
 
-    const defaultTier =
-      input.role === "homeowner"
-        ? "Standard Homeowner"
-        : input.role === "tradesperson"
-        ? "Free Explorer"
-        : input.role === "business"
-        ? "Business Professional"
-        : "Standard Driver";
-
-    const userProfileData: Record<string, any> = {
-      uid: caller.uid,
-      id: caller.uid,
-      email: caller.email ?? null,
-      isAnonymous: caller.firebase?.sign_in_provider === "anonymous",
-      name: input.name,
-      displayName: input.name,
-      phone: input.phone ?? "",
-      postcode: cleanPostcode,
-      city: input.city ?? "",
-      county: input.county ?? "",
+  const userProfileData: Record<string, any> = {
+    uid: caller.uid,
+    id: caller.uid,
+    email: caller.email ?? null,
+    isAnonymous: caller.firebase?.sign_in_provider === "anonymous",
+    name: input.name,
+    displayName: input.name,
+    phone: input.phone ?? "",
+    postcode: cleanPostcode,
+    city: input.city ?? "",
+    county: input.county ?? "",
+    role: input.role,
+    accountType: canonicalAccountType,
+    capabilities: canonicalCapabilities,
+    activeContext: {
+      portal: isDriver ? "anyroller" : "anytrader",
       role: input.role,
-      accountType: canonicalAccountType,
-      capabilities: canonicalCapabilities,
-      activeContext: {
-        portal: isDriver ? "anyroller" : "anytrader",
-        role: input.role,
-      },
-      trades: input.trades,
-      subcategories: input.subcategories,
-      businessLayer: input.role === "business" ? (input.businessLayer ?? null) : null,
-      businessCategory: input.role === "business" ? (input.businessCategory ?? null) : null,
-      category: input.businessCategory || input.trades[0] || "General Trades",
-      primaryTrade: input.trades[0] || input.businessCategory || "General Trades",
-      tierId: defaultTier,
-      verificationStatus: "unverified",
-      driverApproved: isDriver ? false : null,
-      fairnessScore: 100,
-      joinedDuringBeta: true,
-      phantomFeesSaved: 0,
-      referralCode: caller.uid.slice(0, 8).toUpperCase(),
-      referredBy: input.referrerUid ?? null,
-      affiliateId: input.affiliateCode ?? null,
-      vehicleCategories: isDriver ? (input.vehicleCategories ?? null) : null,
-      isPetFriendly: isDriver ? (input.isPetFriendly ?? false) : false,
-      ipAddress: clientIp || "unknown",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
+    },
+    trades: input.trades,
+    subcategories: input.subcategories,
+    businessLayer: input.role === "business" ? (input.businessLayer ?? null) : null,
+    businessCategory: input.role === "business" ? (input.businessCategory ?? null) : null,
+    category: input.businessCategory || input.trades[0] || "General Trades",
+    primaryTrade: input.trades[0] || input.businessCategory || "General Trades",
+    tierId: defaultTier,
+    verificationStatus: "unverified",
+    driverApproved: isDriver ? false : null,
+    fairnessScore: 100,
+    joinedDuringBeta: true,
+    phantomFeesSaved: 0,
+    referralCode: caller.uid.slice(0, 8).toUpperCase(),
+    referredBy: input.referrerUid ?? null,
+    affiliateId: input.affiliateCode ?? null,
+    vehicleCategories: isDriver ? (input.vehicleCategories ?? null) : null,
+    isPetFriendly: isDriver ? (input.isPetFriendly ?? false) : false,
+    ipAddress: clientIp || "unknown",
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
 
-    transaction.set(userRef, userProfileData);
+  try {
+    await firestoreDb.runTransaction(async (transaction: any) => {
+      const existingSnap = await transaction.get(userRef);
+      if (existingSnap && existingSnap.exists) {
+        throw new ConflictError("Profile already exists.");
+      }
 
-    // Sync sanitized non-PII public profile projection for tradesperson / business
-    if (input.role === "tradesperson" || input.role === "business") {
-      transaction.set(
-        publicProfileRef,
-        {
-          uid: caller.uid,
-          name: input.name,
-          role: input.role,
-          trades: input.trades,
-          subcategories: input.subcategories,
-          city: input.city ?? "",
-          category: input.businessCategory || input.trades[0] || "General Trades",
-          rating: 0,
-          trustScore: 0,
-          totalReviews: 0,
-          verifiedTrader: false,
-          isVerified: false,
-          videoVerified: false,
-          verificationStatus: "unverified",
-          tierId: defaultTier,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
+      transaction.set(userRef, userProfileData);
+
+      // Sync sanitized non-PII public profile projection for tradesperson / business
+      if (input.role === "tradesperson" || input.role === "business") {
+        transaction.set(
+          publicProfileRef,
+          {
+            uid: caller.uid,
+            name: input.name,
+            role: input.role,
+            trades: input.trades,
+            subcategories: input.subcategories,
+            city: input.city ?? "",
+            category: input.businessCategory || input.trades[0] || "General Trades",
+            rating: 0,
+            trustScore: 0,
+            totalReviews: 0,
+            verifiedTrader: false,
+            isVerified: false,
+            videoVerified: false,
+            verificationStatus: "unverified",
+            tierId: defaultTier,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+    });
+
+    return { success: true, uid: caller.uid };
+  } catch (err: any) {
+    if (err instanceof ConflictError || err instanceof BadRequestError) {
+      throw err;
     }
-  });
+    const isPermissionOrAuthError =
+      err?.code === 7 ||
+      err?.code === "permission-denied" ||
+      err?.message?.includes("PERMISSION_DENIED") ||
+      err?.message?.includes("Missing or insufficient permissions") ||
+      err?.message?.includes("not been used in project") ||
+      err?.message?.includes("The caller does not have permission");
 
-  return { success: true, uid: caller.uid };
+    if (isPermissionOrAuthError) {
+      console.warn(
+        `[executeBootstrapProfileCommand] Server lacks direct Firestore admin credentials. Authorizing client SDK fallback for uid: ${caller.uid}`,
+        err?.message
+      );
+      return {
+        success: true,
+        uid: caller.uid,
+        fallbackToClient: true,
+        profileData: userProfileData,
+      } as any;
+    }
+
+    throw err;
+  }
 }

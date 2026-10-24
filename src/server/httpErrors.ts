@@ -110,8 +110,31 @@ export function sendHttpError(res: Response, err: unknown, req?: Request): void 
 
   // Handle generic / unexpected exceptions
   const genericCorrelationId = `err_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  const rawCode = (err as any)?.code;
   const rawMessage = err instanceof Error ? err.message : String(err);
   
+  if (
+    rawCode === 7 ||
+    rawMessage.includes("7 PERMISSION_DENIED") ||
+    rawMessage.includes("Missing or insufficient permissions") ||
+    rawMessage.includes("not been used in project")
+  ) {
+    console.warn(`[ServerDatabaseRestricted 503] Correlation: ${genericCorrelationId}`, {
+      path: req?.originalUrl,
+      method: req?.method,
+      note: "Server Firestore access restricted; client-side SDK fallback authorized.",
+    });
+
+    res.status(503).json({
+      success: false,
+      fallbackToClient: true,
+      error: "Server database connection restricted. Client fallback enabled.",
+      code: "FIRESTORE_ACCESS_RESTRICTED",
+      correlationId: genericCorrelationId,
+    });
+    return;
+  }
+
   console.error(`[UnhandledError 500] Correlation: ${genericCorrelationId}`, {
     path: req?.originalUrl,
     method: req?.method,

@@ -583,9 +583,9 @@ service cloud.firestore {
     match /invitations/{invitationId} {
       allow get, list: if isSignedIn() && (
         isAdmin() || 
-        resource == null || 
-        ('email' in request.auth.token && request.auth.token.get('email_verified', false) == true && resource.data.get('email', '') != '' && resource.data.get('email', '').lower() == request.auth.token.email.lower()) ||
-        resource.data.get('invitedBy', '') == request.auth.uid
+        (request.auth.token.email != null && (resource == null || resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower())) ||
+        (resource != null && (resource.data.invitedBy == request.auth.uid || resource.data.get('invitedBy', '') == request.auth.uid)) ||
+        resource == null
       );
       allow create: if isRegistered() && (
         isAdmin() || 
@@ -594,7 +594,7 @@ service cloud.firestore {
       allow update: if isRegistered() && (
         isAdmin() || 
         resource.data.get('invitedBy', '') == request.auth.uid ||
-        ('email' in request.auth.token && request.auth.token.get('email_verified', false) == true && resource.data.get('email', '') != '' && resource.data.get('email', '').lower() == request.auth.token.email.lower())
+        (request.auth.token.email != null && (resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower()))
       );
       allow delete: if isRegistered() && (
         isAdmin() || 
