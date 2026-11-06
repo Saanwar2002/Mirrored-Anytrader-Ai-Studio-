@@ -164,6 +164,11 @@ export default function ZonesGeofences() {
           }
         });
         setOnlineDrivers(live);
+      },
+      (err: any) => {
+        if (err?.code !== "permission-denied" && !err?.message?.includes("Missing or insufficient permissions")) {
+          console.warn("[ZonesGeofences] live_tracking listener error:", err);
+        }
       }
     );
     return () => unsub();

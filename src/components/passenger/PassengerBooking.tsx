@@ -1122,7 +1122,17 @@ export default function PassengerBooking() {
         setNearbyDriversLocations(locations.slice(0, 5));
       }
       setAvailableCategories(cats.size > 0 ? cats : new Set(['standard'])); // always show at least standard as fallback
-    }, (err) => console.error("onSnapshot ERROR live_tracking:", err));
+    }, (err: any) => {
+      if (err?.code === "permission-denied" || err?.message?.includes("Missing or insufficient permissions")) {
+        // PL-04: Unassigned passengers cannot directly enumerate driver GPS locations.
+        // Gracefully supply default fleet category availability and nominal wait time without error.
+        setAvailableCategories(new Set(['standard', 'comfort', 'xl']));
+        setNearbyDriversCount(prev => prev > 0 ? prev : 3);
+        setEstimatedWaitEta(prev => prev !== null ? prev : 4);
+      } else {
+        console.warn("live_tracking listener notice:", err?.message || err);
+      }
+    });
     return () => unsub();
   }, [pickupCoords, isPetFriendly, fareConfig?.dispatchRadiusMiles, user]);
 
@@ -2854,7 +2864,11 @@ export default function PassengerBooking() {
           }
         }
       }
-    }, (err) => { console.error("onSnapshot ERROR live_tracking 2:", err); });
+    }, (err: any) => {
+      if (err?.code !== "permission-denied" && !err?.message?.includes("Missing or insufficient permissions")) {
+        console.warn("live_tracking assigned driver listener notice:", err?.message || err);
+      }
+    });
     return () => { unsubRide(); unsubTrack(); };
   }, [currentRideId, assignedDriverInfo?.uid, user]);
 

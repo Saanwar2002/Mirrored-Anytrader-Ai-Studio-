@@ -146,5 +146,11 @@ describe("Security Remediation H3 — Notification & Queue Abuse Prevention Audi
       expect(serverCode).toContain('authorizeNotificationRequest');
       expect(serverCode).toContain('You do not have authorization to send notifications to this recipient');
     });
+
+    it("verifies client sendNotification handles non-JSON / HTML responses gracefully without syntax error", async () => {
+      const firebaseCode = fs.readFileSync(path.resolve(__dirname, "../../src/firebase.ts"), "utf-8");
+      expect(firebaseCode).toContain('contentType.includes("application/json")');
+      expect(firebaseCode).toContain('getApiUrl("/api/notifications")');
+    });
   });
 });

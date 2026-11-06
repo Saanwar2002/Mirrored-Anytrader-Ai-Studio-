@@ -28,7 +28,12 @@ export async function fetchLiveDemandZones(): Promise<SurgeZone[]> {
       return [];
     }
 
-    const data = await response.json();
+    const contentType = response.headers?.get ? (response.headers.get("content-type") || "") : "application/json";
+    if (contentType && !contentType.includes("application/json")) {
+      return [];
+    }
+
+    const data = await response.json().catch(() => null);
     if (data && Array.isArray(data.zones)) {
       return data.zones;
     }

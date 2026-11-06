@@ -123,6 +123,11 @@ export default function DispatchEngine() {
       (snapshot) => {
         const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setDbDrivers(list);
+      },
+      (err: any) => {
+        if (err?.code !== "permission-denied" && !err?.message?.includes("Missing or insufficient permissions")) {
+          console.warn("[DispatchEngine] live_tracking listener error:", err);
+        }
       }
     );
 

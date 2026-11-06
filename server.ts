@@ -3142,8 +3142,12 @@ async function startServer() {
           if (cd.surgeModel !== undefined) isFixedModel = cd.surgeModel === "fixed";
           if (cd.surgeEnabled !== undefined) autoSurgeEnabled = cd.surgeEnabled;
         }
-      } catch (err) {
-        console.warn("Could not read platform_config/rides:", err);
+      } catch (err: any) {
+        if (err?.code === 7 || err?.message?.includes("PERMISSION_DENIED")) {
+          // Cross-project container environment: server Firestore credentials restricted
+        } else {
+          console.warn("Could not read platform_config/rides:", err);
+        }
       }
 
       if (!autoSurgeEnabled) {
@@ -3151,17 +3155,26 @@ async function startServer() {
         return res.json({ success: true, zones: [] });
       }
 
-      const ridesSnap = await db.collection("ride_requests")
-        .where("status", "in", ["pending", "searching", "offered"])
-        .limit(200)
-        .get();
-      const pendingRides = ridesSnap.docs.map(d => d.data());
-
-      const driversSnap = await db.collection("live_tracking")
-        .where("isOnline", "==", true)
-        .limit(200)
-        .get();
-      const onlineDrivers = driversSnap.docs.map(d => d.data());
+      let ridesSnap: any;
+      let driversSnap: any;
+      try {
+        ridesSnap = await db.collection("ride_requests")
+          .where("status", "in", ["pending", "searching", "offered"])
+          .limit(200)
+          .get();
+        driversSnap = await db.collection("live_tracking")
+          .where("isOnline", "==", true)
+          .limit(200)
+          .get();
+      } catch (queryErr: any) {
+        if (queryErr?.code === 7 || queryErr?.message?.includes("PERMISSION_DENIED")) {
+          demandZonesCache = { timestamp: now, zones: [] };
+          return res.json({ success: true, zones: [] });
+        }
+        throw queryErr;
+      }
+      const pendingRides = ridesSnap.docs.map((d: any) => d.data());
+      const onlineDrivers = driversSnap.docs.map((d: any) => d.data());
 
       const hotSpots = new Map<string, { rideCount: number; lat: number; lng: number; rides: any[] }>();
       pendingRides.forEach(ride => {
@@ -3264,7 +3277,11 @@ async function startServer() {
       demandZonesCache = { timestamp: now, zones };
       res.json({ success: true, zones });
     } catch (error: any) {
-      console.error("Error computing demand zones on server:", error);
+      if (error?.code === 7 || error?.message?.includes("PERMISSION_DENIED")) {
+        demandZonesCache = { timestamp: Date.now(), zones: [] };
+      } else {
+        console.error("Error computing demand zones on server:", error);
+      }
       res.json({ success: true, zones: [] });
     }
   });

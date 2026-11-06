@@ -5,6 +5,7 @@ import { enableMultiTabIndexedDbPersistence, initializeFirestore, getFirestore, 
 import { getPerformance, trace } from "firebase/performance";
 import { getStorage, ref, uploadBytes, getDownloadURL, uploadBytesResumable, uploadString } from "firebase/storage";
 import { Capacitor } from "@capacitor/core";
+import { getApiUrl } from "./lib/apiUrl";
 import firebaseConfig from "../firebase-applet-config.json";
 
 // Initialize Firebase SDK
@@ -337,10 +338,12 @@ export const sendNotification = async (
     const token = currentUser ? await currentUser.getIdToken().catch(() => null) : null;
 
     if (token) {
-      const res = await fetch("/api/notifications", {
+      const targetUrl = getApiUrl("/api/notifications");
+      const res = await fetch(targetUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Accept": "application/json",
           "Authorization": `Bearer ${token}`
         },
         body: JSON.stringify({
@@ -354,15 +357,24 @@ export const sendNotification = async (
           projectId: context?.projectId
         })
       });
-      if (res.ok) {
-        return await res.json();
+
+      const contentType = res.headers?.get ? (res.headers.get("content-type") || "") : "application/json";
+      if (!contentType || contentType.includes("application/json")) {
+        const data = await res.json().catch(() => null);
+        if (res.ok) {
+          return data;
+        } else {
+          console.warn("[sendNotification] Server returned error response:", data);
+          return data;
+        }
       } else {
-        const errorData = await res.json().catch(() => ({}));
-        console.warn("[sendNotification] Server returned error:", errorData);
+        const text = await res.text().catch(() => "");
+        console.warn("[sendNotification] Non-JSON response received from server:", res.status, text.slice(0, 80));
+        return { success: false, error: "Non-JSON response from server" };
       }
     }
   } catch (err) {
-    console.error("Error sending notification via server API:", err);
+    console.warn("[sendNotification] Note sending notification via server API:", err);
   }
 };
 
