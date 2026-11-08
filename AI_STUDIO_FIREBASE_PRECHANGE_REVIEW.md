@@ -1,12 +1,13 @@
 # AI Studio + Firebase Pre-Code Change Readiness Review
 
 Date: 8 November 2026  
+**Product scope: AnyTrader only; AnyRoller explicitly excluded.**
 Repository: `Saanwar2002/AnyTrader` (`main`)  
 Review type: Static repository configuration and architecture review. **No application code, Firebase project settings or live data were changed.**
 
 ## Executive conclusion
 
-The repository is intentionally structured for a Google AI Studio (Firebase App Hosting / applet-style) workflow with Firebase Auth, Firestore and Storage. It has explicit AI Studio ↔ GitHub synchronization instructions and a dedicated Firebase applet configuration. **Do not begin code changes until the live AI Studio workspace and Firebase project are reconciled with GitHub.**
+The repository is intentionally structured for a Google AI Studio (Firebase App Hosting / applet-style) workflow with Firebase Auth, Firestore and Storage. This review applies to **AnyTrader only**; AnyRoller is out of scope. It has explicit AI Studio ↔ GitHub synchronization instructions and a dedicated Firebase applet configuration. **Do not begin code changes until the live AI Studio workspace and Firebase project are reconciled with GitHub.**
 
 This review can verify committed configuration and source conventions. It cannot inspect the user's live Google AI Studio session, Firebase Console IAM, deployed rules/indexes, secrets, actual Firestore documents, Cloud Run revision, or runtime project access. Those require a connected authorized environment / Console verification.
 
@@ -69,6 +70,12 @@ This review can verify committed configuration and source conventions. It cannot
 3. **Server Firestore permission fallback behavior is documented in DEVELOPMENT.md.** Validate every fallback against server-owned fields and authorization, not just IAM failure; client fallback must not permit privilege/financial/ownership mutation.
 4. **AI Studio compile and standard npm build are distinct validation paths.** Keep both in the pre-change baseline when the workspace supports applet compilation.
 5. **Historical test counts/status in AGENTS.md and DEVELOPMENT.md are dated snapshots.** Use current CI/emulator output as truth; reconcile documentation after actual verification.
+
+## Product boundary (mandatory)
+- Verify AI Studio workspace and Firebase configuration specifically for AnyTrader experiences and data flows.
+- Do not change AnyRoller screens, ride/passenger/driver workflows, or AnyRoller-specific configuration.
+- Shared Auth/Firestore/Storage/server/rules/index changes must be checked for AnyRoller impact and preserve its behavior. If safe isolation is impossible, stop and request explicit approval.
+- Scope acceptance criteria and test plans to AnyTrader; run shared regression suites where needed to prove no cross-product regression.
 
 ## Safe change protocol (required for future tasks)
 
