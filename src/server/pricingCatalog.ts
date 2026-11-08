@@ -407,9 +407,11 @@ export async function resolveAuthoritativeLineItem(
   // 2. B2B SaaS METERED BILLING ("Gotham" Housing Portal)
   // =========================================================================
   if (
-    metadata.type === "gotham_saas" ||
-    metadata.subscriptionType === "gotham_saas" ||
-    body.tierName?.toLowerCase().includes("gotham")
+    (!body.priceId || body.priceId === "price_gotham_saas") &&
+    (!body.tierName || body.tierName.toLowerCase().includes("gotham")) &&
+    (metadata.type === "gotham_saas" ||
+      metadata.subscriptionType === "gotham_saas" ||
+      body.tierName?.toLowerCase().includes("gotham"))
   ) {
     const doors = Number(metadata.gothamDoorsCount || body.doorsCount || 100);
     const cycle = (metadata.gothamBillingCycle || "monthly") as "monthly" | "annual";
@@ -560,7 +562,11 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 6. ADD-ONS: Exclusive Leads (£15/mo), Verified Video Pro (£10/mo or £96/yr)
   // =========================================================================
-  if (metadata.isExclusiveAddon === "true" || metadata.type === "exclusive_leads" || body.priceId === "price_exclusive_leads") {
+  if (
+    body.priceId === "price_exclusive_leads" ||
+    ((!body.priceId && !body.tierName) &&
+      (metadata.isExclusiveAddon === "true" || metadata.type === "exclusive_leads"))
+  ) {
     const catalogItem = SERVER_PRICING_CATALOG.price_exclusive_leads;
     const dynamicPrice = Number(globalConfig?.paidAddons?.exclusiveLeads?.price || globalConfig?.exclusiveLeadsFee);
     const resolvedAmountPence = (!isNaN(dynamicPrice) && dynamicPrice > 0)
@@ -591,7 +597,11 @@ export async function resolveAuthoritativeLineItem(
     };
   }
 
-  if (metadata.isVideoPro === "true" || metadata.type === "video_pro_subscription" || body.priceId === "price_video_pro") {
+  if (
+    body.priceId === "price_video_pro" ||
+    ((!body.priceId && !body.tierName) &&
+      (metadata.isVideoPro === "true" || metadata.type === "video_pro_subscription"))
+  ) {
     const isAnnual = metadata.billingCycle === "annual";
     const catalogItem = isAnnual
       ? SERVER_PRICING_CATALOG.price_video_pro_annual
@@ -632,7 +642,7 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 7. MEMBERSHIP TIERS (Landlord Pro, Driver Gold, Trader Pro/Premium/Platinum)
   // =========================================================================
-  const rawTier = (body.tierName || body.priceId || metadata.tierName || metadata.tier || "Pro").toString();
+  const rawTier = (body.priceId || body.tierName || metadata.tierName || metadata.tier || "Pro").toString();
   const lowerTier = rawTier.toLowerCase();
 
   let matchedCatalogKey = "price_pro";
