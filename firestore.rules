@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
     // --- Global Helpers ---
     function isSignedIn() { return request.auth != null; }
-    function isAnonymousAuth() { return isSignedIn() && request.auth.token.firebase.sign_in_provider == 'anonymous'; }
+    function isAnonymousAuth() { return isSignedIn() && request.auth.token.get('firebase', {}).get('sign_in_provider', 'anonymous') == 'anonymous'; }
     function isRegistered() { return isSignedIn() && !isAnonymousAuth(); }
     function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
     function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
