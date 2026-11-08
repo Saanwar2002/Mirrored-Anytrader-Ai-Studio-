@@ -62,6 +62,28 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
     expect(resolved.metadata).not.toHaveProperty("customFlag");
   });
 
+  it("keeps explicit membership price IDs authoritative over other client-selected product types", async () => {
+    for (const type of ["ad_wallet_topup", "milestone_funding", "mediation_stake", "gotham_saas"]) {
+      const resolved = await resolveAuthoritativeLineItem({
+        priceId: "price_pro",
+        tierName: "Pro",
+        metadata: {
+          type,
+          jobId: "attacker_job",
+          quoteId: "attacker_quote",
+          milestoneId: "attacker_milestone",
+          topupAmount: "5000",
+          gothamDoorsCount: "10000",
+        },
+      }, "verified_user_123", undefined);
+
+      expect(resolved.mode).toBe("subscription");
+      expect(resolved.metadata.tier).toBe("pro");
+      expect(resolved.metadata.subscriptionType).toBe("tier");
+      expect(resolved.metadata.userId).toBe("verified_user_123");
+    }
+  });
+
   it("rejects boost checkout when the caller does not own the job", async () => {
     await expect(resolveAuthoritativeLineItem({
       metadata: { type: "boost", tier: "emergency_boost", jobId: "job_1" },
