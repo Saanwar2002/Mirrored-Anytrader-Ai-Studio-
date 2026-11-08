@@ -7,6 +7,7 @@ Repository: [Saanwar2002/AnyTrader](https://github.com/Saanwar2002/AnyTrader) ·
 > **Authority:** This document replaces scattered implementation checklists and phase roadmaps. Update this file whenever a task changes state. `DEVELOPMENT.md` remains the detailed architecture/change-history guide; `AGENTS.md` remains mandatory agent instructions. Technical specifications and completed audit reports remain supporting evidence, not competing plans.
 
 ## 1. Operating rules (mandatory)
+0. **Pre-code environment gate:** Before any code change, complete [AI_STUDIO_FIREBASE_PRECHANGE_REVIEW.md](AI_STUDIO_FIREBASE_PRECHANGE_REVIEW.md): verify AI Studio ↔ GitHub parity, Firebase project/named database, deployed rules/indexes, Auth/Storage/App Check, IAM/secrets, emulator/build baseline and staging. If workspace divergence or Firebase target uncertainty exists, STOP and reconcile; never blindly overwrite.
 
 1. Read `AGENTS.md` and the relevant sections of `DEVELOPMENT.md` before work. For shared services, Firebase schema/blueprint, Firestore rules or Storage rules, read DEVELOPMENT first.
 2. Work in dependency order. Do not start a downstream task while its prerequisite is failing.
@@ -17,7 +18,18 @@ Repository: [Saanwar2002/AnyTrader](https://github.com/Saanwar2002/AnyTrader) ·
 7. Do not commit credentials, live customer data, test dumps, generated build output, or secrets. Use environment examples with placeholders.
 8. Keep changes scoped. Do not delete code, configuration, data, audit evidence or technical specs merely because they look old; prove they are unused first.
 
-## 2. Current verified baseline and release posture
+## 2. AI Studio / Firebase pre-change gate (mandatory)
+- [ ] Confirm AI Studio project/repository/branch and working tree match GitHub; reconcile any drift before editing.
+- [ ] Verify `anytradercombined`, named database ID and whether default database is intentionally active; compare deployed rules/indexes to repo.
+- [ ] Verify Auth providers/domains/verification, Storage bucket/rules, App Check, service-account IAM, server secrets and API restrictions.
+- [ ] Confirm client/Admin SDK database selection and all fallback authorization invariants.
+- [ ] Run baseline npm + emulator + AI Studio compile/preview; record current CI and applet revision.
+- [ ] Review service-worker Firebase Storage cache behavior and private-media account-switch/logout behavior.
+- [ ] Establish staging deployment, rollback and monitoring before production changes.
+
+**Exit gate:** AI Studio/GitHub parity is known, Firebase targets/settings verified, baseline green (or failures documented), and deployment rollback exists. See [AI_STUDIO_FIREBASE_PRECHANGE_REVIEW.md](AI_STUDIO_FIREBASE_PRECHANGE_REVIEW.md).
+
+## 3. Current verified baseline and release posture
 
 **Baseline reviewed:** commit `50bf91088921013bea271f2b813d6ee7a7c528e9` (6 Nov 2026). Re-check HEAD/CI before execution.
 
@@ -31,7 +43,7 @@ Repository: [Saanwar2002/AnyTrader](https://github.com/Saanwar2002/AnyTrader) ·
 
 **Status vocabulary:** `NOT STARTED`, `IN PROGRESS`, `BLOCKED`, `PASS`, `FAIL`, `VERIFIED`. A task is `VERIFIED` only with evidence linked below.
 
-## 3. Critical path — work in this order
+## 4. Critical path — work in this order
 
 ### Phase 0 — Establish a truthful baseline (P0)
 - [ ] Capture current HEAD SHA, latest CI run, failing jobs/tests and branch protection.
@@ -112,7 +124,7 @@ Keep feature delivery behind stable security and CI. Select one bounded feature 
 
 **Release gate:** no P0/P1 open; CI green; staging checklist signed; production configuration verified; rollback and monitoring operational; owner approval recorded.
 
-## 4. Portal and domain acceptance checklist
+## 7. Portal and domain acceptance checklist
 For each role/portal (homeowner, tradesperson, business/consultancy, property/estate manager, passenger, driver, support/admin):
 - [ ] Sign-up, verification, onboarding, role/capability assignment and recovery.
 - [ ] Ownership/tenant isolation and least-privilege reads/writes.
@@ -123,7 +135,7 @@ For each role/portal (homeowner, tradesperson, business/consultancy, property/es
 - [ ] Unit, emulator/rules, integration and E2E coverage.
 - [ ] Support/admin actions guarded and logged.
 
-## 5. Documentation governance (single plan)
+## 8. Documentation governance (single plan)
 - **This file:** status, priorities, dependencies, task checkboxes, next action and release gates.
 - **`AGENTS.md`:** mandatory contributor/agent rules; not a roadmap.
 - **`DEVELOPMENT.md`:** detailed architecture, implementation history, schema/service changes and technical decisions. Update it after shared architecture/schema/security work.
@@ -131,11 +143,11 @@ For each role/portal (homeowner, tradesperson, business/consultancy, property/es
 - **Audit/verification reports and mission test logs:** retain as immutable historical evidence; link them here when relevant. Do not use their old “GO” status as current release evidence.
 - **README:** short product overview + link to this master plan and DEVELOPMENT guide.
 
-## 6. Evidence and decision log
+## 9. Evidence and decision log
 | Date | Commit / CI run | Decision / result | Evidence |
 |---|---|---|---|
 | 2026-11-06 | `50bf91088921013bea271f2b813d6ee7a7c528e9` | Repository audit baseline; CI run #231 failed PL-08; release NO-GO | [Actions run #231](https://github.com/Saanwar2002/AnyTrader/actions/runs/42204388896) |
 | 2026-11-08 | TBD | Master plan consolidated; current CI still must be rechecked | Update after Phase 0 |
 
-## 7. Immediate next task
+## 10. Immediate next task
 **Phase 0, task 1:** inspect the latest GitHub Actions run and current branch HEAD; reproduce the invitation PL-08 failure and confirm the exact current rules/acceptance code before changing it. Do not start new feature development until Phase 1 exits.
