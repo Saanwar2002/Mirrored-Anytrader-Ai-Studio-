@@ -637,7 +637,8 @@ service cloud.firestore {
         request.auth.token.email is string &&
         ('email_verified' in request.auth.token) &&
         request.auth.token.email_verified == true &&
-        resource.data.email == request.auth.token.email
+        resource.data.email == request.auth.token.email &&
+        resource.data.status == 'pending'
       ) || (
         isSignedIn() &&
         resource.data.get('invitedBy', '') == request.auth.uid
