@@ -632,17 +632,18 @@ service cloud.firestore {
         isAdmin() ||
         request.resource.data.get('invitedBy', '') == request.auth.uid
       );
-      // Keep authorization paths independent: a recipient may only accept,
-      // while the inviter and platform admins retain their existing management paths.
-      allow update: if
+      // Evaluate the constrained recipient transition first, then preserve the
+      // existing inviter and platform-admin management paths in the same grant.
+      allow update: if (
         isVerifiedInvitationRecipientForAcceptance() &&
         resource.data.get('status', '') == 'pending' &&
         request.resource.data.get('status', '') == 'accepted' &&
         request.resource.data.get('acceptedAt', null) == request.time &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt']);
-      allow update: if isSignedIn() &&
-        resource.data.get('invitedBy', '') == request.auth.uid;
-      allow update: if isAdmin();
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt'])
+      ) || (
+        isSignedIn() &&
+        resource.data.get('invitedBy', '') == request.auth.uid
+      ) || isAdmin();
       allow delete: if isRegistered() && (
         isAdmin() ||
         resource.data.get('invitedBy', '') == request.auth.uid
