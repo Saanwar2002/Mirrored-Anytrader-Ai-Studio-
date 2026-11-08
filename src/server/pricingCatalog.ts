@@ -246,8 +246,8 @@ async function loadAuthorizedCheckoutJob(firestoreDb: any, jobId: string, authUi
   const jobSnap = await firestoreDb.collection("jobs").doc(jobId).get();
   if (!jobSnap.exists) throw new NotFoundError("Job not found");
   const jobData = jobSnap.data() || {};
-  const ownerId = jobData.homeownerId || jobData.userId || jobData.ownerId || jobData.customerId;
-  const assignedTraderId = jobData.acceptedTradespersonId || jobData.acceptedTraderId || jobData.tradespersonId || jobData.traderId;
+  const ownerId = jobData.homeownerId || jobData.userId || jobData.ownerId || jobData.posterId || jobData.customerId;
+  const assignedTraderId = jobData.acceptedTradespersonId || jobData.acceptedTraderId || jobData.assignedTraderId || jobData.tradespersonId || jobData.traderId;
   if (purpose === "mediation_stake") {
     if (authUid !== ownerId && authUid !== assignedTraderId) throw new ForbiddenError("Only a job participant can pay the mediation stake");
     if (jobData.status !== "disputed") throw new BadRequestError("Mediation stake can only be paid after the job has entered disputed status");
