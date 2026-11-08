@@ -5928,3 +5928,33 @@ The prefix is determined by the user's primary registration role:
   - **Verification**: 1043/1043 tests passing across 62 test files in Vitest suite (`npm test`), `npm run lint` (`tsc --noEmit`) 100% clean, and `compile_applet` succeeded cleanly.
 
 
+
+
+## 🛡️ AnyTrader — November 8, 2026 Security Remediation & CI Status (Draft PRs)
+
+**Scope:** AnyTrader only. These changes are on draft pull-request branches and have not been merged or deployed. AnyRoller-specific screens, workflows and configuration were not changed.
+
+### Payment authority and checkout authorization — PR #2
+- **Membership metadata authority (\`src/server/pricingCatalog.ts\`):** membership entitlement metadata is now built from server catalog values and the authenticated UID; client-supplied metadata cannot overwrite tier name, canonical tier, subscription type, user ID or entitlement flags.
+- **Product-selection precedence:** explicit server catalog membership selection takes priority over conflicting client metadata claiming wallet top-up, milestone funding, mediation stake, boost or other product types.
+- **Job checkout authorization:** boost checkout requires the authenticated job owner and an active job state; mediation-stake checkout requires a job participant and a disputed job. Recognised participant fields include the canonical homeowner/accepted-trader fields and existing legacy aliases. A mediation stake already recorded as paid is rejected.
+- **Webhook dependency failure:** when Stripe or Firestore dependencies are unavailable, the webhook returns HTTP 503 rather than acknowledging an event that could not be processed; this permits Stripe retry behavior.
+- **Test isolation:** the Task 25 real-emulator test setup now clears the singleton intelligence task queue's in-memory cache after clearing emulator Firestore, preventing test vectors from inheriting stale cache state between cases.
+- **Validation:** CI run #279 passed all gates on the draft PR branch: Firebase security/concurrency 589/589; unit/penetration 1,074/1,074; TypeScript/typecheck and lint; production build; release audit. The audit reported six non-critical CI environment warnings (Stripe, Gemini, JWT, APP_URL and ALLOWED_ORIGINS configuration not present in CI). This is not evidence that live production secrets are missing or configured.
+- **PR:** https://github.com/Saanwar2002/AnyTrader/pull/2
+
+### Invitation recipient authorization — PR #1 (still in progress)
+- **Read/query authorization (\`firestore.rules\`):** recipient direct reads require a verified email matching the invitation; recipient list queries use exact email equality so Firestore can prove query constraints. Direct document reads retain case-insensitive matching for existing mixed-case records. Inviter/admin access is retained.
+- **Acceptance authorization:** recipient updates are limited to pending → accepted, with \`acceptedAt == request.time\` and only \`status\`/\`acceptedAt\` changed. Recipient, inviter and admin update grants are expressed as separate allow rules to keep their authorization paths independent.
+- **Regression coverage:** PL-08 tests exercise unverified direct read/query/update denial, verified direct reads and list query, mixed-case direct read, unrelated user denial, inviter/admin management, intended acceptance and protected-field tampering.
+- **Validation:** earlier CI runs #255, #266, #273, #278 and #280 failed PL-08. Run #281 still failed with a Firestore rule evaluation error. The latest separated-grant implementation is under validation in CI run #283; do not mark PL-08 complete until all gates pass.
+- **PR:** https://github.com/Saanwar2002/AnyTrader/pull/1
+
+### Follow-up found during invitation-flow review
+\`BusinessTeamManagement.tsx\` creates \`type: "business_team"\` invitations with \`role: "member"\`, \`businessId\` and limited permissions. \`Onboarding.tsx\` currently treats any invitation matching the user's email as an admin-role selection; later it rejects the onboarding attempt unless Firebase custom admin claims are present. This appears to prevent ordinary business-team invitees from completing onboarding. The intended team-member role, permission application and businessId attachment need a product/architecture decision. This was not changed as part of PL-08.
+
+### Environment and release limitations
+- The repository's static Firebase configuration points to project \`anytradercombined\` and named Firestore database \`ai-studio-anytrader-44dab8b3-bbc9-4352-b725-2cbe7a1dfd2a\`; this is repository evidence only.
+- Live Google AI Studio workspace parity, deployed named/default Firestore rules and indexes, Auth/Storage/App Check, service-account IAM, secrets, Cloud Run revision and staging/production configuration have not been independently verified.
+- Neither draft PR has been merged; no Firebase rules/index deployment, production deployment, secret change or live-data mutation was performed.
+- The Firebase connector is available but not yet connected. Complete the AI Studio/Firebase pre-change checklist before merge or deployment.
