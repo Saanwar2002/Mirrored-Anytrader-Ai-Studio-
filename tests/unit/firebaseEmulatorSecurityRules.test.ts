@@ -2746,9 +2746,9 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
           firebase: { sign_in_provider: "password" },
         })
         .firestore();
-      await assertSucceeds(getDoc(doc(adminClaimsDb, "invitations", "inv_email_test")));
+      await assertSucceeds(getDoc(doc(adminClaimsDb, "invitations", "inv_admin_access")));
       await assertSucceeds(
-        updateDoc(doc(adminClaimsDb, "invitations", "inv_email_test"), {
+        updateDoc(doc(adminClaimsDb, "invitations", "inv_admin_access"), {
           status: "admin-reviewed",
         })
       );
