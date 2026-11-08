@@ -2668,6 +2668,11 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
           invitedBy: "manager_uid",
           status: "pending",
         });
+        await setDoc(doc(adminDb, "invitations", "inv_admin_access"), {
+          email: "admin-managed@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
       });
 
       const unverifiedDb = testEnv
@@ -2741,9 +2746,9 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
           firebase: { sign_in_provider: "password" },
         })
         .firestore();
-      await assertSucceeds(getDoc(doc(adminClaimsDb, "invitations", "inv_email_test")));
+      await assertSucceeds(getDoc(doc(adminClaimsDb, "invitations", "inv_admin_access")));
       await assertSucceeds(
-        updateDoc(doc(adminClaimsDb, "invitations", "inv_email_test"), {
+        updateDoc(doc(adminClaimsDb, "invitations", "inv_admin_access"), {
           status: "admin-reviewed",
         })
       );
@@ -2772,6 +2777,13 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
           status: "accepted",
           acceptedAt: serverTimestamp(),
           email: "attacker@example.com",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+          notes: "unauthorized extra field",
         })
       );
     });
