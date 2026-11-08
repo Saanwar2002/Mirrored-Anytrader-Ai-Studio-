@@ -2661,6 +2661,9 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         })
         .firestore();
       await assertFails(getDoc(doc(unverifiedDb, "invitations", "inv_email_test")));
+      await assertFails(
+        updateDoc(doc(unverifiedDb, "invitations", "inv_email_test"), { status: "accepted" })
+      );
 
       const verifiedDb = testEnv
         .authenticatedContext("legit_recipient", {
