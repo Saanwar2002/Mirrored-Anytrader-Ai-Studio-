@@ -839,6 +839,11 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
 
   beforeEach(async () => {
     await testEnv.clearFirestore();
+    // The Firestore emulator is reset between vectors; reset the singleton's
+    // in-memory task/idempotency caches as well so retries cannot inherit stale
+    // state from a previous test.
+    intelligenceTaskQueue.clear();
+    intelligenceTaskQueue.setFirestoreDb(adminDb);
 
     intelligenceTaskQueue.registerHandler('job_extraction', async (task) => {
       return { processed: true, id: task.aggregateId };
