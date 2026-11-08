@@ -27,6 +27,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
 
   it("does not allow client metadata to override server-authoritative membership entitlement fields", async () => {
     const resolved = await resolveAuthoritativeLineItem({
+      tierName: "Pro",
       priceId: "price_pro",
       metadata: {
         tierName: "Enterprise VIP",
@@ -41,7 +42,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
 
     expect(resolved.mode).toBe("subscription");
     expect(resolved.metadata.tierName).not.toBe("Enterprise VIP");
-    expect(resolved.metadata.tier).not.toBe("enterprise");
+    expect(resolved.metadata.tier).toBe("pro");
     expect(resolved.metadata.subscriptionType).toBe("tier");
     expect(resolved.metadata.userId).toBe("verified_user_123");
     expect(resolved.metadata).not.toHaveProperty("isVideoPro");
