@@ -156,6 +156,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       metadata: {
         type: "boost",
         tier: "emergency_boost",
+        jobId: "job_1",
       },
       price_data: {
         unit_amount: 100, // Attacker tries £1.00
@@ -164,7 +165,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       customAmount: 1
     };
 
-    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", mockCheckoutDb("disputed", "attacker_uid"));
+    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", mockCheckoutDb("open", "attacker_uid"));
     // Server must strictly return the catalog price (£4.99 = 499p)
     expect(authoritative.authoritativeAmountPence).toBe(499);
   });
@@ -174,6 +175,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
     const tamperedPayload = {
       metadata: {
         type: "mediation_stake",
+        jobId: "job_1",
       },
       price_data: {
         unit_amount: 1
@@ -181,7 +183,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       amount: 0.01,
     };
 
-    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", undefined);
+    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", mockCheckoutDb("disputed", "attacker_uid"));
     // Server must strictly return £25.00 (2500p)
     expect(authoritative.authoritativeAmountPence).toBe(2500);
   });
@@ -222,6 +224,12 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
                 data: () => ({ homeownerId: "cust_override", jobNo: "9001" })
               };
             }
+            if (col === "jobs" && docId === "job_boost_override") {
+              return {
+                exists: true,
+                data: () => ({ homeownerId: "homeowner_user", status: "open" })
+              };
+            }
             if (col === "users" && docId === "trader_pro_override") {
               return {
                 exists: true,
@@ -255,7 +263,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
 
     // 2. Emergency boost dynamically honors admin's £7.50 override
     const boostResult = await resolveAuthoritativeLineItem({
-      metadata: { type: "boost", tier: "emergency_boost" },
+      metadata: { type: "boost", tier: "emergency_boost", jobId: "job_boost_override" },
       price_data: { unit_amount: 100 } // Attacker attempts to tamper, ignored!
     }, "homeowner_user", mockDbWithAdminOverrides);
     expect(boostResult.authoritativeAmountPence).toBe(750); // £7.50
