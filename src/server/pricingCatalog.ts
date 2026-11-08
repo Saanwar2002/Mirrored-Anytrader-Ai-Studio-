@@ -264,6 +264,9 @@ export async function resolveAuthoritativeLineItem(
 ): Promise<AuthoritativeLineItemResult> {
   const metadata = body.metadata || {};
   const mode = body.mode || "subscription";
+  const hasExplicitMembershipSelection =
+    ["price_payg", "price_pro", "price_premium", "price_platinum", "price_landlord", "price_driver_gold"].includes(String(body.priceId || "")) ||
+    (typeof body.tierName === "string" && body.tierName.trim().length > 0);
 
   // Load dynamic admin-managed configs from Firestore (falls back gracefully to SERVER_PRICING_CATALOG if unset)
   const { globalTiers, globalConfig } = await getDynamicFirestoreConfigs(firestoreDb);
@@ -407,11 +410,11 @@ export async function resolveAuthoritativeLineItem(
   // 2. B2B SaaS METERED BILLING ("Gotham" Housing Portal)
   // =========================================================================
   if (
-    (!body.priceId || body.priceId === "price_gotham_saas") &&
-    (!body.tierName || body.tierName.toLowerCase().includes("gotham")) &&
+    (!hasExplicitMembershipSelection || body.priceId === "price_gotham_saas" ||
+      (typeof body.tierName === "string" && body.tierName.toLowerCase().includes("gotham"))) &&
     (metadata.type === "gotham_saas" ||
       metadata.subscriptionType === "gotham_saas" ||
-      body.tierName?.toLowerCase().includes("gotham"))
+      (typeof body.tierName === "string" && body.tierName.toLowerCase().includes("gotham")))
   ) {
     const doors = Number(metadata.gothamDoorsCount || body.doorsCount || 100);
     const cycle = (metadata.gothamBillingCycle || "monthly") as "monthly" | "annual";
@@ -564,7 +567,7 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   if (
     body.priceId === "price_exclusive_leads" ||
-    ((!body.priceId && !body.tierName) &&
+    ((!hasExplicitMembershipSelection) &&
       (metadata.isExclusiveAddon === "true" || metadata.type === "exclusive_leads"))
   ) {
     const catalogItem = SERVER_PRICING_CATALOG.price_exclusive_leads;
@@ -599,7 +602,7 @@ export async function resolveAuthoritativeLineItem(
 
   if (
     body.priceId === "price_video_pro" ||
-    ((!body.priceId && !body.tierName) &&
+    ((!hasExplicitMembershipSelection) &&
       (metadata.isVideoPro === "true" || metadata.type === "video_pro_subscription"))
   ) {
     const isAnnual = metadata.billingCycle === "annual";
