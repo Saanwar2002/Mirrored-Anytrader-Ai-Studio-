@@ -40,6 +40,9 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       tierName: "Pro",
       priceId: "price_pro",
       metadata: {
+        type: "boost",
+        tier: "enterprise",
+        jobId: "attacker_job",
         tierName: "Enterprise VIP",
         tier: "enterprise",
         subscriptionType: "landlord",
