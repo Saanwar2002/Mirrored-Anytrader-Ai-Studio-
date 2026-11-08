@@ -1666,9 +1666,10 @@ async function startServer() {
       try {
         stripeClient = getStripe();
       } catch (e) {
-        // If Stripe is not configured, we ignore the webhook
-        console.warn("Stripe webhook received but Stripe is not configured.");
-        return res.status(200).send("Ignored");
+        // Do not acknowledge an event that cannot be verified or processed.
+        // A retryable 503 allows Stripe to redeliver after configuration is restored.
+        console.error("Stripe webhook cannot be processed because Stripe is not configured.");
+        return res.status(503).send("Payment processing temporarily unavailable");
       }
 
       const sig = req.headers['stripe-signature'];
@@ -1688,7 +1689,8 @@ async function startServer() {
 
       // Handle the event
       if (!db) {
-         return res.json({received: true});
+         // Returning 2xx here would acknowledge an event without fulfillment.
+         return res.status(503).send("Payment database temporarily unavailable");
       }
 
       // Idempotency: Use a transaction to atomically claim 'processing' state
