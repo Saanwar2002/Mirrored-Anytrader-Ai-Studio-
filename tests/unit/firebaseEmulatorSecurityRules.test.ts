@@ -2674,6 +2674,7 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         .authenticatedContext("attacker_fake_email", {
           email: "victim@example.com",
           email_verified: false,
+          firebase: { sign_in_provider: "password" },
         })
         .firestore();
       await assertFails(getDoc(doc(unverifiedDb, "invitations", "inv_email_test")));
@@ -2697,6 +2698,7 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         .authenticatedContext("legit_recipient", {
           email: "victim@example.com",
           email_verified: true,
+          firebase: { sign_in_provider: "password" },
         })
         .firestore();
       await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_test")));
@@ -2722,7 +2724,9 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       await assertFails(getDoc(doc(unrelatedDb, "invitations", "inv_email_test")));
 
       // The inviter retains the existing read and management permissions.
-      const inviterDb = testEnv.authenticatedContext("manager_uid").firestore();
+      const inviterDb = testEnv
+        .authenticatedContext("manager_uid", { firebase: { sign_in_provider: "password" } })
+        .firestore();
       await assertSucceeds(getDoc(doc(inviterDb, "invitations", "inv_inviter_access")));
       await assertSucceeds(
         updateDoc(doc(inviterDb, "invitations", "inv_inviter_access"), {
@@ -2732,7 +2736,10 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
 
       // Admin custom claims retain the existing management permissions.
       const adminClaimsDb = testEnv
-        .authenticatedContext("platform_admin", { admin: true })
+        .authenticatedContext("platform_admin", {
+          admin: true,
+          firebase: { sign_in_provider: "password" },
+        })
         .firestore();
       await assertSucceeds(getDoc(doc(adminClaimsDb, "invitations", "inv_email_test")));
       await assertSucceeds(
