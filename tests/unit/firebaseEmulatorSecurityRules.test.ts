@@ -21,6 +21,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  serverTimestamp,
   collection,
   query,
   where,
@@ -2644,10 +2645,15 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       );
     });
 
-    it("94. PL-08: Invitations - unverified email cannot read invitation addressed to that email", async () => {
+    it("94. PL-08: Invitations - verified recipients can only accept their own pending invitation", async () => {
       await testEnv.withSecurityRulesDisabled(async (context) => {
         const adminDb = context.firestore();
         await setDoc(doc(adminDb, "invitations", "inv_email_test"), {
+          email: "victim@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_email_tamper"), {
           email: "victim@example.com",
           invitedBy: "manager_uid",
           status: "pending",
@@ -2662,7 +2668,10 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         .firestore();
       await assertFails(getDoc(doc(unverifiedDb, "invitations", "inv_email_test")));
       await assertFails(
-        updateDoc(doc(unverifiedDb, "invitations", "inv_email_test"), { status: "accepted" })
+        updateDoc(doc(unverifiedDb, "invitations", "inv_email_test"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+        })
       );
 
       const verifiedDb = testEnv
@@ -2672,6 +2681,34 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         })
         .firestore();
       await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_test")));
+      await assertFails(getDoc(doc(verifiedDb, "invitations", "missing_invitation")));
+
+      // The intended onboarding action is permitted: pending -> accepted with a server timestamp.
+      await assertSucceeds(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_test"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+        })
+      );
+
+      // A verified recipient cannot change invitation ownership or other protected fields.
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          email: "attacker@example.com",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          invitedBy: "attacker_fake_email",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+          email: "attacker@example.com",
+        })
+      );
     });
 
     it("95. PL-14: Conversations - participant tampering is blocked", async () => {
