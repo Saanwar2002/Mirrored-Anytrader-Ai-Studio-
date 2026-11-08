@@ -251,9 +251,14 @@ async function loadAuthorizedCheckoutJob(firestoreDb: any, jobId: string, authUi
   if (purpose === "mediation_stake") {
     if (authUid !== ownerId && authUid !== assignedTraderId) throw new ForbiddenError("Only a job participant can pay the mediation stake");
     if (jobData.status !== "disputed") throw new BadRequestError("Mediation stake can only be paid after the job has entered disputed status");
+    if (jobData.mediationStakePaid === true || jobData.dispute?.mediationStakePaid === true) {
+      throw new BadRequestError("The mediation stake has already been paid for this job");
+    }
   } else {
     if (authUid !== ownerId) throw new ForbiddenError("Only the job owner can purchase a job boost");
-    if (!["open", "quoted"].includes(String(jobData.status || ""))) throw new BadRequestError("Only open or quoted jobs can be boosted");
+    if (!["open", "quoted", "posted", "quoting", "in_bidding"].includes(String(jobData.status || ""))) {
+      throw new BadRequestError("Only active jobs can be boosted");
+    }
   }
   return jobData;
 }
