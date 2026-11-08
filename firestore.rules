@@ -632,22 +632,18 @@ service cloud.firestore {
         isAdmin() ||
         request.resource.data.get('invitedBy', '') == request.auth.uid
       );
-      // Evaluate the constrained recipient transition first, then preserve the
-      // existing inviter and platform-admin management paths in the same grant.
-      // Diagnostic only: reuse the exact recipient predicate already proven by
-      // the successful read test, and use direct field access for the transition.
-      // This isolates whether the separate acceptance helper / Map.get is at fault.
+      // Recipient may only accept their own pending invite; all identity fields stay immutable.
       allow update: if (
         isSignedIn() &&
-        ('email' in request.auth.token) &&
-        (request.auth.token.email is string) &&
-        ('email_verified' in request.auth.token) &&
-        request.auth.token.email_verified == true &&
-        ('email' in resource.data) &&
-        (resource.data.get('email', '') is string) &&
-        resource.data.get('email', '') == request.auth.token.email &&
+        request.auth.token.get('email_verified', false) == true &&
+        request.auth.token.get('email', '') is string &&
+        resource.data.get('email', '') is string &&
+        resource.data.get('email', '').lower() == request.auth.token.get('email', '').lower() &&
         resource.data.get('status', '') == 'pending' &&
-        request.resource.data.get('status', '') == 'accepted'
+        request.resource.data.get('status', '') == 'accepted' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt']) &&
+        request.resource.data.get('email', '') == resource.data.get('email', '') &&
+        request.resource.data.get('invitedBy', '') == resource.data.get('invitedBy', '')
       ) || (
         isSignedIn() &&
         resource.data.get('invitedBy', '') == request.auth.uid
