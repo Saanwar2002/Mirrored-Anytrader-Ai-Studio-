@@ -2668,6 +2668,11 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
           invitedBy: "manager_uid",
           status: "pending",
         });
+        await setDoc(doc(adminDb, "invitations", "inv_admin_access"), {
+          email: "admin-managed@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
       });
 
       const unverifiedDb = testEnv
@@ -2755,9 +2760,6 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
           acceptedAt: serverTimestamp(),
         })
       );
-
-      // TEMPORARY DIAGNOSTIC: stop after the acceptance assertion to isolate its rule branch.
-      return;
 
       // A verified recipient cannot change invitation ownership or other protected fields.
       await assertFails(
