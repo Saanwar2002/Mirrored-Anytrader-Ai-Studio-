@@ -583,7 +583,7 @@ service cloud.firestore {
     match /invitations/{invitationId} {
       allow get, list: if isSignedIn() && (
         isAdmin() || 
-        (request.auth.token.email != null && (resource == null || resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower())) ||
+        ('email' in request.auth.token && 'email_verified' in request.auth.token && request.auth.token.email_verified == true && (resource == null || resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower())) ||
         (resource != null && (resource.data.invitedBy == request.auth.uid || resource.data.get('invitedBy', '') == request.auth.uid)) ||
         resource == null
       );
@@ -594,7 +594,7 @@ service cloud.firestore {
       allow update: if isRegistered() && (
         isAdmin() || 
         resource.data.get('invitedBy', '') == request.auth.uid ||
-        (request.auth.token.email != null && (resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower()))
+        ('email' in request.auth.token && 'email_verified' in request.auth.token && request.auth.token.email_verified == true && (resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower()))
       );
       allow delete: if isRegistered() && (
         isAdmin() || 
