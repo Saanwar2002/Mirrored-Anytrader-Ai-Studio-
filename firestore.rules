@@ -629,13 +629,15 @@ service cloud.firestore {
         isAdmin() ||
         request.resource.data.get('invitedBy', '') == request.auth.uid
       );
-      // Recipient may only accept their own pending invite; all identity fields stay immutable.
+      // Recipient may only accept their own pending invite. Reuse the recipient
+      // predicate already exercised by the read path; constrain the write to the
+      // two onboarding fields and require a server-generated acceptance time.
       allow update: if (
-        isVerifiedInvitationRecipientForAcceptance() &&
+        isVerifiedInvitationRecipient() &&
         resource.data.get('status', '') == 'pending' &&
         request.resource.data.get('status', '') == 'accepted' &&
-        request.resource.data.get('email', '') == resource.data.get('email', '') &&
-        request.resource.data.get('invitedBy', '') == resource.data.get('invitedBy', '')
+        request.resource.data.get('acceptedAt', null) == request.time &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt'])
       ) || (
         isSignedIn() &&
         resource.data.get('invitedBy', '') == request.auth.uid
