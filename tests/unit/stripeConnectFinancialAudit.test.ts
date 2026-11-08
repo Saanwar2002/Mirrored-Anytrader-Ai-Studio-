@@ -25,6 +25,30 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
     }
   });
 
+  it("does not allow client metadata to override server-authoritative membership entitlement fields", async () => {
+    const resolved = await resolveAuthoritativeLineItem({
+      priceId: "price_pro",
+      metadata: {
+        tierName: "Enterprise VIP",
+        tier: "enterprise",
+        subscriptionType: "landlord",
+        userId: "attacker_uid",
+        isVideoPro: "true",
+        isExclusiveAddon: "true",
+        customFlag: "attacker-controlled",
+      },
+    }, "verified_user_123", undefined);
+
+    expect(resolved.mode).toBe("subscription");
+    expect(resolved.metadata.tierName).not.toBe("Enterprise VIP");
+    expect(resolved.metadata.tier).not.toBe("enterprise");
+    expect(resolved.metadata.subscriptionType).toBe("tier");
+    expect(resolved.metadata.userId).toBe("verified_user_123");
+    expect(resolved.metadata).not.toHaveProperty("isVideoPro");
+    expect(resolved.metadata).not.toHaveProperty("isExclusiveAddon");
+    expect(resolved.metadata).not.toHaveProperty("customFlag");
+  });
+
   it("strictly enforces Stripe Connect destination routing when handling Client Money (milestone escrow)", async () => {
     const traderStripeAccountId = "acct_1NZX456789ABCDEF";
 
