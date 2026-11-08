@@ -5943,7 +5943,7 @@ The prefix is determined by the user's primary registration role:
 - **Validation:** CI run #279 passed all gates on the draft PR branch: Firebase security/concurrency 589/589; unit/penetration 1,074/1,074; TypeScript/typecheck and lint; production build; release audit. The audit reported six non-critical CI environment warnings (Stripe, Gemini, JWT, APP_URL and ALLOWED_ORIGINS configuration not present in CI). This is not evidence that live production secrets are missing or configured.
 - **PR:** https://github.com/Saanwar2002/AnyTrader/pull/2
 
-### Invitation recipient authorization — PR #1 (still in progress)
+### Invitation recipient authorization — PR #1 (CI validated; draft/unmerged)
 - **Read/query authorization (\`firestore.rules\`):** recipient direct reads require a verified email matching the invitation; recipient list queries use exact email equality so Firestore can prove query constraints. Direct document reads retain case-insensitive matching for existing mixed-case records. Inviter/admin access is retained.
 - **Acceptance authorization:** recipient updates are limited to pending → accepted, with \`acceptedAt == request.time\` and only \`status\`/\`acceptedAt\` changed. The latest revision combines recipient, inviter and admin authorization in one update grant, evaluating the recipient transition first.
 - **Regression coverage:** PL-08 tests exercise unverified direct read/query/update denial, verified direct reads and list query, mixed-case direct read, unrelated user denial, inviter/admin management, intended acceptance and protected-field tampering.
