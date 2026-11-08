@@ -2,6 +2,8 @@
 **Single source of truth for development, remediation, feature delivery and release readiness**
 
 Last reconciled: 8 November 2026  
+
+> **Owner-confirmed scope (8 Nov 2026): AnyTrader ONLY. AnyRoller is out of scope. No AnyRoller feature work or behavior changes; shared infrastructure changes must preserve AnyRoller compatibility and require an explicit scope decision if unavoidable.**
 Repository: [Saanwar2002/AnyTrader](https://github.com/Saanwar2002/AnyTrader) · Branch: `main`
 
 > **Authority:** This document replaces scattered implementation checklists and phase roadmaps. Update this file whenever a task changes state. `DEVELOPMENT.md` remains the detailed architecture/change-history guide; `AGENTS.md` remains mandatory agent instructions. Technical specifications and completed audit reports remain supporting evidence, not competing plans.
@@ -33,7 +35,7 @@ Repository: [Saanwar2002/AnyTrader](https://github.com/Saanwar2002/AnyTrader) ·
 
 **Baseline reviewed:** commit `50bf91088921013bea271f2b813d6ee7a7c528e9` (6 Nov 2026). Re-check HEAD/CI before execution.
 
-- Product: multi-portal AnyTrader ecosystem (Home/Trades, Business/Consultancy, Properties, Rides/AnyRoller, passenger and driver experiences) sharing Firebase identity/data.
+- Product scope: AnyTrader only (Home/Trades, Business/Consultancy, Properties and related AnyTrader workflows). AnyRoller passenger/driver/ride work is excluded. Shared infrastructure is considered only where required for AnyTrader and must not change AnyRoller behavior.
 - Stack: React 19 + TypeScript + Vite; Node/Express API; Firebase Auth, Firestore and Storage; Stripe Connect; Gemini; Capacitor Android/iOS.
 - Security/domain modules exist for authorization, identity, driver/trip eligibility, payment ledger, pricing catalog and state machines; adversarial, emulator and unit tests are substantial.
 - Large maintenance hotspots: `server.ts` (~271 KB), `AnyTraderAdmin` (~413 KB), `JobDetails` (~333 KB), `PassengerBooking` (~317 KB), `DriverTerminal` (~319 KB). Refactor only behind behavior tests.
@@ -93,12 +95,9 @@ Keep feature delivery behind stable security and CI. Select one bounded feature 
 - [ ] Calendar/timeline integration and notifications.
 - [ ] Keep internal budgets/financials creator-only; enforce invitation/bidder access.
 
-#### 4B. AnyRoller / passenger / driver
-- [ ] Validate driver UX against `DRIVER_UI_SPEC.md` (earnings-first, safe one-thumb interaction, fare transparency).
-- [ ] Validate passenger booking/history/receipt/support/account/payment/saved places journeys.
-- [ ] End-to-end dispatch, location permissions, background tracking privacy, SOS and compliance/document expiry.
-- [ ] Reconcile rides admin functions with central Master Admin/RBAC; no duplicate admin authority.
-- [ ] Native mobile: speech, camera, geolocation/background location, push, network/offline, keyboard/safe areas and payment wallet integration; verify iOS/Android permission declarations and store requirements.
+#### 4B. AnyRoller / passenger / driver — OUT OF SCOPE
+- No AnyRoller feature, UX, dispatch, passenger/driver, ride-admin, or native ride workflow tasks under this plan.
+- Preserve existing AnyRoller code/data/configuration and shared-service compatibility. Revisit only with explicit owner authorization.
 
 #### 4C. AI, discovery and matching
 - [ ] Maintain explicit Gemini function allowlists and validated inputs; AI cannot mutate roles, authorization or money.
@@ -125,7 +124,7 @@ Keep feature delivery behind stable security and CI. Select one bounded feature 
 **Release gate:** no P0/P1 open; CI green; staging checklist signed; production configuration verified; rollback and monitoring operational; owner approval recorded.
 
 ## 7. Portal and domain acceptance checklist
-For each role/portal (homeowner, tradesperson, business/consultancy, property/estate manager, passenger, driver, support/admin):
+For AnyTrader roles/portals only (homeowner, tradesperson, business/consultancy, property/estate manager, and AnyTrader support/admin); exclude AnyRoller passenger/driver roles:
 - [ ] Sign-up, verification, onboarding, role/capability assignment and recovery.
 - [ ] Ownership/tenant isolation and least-privilege reads/writes.
 - [ ] Core workflows and state transitions; invalid transitions rejected.
@@ -150,4 +149,4 @@ For each role/portal (homeowner, tradesperson, business/consultancy, property/es
 | 2026-11-08 | TBD | Master plan consolidated; current CI still must be rechecked | Update after Phase 0 |
 
 ## 10. Immediate next task
-**Phase 0, task 1:** inspect the latest GitHub Actions run and current branch HEAD; reproduce the invitation PL-08 failure and confirm the exact current rules/acceptance code before changing it. Do not start new feature development until Phase 1 exits.
+**Phase 0, task 1 (AnyTrader scope):** inspect latest GitHub Actions and HEAD; reproduce PL-08 and confirm current rules/acceptance code. Keep investigation/remediation AnyTrader-focused and preserve AnyRoller behavior. Do not start features until Phase 1 exits.
