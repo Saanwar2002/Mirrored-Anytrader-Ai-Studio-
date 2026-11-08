@@ -2,21 +2,31 @@ import { describe, it, expect } from "vitest";
 import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer } from "../../src/server/pricingCatalog";
 
 describe("Stripe Connect & Financial Flow Invariants", () => {
+  const mockCheckoutDb = (status: string, ownerId = "user_test_123") => ({
+    collection: (name: string) => ({
+      doc: (_id: string) => ({
+        get: async () => name === "jobs"
+          ? { exists: true, data: () => ({ homeownerId: ownerId, status }) }
+          : { exists: false, data: () => ({}) },
+      }),
+    }),
+  });
+
   it("enforces that all platform catalog products route 100% of fees to platform account", async () => {
     const catalogEntries = [
-      { body: { metadata: { type: "boost", tier: "emergency_boost" } }, expectedAmount: 499 },
-      { body: { metadata: { type: "boost", tier: "instant_match" } }, expectedAmount: 299 },
+      { body: { metadata: { type: "boost", tier: "emergency_boost", jobId: "job_1" } }, expectedAmount: 499, jobStatus: "open" },
+      { body: { metadata: { type: "boost", tier: "instant_match", jobId: "job_1" } }, expectedAmount: 299, jobStatus: "open" },
       { body: { priceId: "price_landlord" }, expectedAmount: 1900 },
       { body: { priceId: "price_pro" }, expectedAmount: 2900 },
       { body: { priceId: "price_premium" }, expectedAmount: 4900 },
       { body: { priceId: "price_driver_gold" }, expectedAmount: 4999 },
-      { body: { metadata: { type: "mediation_stake" } }, expectedAmount: 2500 },
+      { body: { metadata: { type: "mediation_stake", jobId: "job_1" } }, expectedAmount: 2500, jobStatus: "disputed" },
       { body: { priceId: "price_video_pro" }, expectedAmount: 1000 },
       { body: { priceId: "price_exclusive_leads" }, expectedAmount: 1500 },
     ];
 
     for (const item of catalogEntries) {
-      const lineItem = await resolveAuthoritativeLineItem(item.body, "user_test_123", undefined);
+      const lineItem = await resolveAuthoritativeLineItem(item.body, "user_test_123", item.jobStatus ? mockCheckoutDb(item.jobStatus) : undefined);
       expect(lineItem.authoritativeAmountPence).toBe(item.expectedAmount);
       expect(lineItem.lineItem.price_data.currency).toBe("gbp");
       // Platform owns these products: NEVER client money
@@ -48,6 +58,22 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
     expect(resolved.metadata).not.toHaveProperty("isVideoPro");
     expect(resolved.metadata).not.toHaveProperty("isExclusiveAddon");
     expect(resolved.metadata).not.toHaveProperty("customFlag");
+  });
+
+  it("rejects boost checkout when the caller does not own the job", async () => {
+    await expect(resolveAuthoritativeLineItem({
+      metadata: { type: "boost", tier: "emergency_boost", jobId: "job_1" },
+    }, "attacker_uid", mockCheckoutDb("open", "victim_uid"))).rejects.toThrow(/job owner/i);
+  });
+
+  it("rejects mediation checkout unless the job is disputed and the caller is a participant", async () => {
+    await expect(resolveAuthoritativeLineItem({
+      metadata: { type: "mediation_stake", jobId: "job_1" },
+    }, "attacker_uid", mockCheckoutDb("disputed", "victim_uid"))).rejects.toThrow(/job participant/i);
+
+    await expect(resolveAuthoritativeLineItem({
+      metadata: { type: "mediation_stake", jobId: "job_1" },
+    }, "user_test_123", mockCheckoutDb("open"))).rejects.toThrow(/disputed status/i);
   });
 
   it("strictly enforces Stripe Connect destination routing when handling Client Money (milestone escrow)", async () => {
@@ -138,7 +164,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       customAmount: 1
     };
 
-    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", undefined);
+    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", mockCheckoutDb("disputed", "attacker_uid"));
     // Server must strictly return the catalog price (£4.99 = 499p)
     expect(authoritative.authoritativeAmountPence).toBe(499);
   });
