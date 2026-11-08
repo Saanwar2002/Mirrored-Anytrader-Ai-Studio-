@@ -638,7 +638,7 @@ service cloud.firestore {
       // the successful read test, and use direct field access for the transition.
       // This isolates whether the separate acceptance helper / Map.get is at fault.
       allow update: if (
-        isVerifiedInvitationRecipient() &&
+        isVerifiedInvitationRecipientForAcceptance() &&
         resource.data.get('status', '') == 'pending' &&
         request.resource.data.get('status', '') == 'accepted'
       ) || (
