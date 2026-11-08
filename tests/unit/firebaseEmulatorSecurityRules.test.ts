@@ -2774,6 +2774,13 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
           email: "attacker@example.com",
         })
       );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+          notes: "unauthorized extra field",
+        })
+      );
     });
 
     it("95. PL-14: Conversations - participant tampering is blocked", async () => {
