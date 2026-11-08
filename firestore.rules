@@ -582,9 +582,12 @@ service cloud.firestore {
 
     match /invitations/{invitationId} {
       function isVerifiedInvitationRecipient() {
-        return 'email' in request.auth.token &&
-          'email_verified' in request.auth.token &&
+        return isSignedIn() &&
+          ('email' in request.auth.token) &&
+          (request.auth.token.email is string) &&
+          ('email_verified' in request.auth.token) &&
           request.auth.token.email_verified == true &&
+          (resource.data.get('email', '') is string) &&
           resource.data.get('email', '').lower() == request.auth.token.email.lower();
       }
 
