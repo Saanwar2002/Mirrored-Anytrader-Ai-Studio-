@@ -274,7 +274,7 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 1. CLIENT MONEY: Tradesperson Milestone Escrow Funding
   // =========================================================================
-  if (metadata.type === "milestone_funding") {
+  if (metadata.type === "milestone_funding" && !hasExplicitMembershipSelection) {
     const { jobId, quoteId, milestoneId } = metadata;
     if (!jobId || !quoteId || !milestoneId) {
       throw new BadRequestError("Milestone funding requires jobId, quoteId, and milestoneId in metadata");
@@ -485,7 +485,10 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 4. DISPUTE MEDIATION STAKE (£25.00)
   // =========================================================================
-  if (metadata.type === "mediation_stake" || body.priceId === "price_dispute_stake") {
+  if (
+    body.priceId === "price_dispute_stake" ||
+    (metadata.type === "mediation_stake" && !hasExplicitMembershipSelection)
+  ) {
     const jobId = String(metadata.jobId || "");
     await loadAuthorizedCheckoutJob(firestoreDb, jobId, authUid, "mediation_stake");
     const catalogItem = SERVER_PRICING_CATALOG.price_dispute_stake;
@@ -522,7 +525,11 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 5. PRIORITY BOOSTS (Emergency £4.99, Instant Match £2.99)
   // =========================================================================
-  if (metadata.type === "boost" || metadata.tier === "emergency_boost" || body.priceId === "price_emergency_boost") {
+  if (
+    ["price_emergency_boost", "price_instant_match", "price_mock_boost", "price_mock_instant_match"].includes(String(body.priceId || "")) ||
+    ((!hasExplicitMembershipSelection) &&
+      (metadata.type === "boost" || metadata.tier === "emergency_boost" || metadata.tier === "instant_match"))
+  ) {
     const jobId = String(metadata.jobId || "");
     await loadAuthorizedCheckoutJob(firestoreDb, jobId, authUid, "boost");
     const isInstantMatch = metadata.tier === "instant_match" || body.priceId === "price_instant_match";
