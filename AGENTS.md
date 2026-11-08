@@ -1,5 +1,12 @@
 # Project State & Instructions
 
+## Product Scope (Owner Decision — 8 November 2026)
+- **IN SCOPE: AnyTrader only.** All planning, implementation, testing, audits, and changes must target AnyTrader.
+- **OUT OF SCOPE: AnyRoller.** Do not implement, redesign, or modify AnyRoller-specific screens, workflows, business logic, or configuration unless the owner explicitly authorizes it.
+- Shared Firebase/backend infrastructure may be considered only when required for AnyTrader. Preserve AnyRoller behavior; if an AnyTrader task necessarily affects AnyRoller, STOP and explain the dependency before changing it.
+- Scope acceptance criteria and tests to AnyTrader; run shared regression tests when needed to prove no cross-product regression.
+
+
 ## Core Directive
 - **CRITICAL**: This is a multi-portal ecosystem (Home + Rides) sharing one database.
 - **MANDATORY**: You **MUST** read `DEVELOPMENT.md` before modifying any shared services, database schemas (`firebase-blueprint.json`), or security rules (`firestore.rules`). Failure to do so will break cross-portal synchronization.
