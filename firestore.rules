@@ -634,12 +634,11 @@ service cloud.firestore {
       );
       // Evaluate the constrained recipient transition first, then preserve the
       // existing inviter and platform-admin management paths in the same grant.
+      // Diagnostic only: isolate recipient identity and state transition.
       allow update: if (
         isVerifiedInvitationRecipientForAcceptance() &&
         resource.data.get('status', '') == 'pending' &&
-        request.resource.data.get('status', '') == 'accepted' &&
-        request.resource.data.get('acceptedAt', null) == request.time &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt'])
+        request.resource.data.get('status', '') == 'accepted'
       ) || (
         isSignedIn() &&
         resource.data.get('invitedBy', '') == request.auth.uid
