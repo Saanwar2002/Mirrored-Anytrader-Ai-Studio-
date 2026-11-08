@@ -634,7 +634,8 @@ service cloud.firestore {
         isVerifiedInvitationRecipientForAcceptance() &&
         resource.data.get('status', '') == 'pending' &&
         request.resource.data.get('status', '') == 'accepted' &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt'])
+        request.resource.data.get('email', '') == resource.data.get('email', '') &&
+        request.resource.data.get('invitedBy', '') == resource.data.get('invitedBy', '')
       ) || (
         isSignedIn() &&
         resource.data.get('invitedBy', '') == request.auth.uid
