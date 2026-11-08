@@ -635,6 +635,7 @@ service cloud.firestore {
       // Evaluate the constrained recipient transition first, then preserve the
       // existing inviter and platform-admin management paths in the same grant.
       // Diagnostic only: isolate recipient identity and state transition.
+      // CI trigger refresh after retargeting this PR to main; no permission change.
       allow update: if (
         isVerifiedInvitationRecipientForAcceptance() &&
         resource.data.get('status', '') == 'pending' &&
