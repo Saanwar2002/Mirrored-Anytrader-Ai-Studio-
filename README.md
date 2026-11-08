@@ -1,14 +1,21 @@
-# TradeQuote
+# AnyTrader
 
-A comprehensive, AI-powered platform for connecting homeowners with tradespeople, featuring intelligent job management, automated dispute resolution, and a robust Trust & Fairness engine.
+AnyTrader is a multi-portal services ecosystem connecting customers with tradespeople and businesses, with property-management and ride-hailing experiences, shared identity/data, AI-assisted workflows, and payment integrations.
 
-## Features
-- **AI-Powered Job Wizard**: Intelligent job posting with photo diagnosis, scope refinement, and description improvement.
-- **Smart Job Feed**: AI-recommended jobs for tradespeople based on location, schedule, and expertise.
-- **Trust & Fairness Engine**: Automated protection against retaliatory reviews, including 14-day cooling-off periods and notification fuzzing for low ratings.
-- **Real-time Collaboration**: In-app chat, quote management, and media galleries.
-- **Admin Dashboard**: Advanced tools for monitoring platform health, managing disputes, and configuring fairness settings.
-- **Stripe Connect Direct Routing**: Zero platform custody of client escrow funds; funds route directly to verified tradespersons via destination charges with automatic platform commission deduction.
-- **Server-Authoritative Pricing**: Dynamic pricing catalog with real-time Firestore admin overrides for tiers, add-ons, and commission rates with complete client-side tamper defense.
-- **Comprehensive Automated Test Suite**: 195/195 passing tests across 14 test suites covering OWASP vectors, BOLA/IDOR, state machines, and financial invariants.
+## Start here
 
+- **[MASTER_BUILD_PLAN.md](MASTER_BUILD_PLAN.md)** — the single authoritative development, remediation, feature and release roadmap. Follow its critical path and release gates.
+- **[DEVELOPMENT.md](DEVELOPMENT.md)** — detailed architecture, implementation history and engineering notes.
+- **[AGENTS.md](AGENTS.md)** — mandatory instructions for contributors and AI agents.
+
+## Supporting references
+
+Domain-specific technical specifications (ecosystem, security, driver UI, mobile, calendar and financial reporting) and historical audit/verification reports are retained as supporting reference/evidence. They are not independent roadmaps; current readiness is determined by the master plan and latest CI evidence.
+
+## Technology
+
+React, TypeScript, Vite, Node/Express, Firebase Auth/Firestore/Storage, Stripe Connect, Gemini and Capacitor (Android/iOS).
+
+## Current readiness
+
+Do not infer production readiness from historical reports or old test counts. Check the latest GitHub Actions runs and the **Current verified baseline and release posture** section in [MASTER_BUILD_PLAN.md](MASTER_BUILD_PLAN.md) before development or release decisions.
