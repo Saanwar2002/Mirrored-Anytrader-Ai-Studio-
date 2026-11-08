@@ -611,7 +611,7 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 7. MEMBERSHIP TIERS (Landlord Pro, Driver Gold, Trader Pro/Premium/Platinum)
   // =========================================================================
-  const rawTier = (body.tierName || metadata.tierName || metadata.tier || body.priceId || "Pro").toString();
+  const rawTier = (body.tierName || body.priceId || metadata.tierName || metadata.tier || "Pro").toString();
   const lowerTier = rawTier.toLowerCase();
 
   let matchedCatalogKey = "price_pro";
@@ -619,14 +619,12 @@ export async function resolveAuthoritativeLineItem(
 
   if (
     lowerTier.includes("landlord") ||
-    metadata.subscriptionType === "landlord" ||
     body.priceId === "price_landlord"
   ) {
     matchedCatalogKey = "price_landlord";
     canonicalTier = "landlord";
   } else if (
     lowerTier.includes("gold driver") ||
-    metadata.subscriptionType === "driver_gold" ||
     body.priceId === "price_driver_gold"
   ) {
     matchedCatalogKey = "price_driver_gold";
