@@ -33,34 +33,36 @@ Repository: [Saanwar2002/AnyTrader](https://github.com/Saanwar2002/AnyTrader) ·
 
 ## 3. Current verified baseline and release posture
 
-**Baseline reviewed:** commit `50bf91088921013bea271f2b813d6ee7a7c528e9` (6 Nov 2026). Re-check HEAD/CI before execution.
+**Current GitHub main baseline:** commit `4b7963c831acbb2ea6f3084f9f4d069fb772792a` (8 Nov 2026). Remediation work is isolated in draft PR branches; neither PR has been merged.
 
 - Product scope: AnyTrader only (Home/Trades, Business/Consultancy, Properties and related AnyTrader workflows). AnyRoller passenger/driver/ride work is excluded. Shared infrastructure is considered only where required for AnyTrader and must not change AnyRoller behavior.
 - Stack: React 19 + TypeScript + Vite; Node/Express API; Firebase Auth, Firestore and Storage; Stripe Connect; Gemini; Capacitor Android/iOS.
 - Security/domain modules exist for authorization, identity, driver/trip eligibility, payment ledger, pricing catalog and state machines; adversarial, emulator and unit tests are substantial.
 - Large maintenance hotspots: `server.ts` (~271 KB), `AnyTraderAdmin` (~413 KB), `JobDetails` (~333 KB), `PassengerBooking` (~317 KB), `DriverTerminal` (~319 KB). Refactor only behind behavior tests.
 - TypeScript currently uses permissive options (`strict:false`, `noImplicitAny:false`, `skipLibCheck:true`, `allowJs:true`). `npm run lint` is currently typecheck, not a dedicated ESLint ruleset.
-- CI evidence at audit time: latest workflow run #231 failed (588 pass / 1 fail); seven consecutive failures (#225–#231). The invitation security regression PL-08 is a release blocker. Confirm current status from GitHub Actions before proceeding.
-- Production deployment/configuration and live Firebase/Stripe/Cloud Run/app-store state are **not proven by repository files alone**.
+- Current CI evidence (8 Nov 2026): draft PR #2 payment-security branch passed the complete release gate in run #279 (589/589 emulator/security tests; 1,074/1,074 unit/penetration tests; typecheck/lint, build and release audit all passed). The release audit reported six non-critical CI environment warnings for missing Stripe, Gemini, JWT and URL/origin variables. Draft PR #1 invitation-security branch still has a PL-08 failure; the latest restructuring is under validation in run #283. Do not treat historical run #231 or any draft-branch pass as proof that `main` or production is updated.
+- Live Google AI Studio workspace parity, deployed Firestore rules/indexes for both named and default databases, Firebase Auth/Storage/App Check, IAM, production secrets, Stripe/Cloud Run and app-store state are **not independently verified**. The Firebase connector is available but has not yet been connected; no live settings or deployments were changed.
 
 **Status vocabulary:** `NOT STARTED`, `IN PROGRESS`, `BLOCKED`, `PASS`, `FAIL`, `VERIFIED`. A task is `VERIFIED` only with evidence linked below.
 
 ## 4. Critical path — work in this order
 
 ### Phase 0 — Establish a truthful baseline (P0)
-- [ ] Capture current HEAD SHA, latest CI run, failing jobs/tests and branch protection.
-- [ ] Run locally/CI: `npm ci`, `npm run test:security-rules`, `npm test`, `npm run lint`, `npm run build`, `npm run audit:release` (use repository scripts as defined in package.json).
+- [x] Capture current GitHub `main` HEAD SHA and current draft-PR CI results; retain exact failing test/run evidence.
+- [x] Run the complete CI validation chain on the payment-security draft branch: `npm ci`, Firebase emulator/security/concurrency suite, unit/penetration suite, typecheck/lint, production build and release audit (run #279).
+- [ ] Run/confirm the same complete validation chain on the invitation-security branch after PL-08 passes; run #283 is the current attempt.
 - [ ] Reconcile counts and status claims in docs against actual results; distinguish historic test results from current.
 - [ ] Create a clean baseline commit/branch before remediation.
 
 **Exit gate:** reproducible baseline and one canonical list of failures.
 
 ### Phase 1 — Close security and CI blockers (P0/P1)
-- [ ] **PL-08 invitation recipient verification:** enforce verified-email requirements for recipient access/claim paths in Firestore rules and server acceptance flow; retain authorized inviter/admin paths. Test unverified recipient denied; verified exact/lowercase match allowed; unrelated user denied; inviter/admin behavior retained.
+- [ ] **PL-08 invitation recipient verification:** implementation and regression tests are in draft PR #1. Recipient direct reads require verified matching email; recipient list queries use exact email equality; acceptance is restricted to pending → accepted with server timestamp and only `status`/`acceptedAt` changes. Inviter/admin update grants are separate. CI runs #255, #266, #273, #278, #280 and #281 did not pass PL-08; run #283 validates the latest separated-grant rules. Keep this blocker open until all gates pass.
 - [ ] Run all Firestore + Storage emulator suites and adversarial authorization tests; inspect failures, not just summary counts.
 - [ ] Fix any additional current CI failures; do not bypass or weaken assertions to make CI green.
-- [ ] Review invitation onboarding fallback and query semantics for data leakage/privilege escalation.
-- [ ] Verify Stripe webhook signature fail-closed behavior, idempotency, server-calculated prices, Connect destination and payout authorization with tests.
+- [ ] Review invitation onboarding fallback and query semantics for data leakage/privilege escalation. Follow-up found: `BusinessTeamManagement.tsx` creates `type: business_team`, `role: member` invitations, while `Onboarding.tsx` currently treats any matching invitation as an admin-role selection and later rejects non-custom-claim users. Define the intended team-member role/permission/businessId flow before changing it; not modified in PR #1.
+- [x] Verify Stripe webhook dependency fail-closed behavior, server-calculated membership metadata/prices, job ownership and lifecycle authorization for boost/mediation checkout, and payment regression coverage on draft PR #2; full CI run #279 passed. [PR #2](https://github.com/Saanwar2002/AnyTrader/pull/2)
+- [ ] Independently verify live Stripe secrets, webhook endpoint/signing secret, Connect settings and staging payment flows before release.
 - [ ] Verify ride/job lifecycle and driver eligibility checks against cross-user and race-condition cases.
 
 **Exit gate:** all CI jobs green; no open P0/P1 findings; regression tests demonstrate intended denial and allowed paths.
@@ -145,8 +147,10 @@ For AnyTrader roles/portals only (homeowner, tradesperson, business/consultancy,
 ## 9. Evidence and decision log
 | Date | Commit / CI run | Decision / result | Evidence |
 |---|---|---|---|
-| 2026-11-06 | `50bf91088921013bea271f2b813d6ee7a7c528e9` | Repository audit baseline; CI run #231 failed PL-08; release NO-GO | [Actions run #231](https://github.com/Saanwar2002/AnyTrader/actions/runs/42204388896) |
-| 2026-11-08 | TBD | Master plan consolidated; current CI still must be rechecked | Update after Phase 0 |
+| 2026-11-06 | `50bf91088921013bea271f2b813d6ee7a7c528e9` | Historical repository audit baseline; CI run #231 failed PL-08; release NO-GO | [Actions run #231](https://github.com/Saanwar2002/AnyTrader/actions/runs/42204388896) |
+| 2026-11-08 | `4b7963c831acbb2ea6f3084f9f4d069fb772792a` | Current GitHub main baseline captured. Live AI Studio/Firebase parity remains unverified. | [Master plan](MASTER_BUILD_PLAN.md) · [Pre-change review](AI_STUDIO_FIREBASE_PRECHANGE_REVIEW.md) |
+| 2026-11-08 | PR #2 head `b0278c374fdefa547649d8df971d477cef418022` · CI #279 | Payment security changes passed all CI gates; draft, unmerged. Six non-critical CI environment warnings remain. | [PR #2](https://github.com/Saanwar2002/AnyTrader/pull/2) · [Actions run #279](https://github.com/Saanwar2002/AnyTrader/actions/runs/42477284058) |
+| 2026-11-08 | PR #1 head `b2b780595002c8ead0d82ff6dd3502154771bff1` · CI #283 | Latest invitation rule restructuring queued/in progress; PL-08 remains open until full CI pass. | [PR #1](https://github.com/Saanwar2002/AnyTrader/pull/1) · [Actions run #283](https://github.com/Saanwar2002/AnyTrader/actions/runs/42477980688) |
 
 ## 10. Immediate next task
-**Phase 0, task 1 (AnyTrader scope):** inspect latest GitHub Actions and HEAD; reproduce PL-08 and confirm current rules/acceptance code. Keep investigation/remediation AnyTrader-focused and preserve AnyRoller behavior. Do not start features until Phase 1 exits.
+**Immediate next task (AnyTrader scope):** complete run #283 and fix PL-08 without weakening tests; then run the full gate. Keep PRs draft/unmerged until CI is green and the AI Studio/Firebase pre-change gates are verified. Connect the Firebase integration and verify live project/database/rules/indexes/IAM/secrets; reconcile the actual AI Studio workspace SHA with GitHub before merge/deploy. Separately define the intended business-team invitation onboarding flow. Preserve AnyRoller behavior.
