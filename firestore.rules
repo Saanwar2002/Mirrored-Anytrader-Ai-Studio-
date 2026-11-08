@@ -591,9 +591,6 @@ service cloud.firestore {
           resource.data.get('email', '').lower() == request.auth.token.email.lower();
       }
 
-      // Acceptance uses the normalized email written by invitation creation.
-      // Keep this predicate simple and exact so the update rule avoids case-folding
-      // during a write evaluation.
       function isVerifiedInvitationRecipientForAcceptance() {
         return isSignedIn() &&
           ('email' in request.auth.token) &&
@@ -632,13 +629,18 @@ service cloud.firestore {
         isAdmin() ||
         request.resource.data.get('invitedBy', '') == request.auth.uid
       );
-      // Evaluate the constrained recipient transition first, then preserve the
-      // existing inviter and platform-admin management paths in the same grant.
+      // A verified recipient may perform only the pending -> accepted transition.
+      // Keep the authorization checks inline so each evaluated field is explicit.
       allow update: if (
-        isVerifiedInvitationRecipientForAcceptance() &&
+        isSignedIn() &&
+        ('email' in request.auth.token) &&
+        request.auth.token.email is string &&
+        ('email_verified' in request.auth.token) &&
+        request.auth.token.email_verified == true &&
+        resource.data.email == request.auth.token.email &&
         resource.data.get('status', '') == 'pending' &&
         request.resource.data.get('status', '') == 'accepted' &&
-        request.resource.data.get('acceptedAt', null) == request.time &&
+        request.resource.data.acceptedAt == request.time &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt'])
       ) || (
         isSignedIn() &&
