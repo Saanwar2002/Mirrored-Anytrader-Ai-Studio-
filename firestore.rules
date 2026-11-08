@@ -581,23 +581,38 @@ service cloud.firestore {
     }
 
     match /invitations/{invitationId} {
+      function isVerifiedInvitationRecipient() {
+        return 'email' in request.auth.token &&
+          'email_verified' in request.auth.token &&
+          request.auth.token.email_verified == true &&
+          resource.data.get('email', '').lower() == request.auth.token.email.lower();
+      }
+
       allow get, list: if isSignedIn() && (
-        isAdmin() || 
-        ('email' in request.auth.token && 'email_verified' in request.auth.token && request.auth.token.email_verified == true && (resource == null || resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower())) ||
-        (resource != null && (resource.data.invitedBy == request.auth.uid || resource.data.get('invitedBy', '') == request.auth.uid)) ||
-        resource == null
+        isAdmin() ||
+        (resource != null && (
+          isVerifiedInvitationRecipient() ||
+          resource.data.get('invitedBy', '') == request.auth.uid
+        ))
       );
       allow create: if isRegistered() && (
-        isAdmin() || 
+        isAdmin() ||
         request.resource.data.get('invitedBy', '') == request.auth.uid
       );
       allow update: if isRegistered() && (
-        isAdmin() || 
+        isAdmin() ||
         resource.data.get('invitedBy', '') == request.auth.uid ||
-        ('email' in request.auth.token && 'email_verified' in request.auth.token && request.auth.token.email_verified == true && (resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower()))
+        (
+          isVerifiedInvitationRecipient() &&
+          resource.data.get('status', '') == 'pending' &&
+          request.resource.data.get('status', '') == 'accepted' &&
+          request.resource.data.get('acceptedAt', null) == request.time &&
+          request.resource.data.diff(resource.data).affectedKeys().hasAll(['status', 'acceptedAt']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt'])
+        )
       );
       allow delete: if isRegistered() && (
-        isAdmin() || 
+        isAdmin() ||
         resource.data.get('invitedBy', '') == request.auth.uid
       );
     }
