@@ -240,6 +240,23 @@ export async function getDynamicFirestoreConfigs(firestoreDb: any): Promise<{
  * Resolves the server-authoritative line item and Stripe Connect routing
  * based strictly on validated server state. DISCARDS client-provided prices.
  */
+async function loadAuthorizedCheckoutJob(firestoreDb: any, jobId: string, authUid: string, purpose: "boost" | "mediation_stake"): Promise<Record<string, any>> {
+  if (!jobId || typeof jobId !== "string") throw new BadRequestError("A valid jobId is required for checkout");
+  if (!firestoreDb) throw new BadRequestError("Database unavailable for job checkout authorization");
+  const jobSnap = await firestoreDb.collection("jobs").doc(jobId).get();
+  if (!jobSnap.exists) throw new NotFoundError("Job not found");
+  const jobData = jobSnap.data() || {};
+  const ownerId = jobData.homeownerId || jobData.userId || jobData.ownerId || jobData.customerId;
+  const assignedTraderId = jobData.acceptedTradespersonId || jobData.acceptedTraderId || jobData.tradespersonId || jobData.traderId;
+  if (purpose === "mediation_stake") {
+    if (authUid !== ownerId && authUid !== assignedTraderId) throw new ForbiddenError("Only a job participant can pay the mediation stake");
+    if (jobData.status !== "disputed") throw new BadRequestError("Mediation stake can only be paid after the job has entered disputed status");
+  } else {
+    if (authUid !== ownerId) throw new ForbiddenError("Only the job owner can purchase a job boost");
+    if (!["open", "quoted"].includes(String(jobData.status || "open"))) throw new BadRequestError("Only open or quoted jobs can be boosted");
+  }
+  return jobData;
+}
 export async function resolveAuthoritativeLineItem(
   body: any,
   authUid: string,
@@ -464,6 +481,8 @@ export async function resolveAuthoritativeLineItem(
   // 4. DISPUTE MEDIATION STAKE (£25.00)
   // =========================================================================
   if (metadata.type === "mediation_stake" || body.priceId === "price_dispute_stake") {
+    const jobId = String(metadata.jobId || "");
+    await loadAuthorizedCheckoutJob(firestoreDb, jobId, authUid, "mediation_stake");
     const catalogItem = SERVER_PRICING_CATALOG.price_dispute_stake;
     const dynamicStake = Number(globalConfig?.paidAddons?.milestoneEscrow?.homeownerMediationStake);
     const resolvedAmountPence = (!isNaN(dynamicStake) && dynamicStake > 0)
@@ -499,6 +518,8 @@ export async function resolveAuthoritativeLineItem(
   // 5. PRIORITY BOOSTS (Emergency £4.99, Instant Match £2.99)
   // =========================================================================
   if (metadata.type === "boost" || metadata.tier === "emergency_boost" || body.priceId === "price_emergency_boost") {
+    const jobId = String(metadata.jobId || "");
+    await loadAuthorizedCheckoutJob(firestoreDb, jobId, authUid, "boost");
     const isInstantMatch = metadata.tier === "instant_match" || body.priceId === "price_instant_match";
     const catalogItem = isInstantMatch
       ? SERVER_PRICING_CATALOG.price_instant_match
