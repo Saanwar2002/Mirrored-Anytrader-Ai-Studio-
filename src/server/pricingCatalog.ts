@@ -683,12 +683,13 @@ export async function resolveAuthoritativeLineItem(
       },
       quantity: 1,
     },
+    // Membership entitlement metadata is server-authoritative. Never spread caller
+    // metadata here: Stripe webhooks use these values to provision account access.
     metadata: {
       tierName: catalogItem.name,
       tier: canonicalTier,
       subscriptionType: canonicalTier === "landlord" ? "landlord" : canonicalTier === "driver_gold" ? "driver_gold" : "tier",
       userId: authUid,
-      ...metadata,
     },
   };
 }
