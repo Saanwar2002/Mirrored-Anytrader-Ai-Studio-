@@ -2658,6 +2658,16 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
           invitedBy: "manager_uid",
           status: "pending",
         });
+        await setDoc(doc(adminDb, "invitations", "inv_email_lowercase"), {
+          email: "Victim@Example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_inviter_access"), {
+          email: "other-recipient@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
       });
 
       const unverifiedDb = testEnv
@@ -2681,7 +2691,36 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         })
         .firestore();
       await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_test")));
+      await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_lowercase")));
       await assertFails(getDoc(doc(verifiedDb, "invitations", "missing_invitation")));
+
+      const unrelatedDb = testEnv
+        .authenticatedContext("unrelated_user", {
+          email: "unrelated@example.com",
+          email_verified: true,
+        })
+        .firestore();
+      await assertFails(getDoc(doc(unrelatedDb, "invitations", "inv_email_test")));
+
+      // The inviter retains the existing read and management permissions.
+      const inviterDb = testEnv.authenticatedContext("manager_uid").firestore();
+      await assertSucceeds(getDoc(doc(inviterDb, "invitations", "inv_inviter_access")));
+      await assertSucceeds(
+        updateDoc(doc(inviterDb, "invitations", "inv_inviter_access"), {
+          status: "cancelled",
+        })
+      );
+
+      // Admin custom claims retain the existing management permissions.
+      const adminClaimsDb = testEnv
+        .authenticatedContext("platform_admin", { admin: true })
+        .firestore();
+      await assertSucceeds(getDoc(doc(adminClaimsDb, "invitations", "inv_email_test")));
+      await assertSucceeds(
+        updateDoc(doc(adminClaimsDb, "invitations", "inv_email_test"), {
+          status: "admin-reviewed",
+        })
+      );
 
       // The intended onboarding action is permitted: pending -> accepted with a server timestamp.
       await assertSucceeds(
