@@ -2,11 +2,11 @@ import { describe, it, expect } from "vitest";
 import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer } from "../../src/server/pricingCatalog";
 
 describe("Stripe Connect & Financial Flow Invariants", () => {
-  const mockCheckoutDb = (status: string, ownerId = "user_test_123") => ({
+  const mockCheckoutDb = (status: string, ownerId = "user_test_123", extra: Record<string, any> = {}) => ({
     collection: (name: string) => ({
       doc: (_id: string) => ({
         get: async () => name === "jobs"
-          ? { exists: true, data: () => ({ homeownerId: ownerId, status }) }
+          ? { exists: true, data: () => ({ ...extra, homeownerId: ownerId, status }) }
           : { exists: false, data: () => ({}) },
       }),
     }),
@@ -98,6 +98,19 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
     await expect(resolveAuthoritativeLineItem({
       metadata: { type: "mediation_stake", jobId: "job_1" },
     }, "user_test_123", mockCheckoutDb("open"))).rejects.toThrow(/disputed status/i);
+  });
+
+  it("allows boosts for active legacy jobs and blocks duplicate mediation stakes", async () => {
+    const boost = await resolveAuthoritativeLineItem({
+      metadata: { type: "boost", tier: "emergency_boost", jobId: "job_legacy" },
+    }, "user_test_123", mockCheckoutDb("posted"));
+    expect(boost.authoritativeAmountPence).toBe(499);
+
+    await expect(resolveAuthoritativeLineItem({
+      metadata: { type: "mediation_stake", jobId: "job_already_paid" },
+    }, "user_test_123", mockCheckoutDb("disputed", "user_test_123", {
+      dispute: { mediationStakePaid: true },
+    }))).rejects.toThrow(/already been paid/i);
   });
 
   it("strictly enforces Stripe Connect destination routing when handling Client Money (milestone escrow)", async () => {
