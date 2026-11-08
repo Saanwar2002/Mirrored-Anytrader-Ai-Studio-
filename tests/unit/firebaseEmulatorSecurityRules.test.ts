@@ -2678,6 +2678,15 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         .firestore();
       await assertFails(getDoc(doc(unverifiedDb, "invitations", "inv_email_test")));
       await assertFails(
+        getDocs(
+          query(
+            collection(unverifiedDb, "invitations"),
+            where("email", "==", "victim@example.com"),
+            where("status", "==", "pending")
+          )
+        )
+      );
+      await assertFails(
         updateDoc(doc(unverifiedDb, "invitations", "inv_email_test"), {
           status: "accepted",
           acceptedAt: serverTimestamp(),
@@ -2692,6 +2701,16 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         .firestore();
       await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_test")));
       await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_lowercase")));
+      const matchingInvitations = await assertSucceeds(
+        getDocs(
+          query(
+            collection(verifiedDb, "invitations"),
+            where("email", "==", "victim@example.com"),
+            where("status", "==", "pending")
+          )
+        )
+      );
+      expect(matchingInvitations.docs.some((invitation) => invitation.id === "inv_email_test")).toBe(true);
       await assertFails(getDoc(doc(verifiedDb, "invitations", "missing_invitation")));
 
       const unrelatedDb = testEnv
