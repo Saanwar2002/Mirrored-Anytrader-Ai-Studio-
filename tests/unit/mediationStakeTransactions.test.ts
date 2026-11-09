@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reserveMediationStakeAttempt, confirmMediationStakePayment, recordMediationStakePaymentFailure, attachMediationStakePaymentIntent } from "../../src/server/mediationStake.ts";
+import { reserveMediationStakeAttempt, createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure, attachMediationStakePaymentIntent } from "../../src/server/mediationStake.ts";
 
 function createTransactionalDb(seed: Record<string, any>) {
   const store = structuredClone(seed);
@@ -50,7 +50,74 @@ const seedJob = {
   dispute: { reason: "Existing dispute" }
 };
 
+function createIdempotentStripe(options: { failFirstAfterCreate?: boolean } = {}) {
+  const intents = new Map<string, any>();
+  const calls: string[] = [];
+  let failed = false;
+  return {
+    calls,
+    paymentIntents: {
+      create: async (_params: any, request: { idempotencyKey: string }) => {
+        calls.push(request.idempotencyKey);
+        let intent = intents.get(request.idempotencyKey);
+        if (!intent) {
+          intent = { id: "pi-shared", client_secret: "secret-shared", status: "requires_payment_method" };
+          intents.set(request.idempotencyKey, intent);
+        }
+        if (options.failFirstAfterCreate && !failed) {
+          failed = true;
+          throw new Error("simulated network timeout after Stripe created the intent");
+        }
+        return intent;
+      },
+      retrieve: async (id: string) => {
+        const intent = [...intents.values()].find(value => value.id === id);
+        if (!intent) throw new Error("PaymentIntent not found");
+        return intent;
+      }
+    }
+  };
+}
+
+const orchestrationInput = (candidateAttemptId: string) => ({
+  jobId: "job-1", userId: "owner-1", candidateAttemptId, serverTimestamp: timestamp
+});
+
 describe("mediation stake transaction commands", () => {
+  it("uses one effective Stripe PaymentIntent for simultaneous checkout requests", async () => {
+    const db = createTransactionalDb({ "jobs/job-1": seedJob });
+    const stripe = createIdempotentStripe();
+    const results = await Promise.all([
+      createMediationStakePaymentIntent(db, stripe, orchestrationInput("attempt-a")),
+      createMediationStakePaymentIntent(db, stripe, orchestrationInput("attempt-b"))
+    ]);
+
+    expect(results.map(result => result.attemptId)).toEqual(["attempt-a", "attempt-a"]);
+    expect(results.map(result => result.paymentIntent.id)).toEqual(["pi-shared", "pi-shared"]);
+    expect(stripe.calls).toEqual([
+      "mediation-stake:job-1:attempt-a",
+      "mediation-stake:job-1:attempt-a"
+    ]);
+    expect(db._store["jobs/job-1"].dispute.paymentIntentId).toBe("pi-shared");
+  });
+
+  it("reuses the same Stripe idempotency key after a timeout following intent creation", async () => {
+    const db = createTransactionalDb({ "jobs/job-1": seedJob });
+    const stripe = createIdempotentStripe({ failFirstAfterCreate: true });
+
+    await expect(createMediationStakePaymentIntent(db, stripe, orchestrationInput("attempt-a")))
+      .rejects.toThrow("simulated network timeout");
+    const retry = await createMediationStakePaymentIntent(db, stripe, orchestrationInput("attempt-b"));
+
+    expect(retry.attemptId).toBe("attempt-a");
+    expect(retry.paymentIntent.id).toBe("pi-shared");
+    expect(stripe.calls).toEqual([
+      "mediation-stake:job-1:attempt-a",
+      "mediation-stake:job-1:attempt-a"
+    ]);
+    expect(db._store["jobs/job-1"].dispute.paymentIntentId).toBe("pi-shared");
+  });
+
   it("reserves exactly one attempt for simultaneous retries by the initiating participant", async () => {
     const db = createTransactionalDb({ "jobs/job-1": seedJob });
     const input = (candidateAttemptId: string) => ({
