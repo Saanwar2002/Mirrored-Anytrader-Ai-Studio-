@@ -1805,18 +1805,11 @@ async function startServer() {
                   updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 }, { merge: true });
               }
-            } else if (meta?.type === 'mediation_stake' && meta?.jobId && db) {
-              await db.collection("jobs").doc(meta.jobId).update({
-                status: "disputed",
-                "dispute.status": "pending_arbitration",
-                "dispute.mediationStakePaid": true,
-                "dispute.mediationStakeAmount": 25.00,
-                "dispute.stakePaymentId": session.id,
-                "dispute.paidAt": admin.firestore.FieldValue.serverTimestamp(),
-                disputeReason: meta.disputeReason || "Unspecified",
-                technicalFaultReport: meta.technicalFaultReport || "Unspecified",
-                disputedAt: admin.firestore.FieldValue.serverTimestamp()
-              });
+            } else if (meta?.type === 'mediation_stake') {
+              // Mediation stakes are fulfilled only by the verified PaymentIntent webhook
+              // below, which checks the reserved attempt, payer, intent ID, amount and currency.
+              // A legacy Checkout Session must never mark a stake as paid.
+              console.error("[Security Alert] Ignoring legacy mediation stake Checkout Session:", session.id);
             }
             if (meta?.type === 'boost' && meta?.jobId && db) {
               const boostExpiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
