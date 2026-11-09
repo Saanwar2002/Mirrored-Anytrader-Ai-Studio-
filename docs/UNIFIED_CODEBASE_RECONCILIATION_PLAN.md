@@ -542,3 +542,19 @@ A full text normalization check was performed on the current GitHub `main` and `
 ### Next rules task
 
 Inspect `tests/unit/firebaseEmulatorSecurityRules.test.ts` and the ZIP's `firestore.rules`/security test files, then add any missing invitation acceptance, field-restriction, query, and missing-document regression cases on integration. Run the Firebase emulator suite only when the available environment supports it and record the actual result.
+
+
+## 18. Invitation emulator test coverage mapped (2026-11-09)
+
+Reviewed the integration branch's existing test `94. PL-08` in `tests/unit/firebaseEmulatorSecurityRules.test.ts` (lines 2648–2788). The test already covers:
+- unverified recipient get/list/accept denied;
+- verified recipient direct get and exact-email constrained list query;
+- case-insensitive get for a mixed-case stored email;
+- missing invitation get denied and unrelated recipient denied;
+- inviter read/cancel and admin read/update;
+- recipient pending→accepted with server timestamp;
+- recipient edits to email, inviter, or extra notes denied.
+
+This is substantially aligned with the integration invitation rule and means these cases should not be duplicated blindly. The test currently does **not visibly assert** recipient acceptance of an already accepted/revoked/expired invitation, recipient deletion denial, or inviter creation/deletion behavior. Add only the missing lifecycle cases if the product contract confirms the expected semantics. The existing inviter update is intentionally broad in the rule and test; treat that as a separate authorization design question rather than silently narrowing it during reconciliation.
+
+**Validation status:** source/test review only; Firebase emulator execution has not been performed in this continuation. The normalized GitHub rules comparison and test mapping are now documented; ZIP rules comparison and actual emulator run remain outstanding.
