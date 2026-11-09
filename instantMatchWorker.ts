@@ -262,7 +262,15 @@ async function refundExpiredInstantMatch(
     currency
   });
 
-  if (reservation.operation.status === "succeeded") return;
+  if (reservation.operation.status === "succeeded") {
+    await matchRef.set({
+      refundOperationId: operationId,
+      stripeRefundId: reservation.operation.stripeRefundId || null,
+      refundStatus: "succeeded",
+      refundConfirmedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return;
+  }
 
   try {
     const refund = await stripe.refunds.create({
