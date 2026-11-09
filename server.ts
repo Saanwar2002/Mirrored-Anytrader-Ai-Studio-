@@ -2039,84 +2039,96 @@ async function startServer() {
                 console.log(`Driver ${driverId} settled £${amount} in platform fees (remaining pending: £${newPending})`);
               }
             } else if (meta?.type === 'taxi_trip' && meta?.rideId && db) {
-              const rideId = meta.rideId;
-              const driverId = meta.driverId;
-            const amount = session.amount_total ? session.amount_total / 100 : 0;
-
-            const rideRef = db.collection("ride_requests").doc(rideId);
-            const rideSnap = await rideRef.get();
-            const rideData = rideSnap.data();
-
-            try {
-              validateRideTransition(rideData?.status || "in_progress", "completed");
-            } catch (rideTransErr) {
-              console.warn(`Ride transition warning on ${rideId}:`, rideTransErr);
-            }
-
-            // 1. Update ride status
-            await rideRef.update({
-              status: "completed",
-              paymentStatus: "paid",
-              payoutTransferred: true, // Handled automatically by Stripe transfer_data
-              stripePaymentIntentId: session.payment_intent as string,
-              paidAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            // 2. Record ledger entry for ride payment
-            const ledgerEntryId = `ledg_ride_${event.id}`;
-            const farePence = session.amount_total || Math.round(amount * 100);
-            const feePence = Math.round(farePence * 0.12);
-            await db.collection("payment_ledger").doc(ledgerEntryId).set({
-              entryId: ledgerEntryId,
-              transactionId: session.payment_intent as string || `pi_${event.id}`,
-              idempotencyKey: `webhook_ride_${event.id}`,
-              payerId: rideData?.passengerId || session.client_reference_id || "passenger",
-              payeeId: driverId || "driver",
-              amount: farePence,
-              platformFee: feePence,
-              netPayout: farePence - feePence,
-              currency: session.currency || "gbp",
-              type: "DIRECT_PAYOUT",
-              status: "completed",
-              createdAt: new Date().toISOString()
-            });
-
-            // 3. Update driver metrics
-            if (driverId) {
-              const today = new Date().toISOString().split('T')[0];
+              const rideId = String(meta.rideId);
+              const driverId = String(meta.driverId || "");
+              const farePence = Number(session.amount_total);
+              const paymentIntentId = typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id;
+              if (!driverId || !Number.isSafeInteger(farePence) || farePence <= 0 || !paymentIntentId) {
+                throw new Error("Taxi-trip fulfillment is missing a valid driver, amount, or PaymentIntent.");
+              }
+              const rideRef = db.collection("ride_requests").doc(rideId);
+              const ledgerEntryId = `ledg_ride_${session.id}`;
+              const ledgerRef = db.collection("payment_ledger").doc(ledgerEntryId);
+              const fulfillmentRef = db.collection("stripe_fulfillments").doc(`taxi_trip_${session.id}`);
               const metricsRef = db.collection("driver_metrics").doc(driverId);
-              const metricsDoc = await metricsRef.get();
-              
-              if (metricsDoc.exists) {
-                const data = metricsDoc.data();
-                if (data?.date === today) {
-                  await metricsRef.update({
-                    dailyEarnings: admin.firestore.FieldValue.increment(amount * 0.88), // 88% after commission
-                    jobsDoneToday: admin.firestore.FieldValue.increment(1),
+              const today = new Date().toISOString().split("T")[0];
+              const feePence = Math.round(farePence * 0.12);
+              const netPence = farePence - feePence;
+              await db.runTransaction(async (tx: any) => {
+                const [rideSnap, ledgerSnap, fulfillmentSnap, metricsSnap] = await Promise.all([
+                  tx.get(rideRef), tx.get(ledgerRef), tx.get(fulfillmentRef), tx.get(metricsRef)
+                ]);
+                if (!rideSnap.exists) throw new Error(`Taxi ride ${rideId} does not exist.`);
+                const rideData = rideSnap.data() || {};
+                if (rideData.assignedDriverId && rideData.assignedDriverId !== driverId) {
+                  throw new Error("Taxi-trip driver does not match the assigned driver.");
+                }
+                if (rideData.passengerId && session.client_reference_id && rideData.passengerId !== session.client_reference_id) {
+                  throw new Error("Taxi-trip passenger does not match the authenticated checkout customer.");
+                }
+                if (rideData.stripePaymentIntentId && rideData.stripePaymentIntentId !== paymentIntentId) {
+                  throw new Error("Taxi ride is already bound to a different PaymentIntent.");
+                }
+                if (fulfillmentSnap.exists) return;
+                if (ledgerSnap.exists) throw new Error("Taxi-trip ledger entry exists without its fulfillment marker; manual reconciliation required.");
+                if (rideData.status !== "completed") {
+                  validateRideTransition(rideData.status || "in_progress", "completed");
+                } else if (rideData.paymentStatus !== "paid") {
+                  throw new Error("Taxi ride is completed but not paid; manual reconciliation required.");
+                }
+                tx.update(rideRef, {
+                  status: "completed",
+                  paymentStatus: "paid",
+                  payoutTransferred: true,
+                  stripePaymentIntentId: paymentIntentId,
+                  paidAt: rideData.paidAt || admin.firestore.FieldValue.serverTimestamp()
+                });
+                tx.create(ledgerRef, {
+                  entryId: ledgerEntryId,
+                  transactionId: paymentIntentId,
+                  idempotencyKey: `webhook_ride_${session.id}`,
+                  payerId: rideData.passengerId || session.client_reference_id,
+                  payeeId: driverId,
+                  amount: farePence,
+                  platformFee: feePence,
+                  netPayout: netPence,
+                  currency: session.currency || "gbp",
+                  type: "DIRECT_PAYOUT",
+                  status: "completed",
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                const metricData = metricsSnap.exists ? metricsSnap.data() || {} : {};
+                if (metricData.date === today) {
+                  tx.update(metricsRef, {
+                    dailyEarnings: Number(metricData.dailyEarnings || 0) + netPence / 100,
+                    jobsDoneToday: Number(metricData.jobsDoneToday || 0) + 1,
                     lastTripAt: admin.firestore.FieldValue.serverTimestamp()
                   });
                 } else {
-                  // Reset for a new day
-                  await metricsRef.set({
+                  tx.set(metricsRef, {
                     driverId,
                     date: today,
-                    dailyEarnings: amount * 0.88,
+                    dailyEarnings: netPence / 100,
                     jobsDoneToday: 1,
-                    lastAssignmentAt: admin.firestore.FieldValue.serverTimestamp(),
+                    lastAssignmentAt: metricData.lastAssignmentAt || admin.firestore.FieldValue.serverTimestamp(),
                     lastTripAt: admin.firestore.FieldValue.serverTimestamp()
                   });
                 }
-              } else {
-                await metricsRef.set({
+                tx.create(fulfillmentRef, {
+                  eventId: event.id,
+                  sessionId: session.id,
+                  intentId: session.metadata?.intentId || null,
+                  paymentIntentId,
+                  rideId,
+                  passengerId: rideData.passengerId || session.client_reference_id,
                   driverId,
-                  date: today,
-                  dailyEarnings: amount * 0.88,
-                  jobsDoneToday: 1,
-                  lastAssignmentAt: admin.firestore.FieldValue.serverTimestamp(),
-                  lastTripAt: admin.firestore.FieldValue.serverTimestamp()
+                  farePence,
+                  feePence,
+                  netPence,
+                  type: "taxi_trip",
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
                 });
-              }
-            }
+              });
           }
         }
       } else if (event.type === 'customer.subscription.updated') {
