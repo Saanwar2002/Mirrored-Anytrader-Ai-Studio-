@@ -175,7 +175,7 @@ export async function recordConfirmedRefund(
     }
     if (
       original.status !== "completed" ||
-      !["ESCROW_DEPOSIT", "RIDE_PAYMENT", "DIRECT_PAYOUT", "PLATFORM_COMMISSION"].includes(original.type)
+      !["ESCROW_DEPOSIT", "PLATFORM_COMMISSION"].includes(original.type)
     ) {
       throw new ConflictError("Only completed original payment entries can be refunded.");
     }
