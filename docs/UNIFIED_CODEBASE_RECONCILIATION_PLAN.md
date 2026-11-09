@@ -889,3 +889,58 @@ The refund test deliberately rejects `RIDE_PAYMENT` and `DIRECT_PAYOUT` entries.
 ### Decision
 
 Current refund tests are a useful sequential unit baseline, but they do not cover the critical replay identity and concurrency defects. Add the missing tests before implementation acceptance; do not mark refund reconciliation complete based on this suite.
+
+
+## 28. Webhook-to-ledger and Instant Match refund path comparison (2026-11-09)
+
+Compared integration's current `charge.refunded` handler and `instantMatchWorker.ts` with PR #5's replacement patches and the full proposed refund module.
+
+### Current integration behavior — material gap
+
+- Integration's `charge.refunded` handler only writes a summary document to `refund_events/ref_{event.id}` using cumulative `charge.amount_refunded`. It does not inspect individual Stripe refund objects, bind the refund to an original ledger entry, create a `REFUND` ledger outflow, or update a cumulative refund aggregate.
+- Integration's Instant Match worker has **two independent timeout paths** (snapshot callback and 10-second interval). Both can expire the same attempt/match and both directly call `stripe.refunds.create` with no explicit amount, no deterministic idempotency key, no durable reservation, and no refund status/recovery workflow.
+- The worker marks the match expired before the Stripe refund call. If Stripe is unavailable or the call fails ambiguously, the match remains expired and the current integration code has no periodic refund recovery.
+- The no-available-traders branch in `initiateNextAttempt` expires the match but does not issue a refund at all.
+- These are existing integration defects, not merely hypothetical PR concerns. PR #5's durable worker path is a substantial required improvement, but must be corrected before adoption.
+
+### PR #5 webhook-to-ledger behavior
+
+- Handles each individual `charge.refunded` refund object and uses `refund.amount`, not cumulative `charge.amount_refunded`.
+- Resolves PaymentIntent ID from string or expanded object, checks refund PaymentIntent and currency against charge, then requires exactly one completed original ledger candidate.
+- Prefers `ESCROW_DEPOSIT`; if none, falls back to `PLATFORM_COMMISSION`. This allows Instant Match's commission entry to be selected, but must be validated against actual payment flows and the intended refund source.
+- Calls `recordConfirmedRefund` using Stripe refund ID, charge ID, PaymentIntent, original ledger entry and optional `refundOperationId` metadata.
+- Sends missing/multiple originals and identity conflicts to `refund_review`; throws unexpected failures so the outer webhook can retry.
+- Flags `charge.refunds.has_more` for manual pagination review.
+
+### Blocking webhook risks
+
+1. **Incomplete refund list:** the handler only processes `charge.refunds.data` from the event payload. If `has_more` is true it creates a review record but still marks the event `reconciled`; it does not retrieve remaining refunds from Stripe or provide an automated continuation cursor. Event retries will then be treated as completed by the processed-event claim. The remaining items require a durable, executable reconciliation job before event finalization, or the event must remain non-final/retryable.
+2. **Charge binding:** the handler derives paymentIntentId from the charge and checks each refund's PI, but the module does not compare chargeId on duplicate refund replay and does not independently verify the charge belongs to that PI. Validate via trusted Stripe relationship / retrieved charge and persist the immutable binding.
+3. **Original ledger selection:** if there are any completed escrow entries, commission entries are ignored. If there are no escrow entries, a single commission entry is accepted. This fallback must be explicit per payment type, not a generic preference rule. Multiple payment ledger entries for one PI must not be resolved by incidental query ordering.
+4. **Event completion vs review:** the handler treats several refund conflicts as manual review and continues, then marks the entire event reconciled. This is acceptable only if every refund needing review is durably queued and a monitored workflow owns it; otherwise it is a silent terminal gap.
+5. **Refund status:** confirm the individual refund object's status is `succeeded` before creating a completed immutable ledger outflow. Pending/failed/canceled refunds must not be booked as completed.
+6. **Webhook finalization:** ensure the outer event handler marks the processed Stripe event completed only after all refunds have either been reconciled or durably queued for a recoverable review workflow. A throw after some refunds is safe only because refund IDs make prior completed records replayable; incomplete aggregate/replay logic must be fixed first.
+
+### PR #5 Instant Match worker behavior and remaining race
+
+- Replaces direct refunds in both timeout paths with `refundExpiredInstantMatch`, a deterministic operation ID `instant_match_{matchId}`, and Stripe idempotency key from the reservation.
+- Adds a 30-second recovery loop for expired matches whose `refundStatus` is not succeeded.
+- Checks for exactly one completed `PLATFORM_COMMISSION` ledger entry matching PaymentIntent, amount and currency before refunding.
+- Adds a shared refund path to the no-available-traders branch, fixing the current no-refund gap.
+- The stable operation/key makes simultaneous calls converge at Stripe, but both workers can still call the same reservation and Stripe request; idempotency is the backstop, not a Firestore claim/lease. Add an operation claim/lease or prove the Stripe idempotency window and recovery policy are sufficient.
+- The worker records operation status `failed` after any caught Stripe error, including ambiguous network outcomes. It preserves the key, which is good, but a distinct `unknown/reconciling` state is safer; recovery should query Stripe by known refund ID / metadata or retry same key, never generate a new key.
+- The worker sets match `refundStatus` to Stripe's immediate response status, while the authoritative ledger is only created by webhook. Ensure recovery treats `pending`, `requires_action`, and other non-succeeded Stripe states correctly and never equates API submission with confirmed ledger settlement.
+- Validate `chargeAmountPence` is the exact captured amount for this payment and is immutable server-derived data; do not trust a mutable match field as refund authority. Also validate original ledger payer/payee/type and the intended Instant Match payment product.
+
+### Port decision / required implementation package
+
+Do not port the PR #5 refund handler or worker unchanged. Implement as one package:
+1. Harden `recordConfirmedRefund` (Section 26 R1–R3, status checks, operation binding, charge identity).
+2. Add complete individual-refund pagination/recovery and terminal event semantics.
+3. Add explicit per-payment-type original-ledger resolver.
+4. Add Stripe refund status validation.
+5. Replace both Instant Match timeout refund branches and no-trader expiration with one durable reservation/claim/recovery path; validate captured amount from immutable payment source.
+6. Add emulator tests for concurrent worker invocations, crash after Stripe submission, pending-to-succeeded webhook, refund list pagination, no-trader expiry, and exact-one ledger reversal.
+7. Keep taxi/AnyRoller and direct payout refund behavior out of scope.
+
+**Status:** integration source and PR patches reviewed; no source code changed and no tests executed in this step.
