@@ -2859,7 +2859,6 @@ async function startServer() {
     if (!jobId || typeof jobId !== "string") return res.status(400).json({ error: "jobId is required" });
     if (!db) return res.status(500).json({ error: "Database service unavailable" });
 
-    const jobRef = db.collection("jobs").doc(jobId);
     const candidateAttemptId = db.collection("payment_attempts").doc().id;
     let attemptId = "";
     let existingPaymentIntentId = "";
