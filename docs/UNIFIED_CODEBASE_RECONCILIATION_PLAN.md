@@ -1236,3 +1236,46 @@ The webhook still has broader architectural risks: fulfillment side effects are 
 - Documentation update follows this commit.
 - No TypeScript, lint, unit, emulator, Stripe test-mode or build tests have been executed in this environment. Do not deploy or merge until those checks pass, especially the per-product amount/mode matrix.
 
+
+
+## 38. Idempotent webhook side effects: ad-wallet credit and Instant Match creation (2026-11-09)
+
+Continued the webhook audit and found two concrete retry hazards in the existing product fulfillment branches:
+
+- Ad-wallet top-up used an unconditional Firestore increment. If an event failed after this write but before the event was marked complete, a retry could credit the wallet again.
+- Instant Match used an auto-generated document ID. A retry after partial fulfillment could create a second match for the same paid Checkout Session.
+
+### Implemented in `server.ts`
+
+**Ad-wallet top-up**
+- Uses deterministic fulfillment marker `stripe_fulfillments/ad_wallet_<eventId>`.
+- Applies wallet increment and creates the marker in one Firestore transaction.
+- Replayed webhook events see the marker and do not increment the wallet again.
+
+**Instant Match**
+- Uses deterministic match ID `im_<checkoutSessionId>`.
+- Reads the match, job and deterministic fulfillment marker in one transaction.
+- Requires the target job to exist.
+- If the job has a `homeownerId`, verifies it matches the authenticated intent user.
+- Creates the match, links it to the job, and writes `stripe_fulfillments/instant_match_<sessionId>` atomically.
+- Retries for the same session cannot create a second match.
+
+### Commit
+
+- `4f55568b710f52b6a5df68c54f11c8224b05aeca` — make wallet and Instant Match webhook fulfillment idempotent.
+
+### Remaining webhook retry hazards
+
+This is not complete exactly-once fulfillment. Other branches still need the same treatment, especially:
+- milestone quote update + escrow ledger + domain event + notification;
+- ride completion + ledger + driver metrics;
+- subscription/add-on user updates;
+- boost job update + public card update;
+- mediation stake state transition;
+- fee settlement balance reduction.
+
+These require per-product idempotency markers and atomicity for Firestore-only writes; external Stripe transfers remain a separate outbox/reconciliation concern.
+
+### Verification
+
+Static inspection only. No test, lint, build, Firestore emulator or Stripe test-mode run was performed. Add webhook regression tests that simulate a failure after each side effect and then replay the same event before deploying.
