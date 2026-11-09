@@ -811,3 +811,48 @@ PR #5 updates `package.json` to:
 Integration's current package scripts do not yet include this new test path. When porting PR #5, carry the exclusion and all three emulator-gate inclusions together. Otherwise the emulator test may be skipped by default and never run in CI.
 
 **Status:** module and test patches reviewed; not ported or executed. Keep the module + webhook + pricing guard + emulator test + package script updates as one mediation-stake delivery unit.
+
+
+## 26. Refund ledger lifecycle: exact source review and blocking defects (2026-11-09)
+
+Reviewed the complete added `src/server/refundReconciliation.ts` patch from PR #5. This is a source review, not an implementation or test run.
+
+### Confirmed strengths
+
+- A durable operation is reserved transactionally before Stripe I/O.
+- Stable idempotency key is derived from operation ID.
+- Refund documents are keyed by Stripe refund ID, independent of webhook event ID.
+- Refund total is transactionally bounded against the original payment amount.
+- Only completed original ledger entries of allowed types can be reversed.
+- The individual Stripe refund amount is used, not cumulative `Charge.amount_refunded`.
+- The reversal entry is immutable in intent and linked by `reversalOfEntryId`.
+- Operation success is recorded in the same transaction as refund ledger/totals writes.
+
+### Blocking defect R1 — replay identity is incomplete
+
+When `refund_records/{refundId}` already exists, the replay branch compares only PaymentIntent ID, amount and original ledger entry ID. It does **not** compare:
+- stored `stripeChargeId` against incoming `chargeId`;
+- stored currency against incoming normalized currency;
+- stored operation identity against incoming operationId (including missing-vs-present mismatch).
+
+A duplicate refund ID with conflicting charge/currency/operation can therefore be accepted as a replay. Fix by persisting an explicit immutable refund identity and comparing every immutable Stripe field on replay. Add one mismatch test per field.
+
+### Blocking defect R2 — operation state/identity is under-validated
+
+For a new refund record, the operation check validates PaymentIntent, amount, currency and optional Stripe refund ID, but not `operation.operationId`, its deterministic idempotency key, or its lifecycle status. It can mark a failed/requires_review operation succeeded without a deliberate reconciliation transition. Validate operation document identity, idempotency key, and permitted prior statuses; make ambiguous/failed recovery explicit and prevent one operation being bound to multiple refund IDs.
+
+### Blocking defect R3 — missing aggregate on replay is not repaired
+
+On an existing refund record, if `payment_refund_totals` is absent, the code reports cumulative refunded amount as just this refund amount. It does not rebuild/verify the aggregate from immutable refund records. This can understate cumulative refunds and make downstream reporting inconsistent. Decide whether a missing aggregate is a hard integrity failure or reconstruct it transactionally from an authoritative source; do not silently return a partial total.
+
+### Additional checks before adoption
+
+- Validate Stripe charge ID is actually associated with the supplied PaymentIntent (using trusted webhook object relationship or a persisted original charge binding); the current function only stores the incoming charge ID.
+- Verify the original ledger entry's amount/currency units and allowed types against all real payment flows. In particular, refunding a `PLATFORM_COMMISSION` entry may have different payer/payee and payout reversal semantics than refunding `ESCROW_DEPOSIT`.
+- Ensure two different original ledger entries for one PaymentIntent fail closed consistently; the aggregate binds one original entry, but original-entry discovery must be unambiguous in the webhook caller.
+- Add tests for two concurrent partial refunds, exact full refund, over-refund race, duplicate webhook with missing aggregate, charge/currency/operation mismatch replay, and failed-operation recovery.
+- Confirm the refund worker never interprets an API response as final settlement; only a verified Stripe refund webhook should write the confirmed reversal.
+
+### Current decision
+
+The refund module is a useful candidate foundation but **not safe to port unchanged**. Fix R1–R3 and add tests before wiring it into the Instant Match worker/webhook. Do not merge PR #5 wholesale; its current PR metadata describes mediation-stake hardening, while the refund code is a distinct financial scope that still requires independent review. Main and AI Studio remain untouched.
