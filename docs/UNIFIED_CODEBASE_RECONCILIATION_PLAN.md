@@ -687,3 +687,57 @@ Read the complete PR #2 pricingCatalog patch. This is more than metadata cleanup
 7. Stripe webhook unavailable dependencies return retryable 503 and do not mark events complete.
 
 **Status:** reviewed but not yet ported. This security helper and its tests are now a required part of the PR #2 integration, not an optional enhancement.
+
+
+## 23. Live branch topology and PR integration matrix (2026-11-09)
+
+A fresh GitHub compare was run for `main...integration/pr-consolidation-20261109`.
+
+### Branch topology (authoritative at this check)
+
+- Main SHA: `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- Integration is **41 commits ahead, 0 behind** main; merge base equals main.
+- Integration therefore contains all current main history plus 41 integration-only commits. It is not diverged behind main.
+- GitHub reports only seven paths changed relative to main: `.github/workflows/ci.yml`, `DEVELOPMENT.md`, `MASTER_BUILD_PLAN.md`, this reconciliation plan, `firestore.rules`, `src/server/reviewAuthorization.ts`, and `tests/unit/firebaseEmulatorSecurityRules.test.ts`.
+- This is important: the 41-commit integration lead is not evidence that PR #2/#5 source code has been integrated. Most of the lead is integration history/documentation and the named rule/review changes.
+
+### Exact PR changed-file inventories
+
+**PR #2 (4 paths):**
+- `server.ts`
+- `src/server/pricingCatalog.ts`
+- `tests/unit/stripeConnectFinancialAudit.test.ts`
+- `tests/unit/task25ScaleBackfillResilience.test.ts`
+
+**PR #5 (24 paths):**
+- `.github/workflows/ci.yml`, `MASTER_BUILD_PLAN.md`, `package.json`
+- `server.ts`, `instantMatchWorker.ts`
+- `src/server/domainEvents.ts`, `src/server/mediationStake.ts`, `src/server/pricingCatalog.ts`, `src/server/refundReconciliation.ts`
+- tests: `domainEventIdempotency`, `jobParticipantAuthorization`, `mediationStakeFirestoreEmulator`, `mediationStakeLegacyCheckout`, `mediationStakeTransactions`, `refundReconciliation`, `stripeAdWalletTopupIdempotency`, `stripeCheckoutAsyncPayment`, `stripeConnectFinancialAudit`, `stripeInstantMatchIdempotency`, `stripeMilestoneFundingIdempotency`, `stripeMilestonePaymentAmount`, `stripeWebhookRetryClaim`, `task25ScaleBackfillResilience`.
+
+### Critical reconciliation matrix
+
+| Path | PR scope | Integration-vs-main status | Next action |
+|---|---|---|---|
+| `server.ts` | PR2 + PR5 | No net diff reported vs main | Compare PR2 and PR5 hunks against integration's main-derived file; compose compatible webhook + checkout changes |
+| `src/server/pricingCatalog.ts` | PR2 + PR5 | No net diff vs main | Merge both PR changes by behavior; avoid choosing either whole file |
+| `instantMatchWorker.ts` | PR5 | No net diff vs main | Port durable refund reservation/recovery with webhook |
+| `src/server/refundReconciliation.ts` | PR5 new | Not in integration's main diff | Add only with tests and worker/webhook integration |
+| `src/server/domainEvents.ts` | PR5 | No net diff vs main | Resolve persisted-event/handler retry semantics before adoption |
+| `src/server/mediationStake.ts` | PR5 new/changed | Not in integration's main diff | Port transaction and authorization behavior with emulator coverage |
+| `package.json` | PR5 | No net diff vs main | Reconcile scripts/dependencies and ensure every new test is in CI |
+| `.github/workflows/ci.yml` | PR5 + integration | Net diff exists | Merge workflow requirements, inspect current PR checks; do not replace integration workflow wholesale |
+| Financial / mediation tests | PR2 + PR5 | No net diff vs main | Port as a coordinated test set; avoid duplicate test names and ensure npm gate includes them |
+
+**Interpretation:** integration has not yet incorporated the PR #2/#5 functional code changes listed above. Previous sections 21–22 are design review findings, not implementation completion. No source code was changed in this step.
+
+### Safe implementation sequence
+
+1. Treat PR #2 and PR #5 as source candidates, not merge-ready branches. Fetch exact full PR patches for overlapping `server.ts` and `pricingCatalog.ts`.
+2. Build a behavior-level merge for pricing/checkout authorization first (PR2 guard + PR5 pricing/webhook behavior); port tests with it.
+3. Port mediation stake module and its tests as a separate unit.
+4. Port refund reconciliation module + Instant Match worker + webhook event handling together; harden replay identity and handler recovery before acceptance.
+5. Merge package scripts/CI last, then run complete tests, typecheck, build, release audit and inspect Actions status.
+6. Only after all checks pass should a reviewed integration candidate be considered for main. AI Studio sync must remain paused until main is intentionally updated and the safe Pull/Push sequence is agreed.
+
+No production/main or AI Studio action was performed during this comparison.
