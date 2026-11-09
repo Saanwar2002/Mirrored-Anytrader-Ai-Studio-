@@ -1450,3 +1450,47 @@ Reworked the three subscription entitlement branches in `checkout.session.comple
 - No TypeScript, lint, build, unit, emulator or Stripe test-mode tests were run.
 
 **Status:** committed on integration only; not production verified.
+
+
+## 44. Stripe subscription lifecycle audit — handlers absent (2026-11-09)
+
+### Scope inspected
+
+Re-fetched the current integration server.ts and inspected the /api/webhook route, subscription event references, Checkout Session entitlement fulfilment, and authenticated cancel/reactivate routes.
+
+### Verified findings
+
+1. The webhook's only implemented business-event branch is checkout.session.completed. There are no handlers for customer.subscription.updated, customer.subscription.deleted, invoice.payment_succeeded, or invoice.payment_failed. Stripe-side renewal, cancellation-at-period-end completion, payment failure/recovery, and subscription status changes are therefore not reconciled back into Firestore by these lifecycle events.
+
+2. The user schema is not a single-subscription model. Checkout writes standard membership fields subscriptionId/subscriptionStatus; Video Pro fields videoProSubscriptionId/hasVerifiedVideoProSubscription/videoVerificationStatus; and Exclusive Leads fields exclusiveSubscriptionId/hasExclusiveAddon/isExclusiveActive. Cancellation routes also refer to separate Gotham SaaS and Driver Gold subscription IDs and period fields. A generic handler that updates only subscriptionId would be incomplete and unsafe.
+
+3. Video Pro and Exclusive Leads checkout branches execute before the general session.mode === subscription branch and currently use session.id as a fallback when session.subscription is not a string. The code does not establish that these Checkout products always use subscription mode. Do not infer a Stripe Subscription ID from a Checkout Session ID; verify product configuration and correct the schema/branch before lifecycle handling.
+
+4. The cancellation route calls Stripe subscriptions.update with cancel_at_period_end=true; reactivation clears that flag. Neither route replaces lifecycle webhooks: cancellation can occur in Stripe's dashboard or another workflow, and period-end deletion still needs reconciliation.
+
+5. The cancellation route can synthesize a period-end timestamp approximately 30 days in the future when no stored period-end value exists. That fallback is not authoritative Stripe billing data. The Stripe current_period_end is used when the API call succeeds, but the mock/no-Stripe path retains the estimate. Review this before relying on the displayed date for entitlement expiry.
+
+6. The webhook has a global processed_stripe_events/<eventId> processing claim, but product-level lifecycle handling must also be subscription-bound and idempotent. Event-ID deduplication alone does not protect against distinct, out-of-order Stripe events for the same subscription or an old subscription's deletion arriving after a replacement is linked.
+
+### Safe implementation requirements before adding handlers
+
+- Resolve the correct user and product slot using trusted server-side bindings. Prefer the stored Stripe subscription ID and/or a verified customer-to-user association; do not trust arbitrary event metadata alone.
+- Verify incoming subscription/customer IDs match the exact currently linked product subscription before changing entitlement fields. A delayed event for an old subscription must never revoke or overwrite a newer subscription.
+- Persist event ordering/version information per subscription (for example Stripe event creation time together with the subscription ID) and reject stale updates. Do not compare timestamps across unrelated subscriptions as if they were one lifecycle.
+- Treat Stripe's subscription object as the source of truth for status, cancellation flag and current-period end. Do not manufacture billing dates.
+- Define product-specific policy for active, trialing, past_due, unpaid, incomplete, paused and canceled before translating statuses into entitlement booleans. A failed invoice should not automatically revoke paid-through access without an agreed grace-period policy.
+- Extract and validate invoice subscription references using the Stripe SDK/API version in this project; do not assume an invoice object shape without checking the pinned Stripe types.
+- Make each lifecycle event's user-state mutation and deterministic event marker atomic in Firestore. Keep notifications, email, ledger and other external effects independently idempotent/retryable.
+- Add tests for duplicate delivery, distinct event IDs with the same resulting state, out-of-order update/delete, old-subscription deletion after replacement, invoice for the wrong customer/subscription, cancellation-at-period-end then reactivation, failed-payment grace period, and each product entitlement slot (plus Gotham/Driver Gold if those remain active products).
+
+### Decision
+
+No lifecycle handler was added in this pass. The current code does not provide a complete mapping from every Stripe subscription product to its authoritative Firestore entitlement fields and cancellation/grace-period policy. Implementing a generic handler without that mapping could revoke or grant the wrong entitlement. First establish the product-to-subscription schema and status policy, then implement narrowly scoped handlers and tests.
+
+### Verification and branch state
+
+- Static source inspection only; no TypeScript, lint, build, unit, emulator or Stripe test-mode tests were run.
+- Current comparison at the time of this update: integration is 87 commits ahead and 0 behind main; base SHA 4b7963c831acbb2ea6f3084f9f4d069fb772792a.
+- No merge to main, AI Studio Pull/Push, production Firebase change or deployment was performed.
+
+**Status:** lifecycle gap confirmed and documented; implementation intentionally gated on product mapping and entitlement policy.
