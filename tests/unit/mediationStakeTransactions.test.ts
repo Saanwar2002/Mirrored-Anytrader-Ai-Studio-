@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reserveMediationStakeAttempt, confirmMediationStakePayment } from "../../src/server/mediationStake.ts";
+import { reserveMediationStakeAttempt, confirmMediationStakePayment, recordMediationStakePaymentFailure, attachMediationStakePaymentIntent } from "../../src/server/mediationStake.ts";
 
 function createTransactionalDb(seed: Record<string, any>) {
   const store = structuredClone(seed);
@@ -121,4 +121,61 @@ describe("mediation stake transaction commands", () => {
     })).rejects.toThrow("Mediation stake reservation mismatch");
     expect(db._store["jobs/job-1"].dispute.mediationStakePaid).not.toBe(true);
   });
+
+  it("records a failure webhook that arrives before the route attaches the PaymentIntent", async () => {
+    const db = createTransactionalDb({
+      "jobs/job-1": {
+        ...seedJob,
+        dispute: { ...seedJob.dispute, raisedBy: "owner-1", stakePaymentAttemptId: "attempt-a", stakePaymentStatus: "creating" }
+      }
+    });
+    await recordMediationStakePaymentFailure(db, {
+      jobId: "job-1", userId: "owner-1", attemptId: "attempt-a", paymentIntentId: "pi-early",
+      paymentIntentStatus: "requires_payment_method", lastPaymentError: "Card declined", serverTimestamp: timestamp
+    });
+    await attachMediationStakePaymentIntent(db, {
+      jobId: "job-1", attemptId: "attempt-a", paymentIntentId: "pi-early", paymentIntentStatus: "requires_payment_method"
+    });
+    const dispute = db._store["jobs/job-1"].dispute;
+    expect(dispute.paymentIntentId).toBe("pi-early");
+    expect(dispute.stakePaymentStatus).toBe("requires_payment_method");
+    expect(dispute.lastPaymentError).toBe("Card declined");
+  });
+
+  it("does not let a delayed failure webhook downgrade a successful payment", async () => {
+    const db = createTransactionalDb({
+      "jobs/job-1": {
+        ...seedJob,
+        dispute: {
+          ...seedJob.dispute, raisedBy: "owner-1", stakePaymentAttemptId: "attempt-a",
+          paymentIntentId: "pi-paid", mediationStakePaid: true, stakePaymentStatus: "succeeded",
+          stakePaymentId: "pi-paid", status: "pending_arbitration"
+        }
+      }
+    });
+    await recordMediationStakePaymentFailure(db, {
+      jobId: "job-1", userId: "owner-1", attemptId: "attempt-a", paymentIntentId: "pi-paid",
+      paymentIntentStatus: "requires_payment_method", lastPaymentError: "Stale failure", serverTimestamp: timestamp
+    });
+    expect(db._store["jobs/job-1"].dispute.stakePaymentStatus).toBe("succeeded");
+    expect(db._store["jobs/job-1"].dispute.mediationStakePaid).toBe(true);
+  });
+
+  it("rejects a failure webhook for a different PaymentIntent or reservation", async () => {
+    const db = createTransactionalDb({
+      "jobs/job-1": {
+        ...seedJob,
+        dispute: {
+          ...seedJob.dispute, raisedBy: "owner-1", stakePaymentAttemptId: "attempt-a",
+          paymentIntentId: "pi-canonical"
+        }
+      }
+    });
+    await expect(recordMediationStakePaymentFailure(db, {
+      jobId: "job-1", userId: "owner-1", attemptId: "attempt-a", paymentIntentId: "pi-other",
+      paymentIntentStatus: "requires_payment_method", serverTimestamp: timestamp
+    })).rejects.toThrow("Mediation stake failure reservation mismatch");
+    expect(db._store["jobs/job-1"].dispute.paymentIntentId).toBe("pi-canonical");
+  });
+
 });
