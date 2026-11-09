@@ -21,6 +21,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  serverTimestamp,
   collection,
   query,
   where,
@@ -2644,11 +2645,31 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       );
     });
 
-    it("94. PL-08: Invitations - unverified email cannot read invitation addressed to that email", async () => {
+    it("94. PL-08: Invitations - verified recipients can only accept their own pending invitation", async () => {
       await testEnv.withSecurityRulesDisabled(async (context) => {
         const adminDb = context.firestore();
         await setDoc(doc(adminDb, "invitations", "inv_email_test"), {
           email: "victim@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_email_tamper"), {
+          email: "victim@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_email_lowercase"), {
+          email: "Victim@Example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_inviter_access"), {
+          email: "other-recipient@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_admin_access"), {
+          email: "admin-managed@example.com",
           invitedBy: "manager_uid",
           status: "pending",
         });
@@ -2658,20 +2679,113 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         .authenticatedContext("attacker_fake_email", {
           email: "victim@example.com",
           email_verified: false,
+          firebase: { sign_in_provider: "password" },
         })
         .firestore();
       await assertFails(getDoc(doc(unverifiedDb, "invitations", "inv_email_test")));
       await assertFails(
-        updateDoc(doc(unverifiedDb, "invitations", "inv_email_test"), { status: "accepted" })
+        getDocs(
+          query(
+            collection(unverifiedDb, "invitations"),
+            where("email", "==", "victim@example.com"),
+            where("status", "==", "pending")
+          )
+        )
+      );
+      await assertFails(
+        updateDoc(doc(unverifiedDb, "invitations", "inv_email_test"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+        })
       );
 
       const verifiedDb = testEnv
         .authenticatedContext("legit_recipient", {
           email: "victim@example.com",
           email_verified: true,
+          firebase: { sign_in_provider: "password" },
         })
         .firestore();
       await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_test")));
+      await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_lowercase")));
+      const matchingInvitations = await assertSucceeds(
+        getDocs(
+          query(
+            collection(verifiedDb, "invitations"),
+            where("email", "==", "victim@example.com"),
+            where("status", "==", "pending")
+          )
+        )
+      );
+      expect(matchingInvitations.docs.some((invitation) => invitation.id === "inv_email_test")).toBe(true);
+      await assertFails(getDoc(doc(verifiedDb, "invitations", "missing_invitation")));
+
+      const unrelatedDb = testEnv
+        .authenticatedContext("unrelated_user", {
+          email: "unrelated@example.com",
+          email_verified: true,
+        })
+        .firestore();
+      await assertFails(getDoc(doc(unrelatedDb, "invitations", "inv_email_test")));
+
+      // The inviter retains the existing read and management permissions.
+      const inviterDb = testEnv
+        .authenticatedContext("manager_uid", { firebase: { sign_in_provider: "password" } })
+        .firestore();
+      await assertSucceeds(getDoc(doc(inviterDb, "invitations", "inv_inviter_access")));
+      await assertSucceeds(
+        updateDoc(doc(inviterDb, "invitations", "inv_inviter_access"), {
+          status: "cancelled",
+        })
+      );
+
+      // Admin custom claims retain the existing management permissions.
+      const adminClaimsDb = testEnv
+        .authenticatedContext("platform_admin", {
+          admin: true,
+          firebase: { sign_in_provider: "password" },
+        })
+        .firestore();
+      await assertSucceeds(getDoc(doc(adminClaimsDb, "invitations", "inv_admin_access")));
+      await assertSucceeds(
+        updateDoc(doc(adminClaimsDb, "invitations", "inv_admin_access"), {
+          status: "admin-reviewed",
+        })
+      );
+
+      // The intended onboarding action is permitted: pending -> accepted with a server timestamp.
+      await assertSucceeds(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_test"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+        })
+      );
+
+      // A verified recipient cannot change invitation ownership or other protected fields.
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          email: "attacker@example.com",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          invitedBy: "attacker_fake_email",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+          email: "attacker@example.com",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+          notes: "unauthorized extra field",
+        })
+      );
     });
 
     it("95. PL-14: Conversations - participant tampering is blocked", async () => {
