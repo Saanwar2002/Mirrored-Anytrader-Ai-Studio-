@@ -705,7 +705,7 @@ export default function BillingManager() {
       } else if (data.error) {
         toast.error(data.error);
       } else {
-        toast.success("⚡ Gold Driver Subscription Active! (£49.99/mo)");
+        toast.error("Checkout did not return a payment URL. Gold Driver has not been activated.");
       }
     } catch (e) {
       console.error(e);
