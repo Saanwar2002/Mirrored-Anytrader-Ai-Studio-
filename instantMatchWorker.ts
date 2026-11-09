@@ -167,10 +167,28 @@ export function startInstantMatchEngine(db: admin.firestore.Firestore) {
      }
   }, 10000); // Check timeouts every 10 seconds (efficient query)
 
+  // Recover expired matches whose previous refund attempt failed or was
+  // interrupted by a worker restart. Stripe idempotency keeps retries safe.
+  const refundRecoveryInterval = setInterval(async () => {
+    try {
+      const expiredMatches = await db.collection("instant_matches")
+        .where("status", "==", "expired")
+        .get();
+      for (const expiredDoc of expiredMatches.docs) {
+        const match = expiredDoc.data();
+        if (match?.refundStatus === "succeeded") continue;
+        await refundExpiredInstantMatch(db, expiredDoc.ref, match);
+      }
+    } catch (err) {
+      console.error("Instant Match refund recovery failed:", err);
+    }
+  }, 30000);
+
   return () => {
     configUnsubscribe();
     matchesUnsubscribe();
     clearInterval(timeoutCheckInterval);
+    clearInterval(refundRecoveryInterval);
   };
 }
 
@@ -197,6 +215,34 @@ async function refundExpiredInstantMatch(
       amountPence: Number.isSafeInteger(amountPence) ? amountPence : null,
       currency,
       reason: "instant_match_missing_valid_payment_intent_amount_or_currency",
+      status: "requires_review",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return;
+  }
+
+  // Never initiate a refund unless the matching captured payment is in the
+  // immutable ledger. Instant Match uses one PLATFORM_COMMISSION entry.
+  const originals = await db.collection("payment_ledger")
+    .where("transactionId", "==", paymentIntentId)
+    .get();
+  const eligibleOriginals = originals.docs.filter((doc: any) => {
+    const entry = doc.data();
+    return entry.type === "PLATFORM_COMMISSION" &&
+      entry.status === "completed" &&
+      String(entry.currency || "").toLowerCase() === currency &&
+      entry.amount === amountPence;
+  });
+  if (eligibleOriginals.length !== 1) {
+    await db.collection("refund_review").doc(`instant_match_${matchRef.id}`).set({
+      instantMatchId: matchRef.id,
+      paymentIntentId,
+      amountPence,
+      currency,
+      originalLedgerEntryIds: eligibleOriginals.map((doc: any) => doc.id),
+      reason: eligibleOriginals.length === 0
+        ? "instant_match_original_payment_ledger_entry_missing_or_mismatched"
+        : "instant_match_multiple_original_payment_ledger_entries",
       status: "requires_review",
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
@@ -231,18 +277,25 @@ async function refundExpiredInstantMatch(
       idempotencyKey: reservation.operation.idempotencyKey
     });
 
-    await db.collection("refund_operations").doc(operationId).set({
-      status: "submitted",
-      stripeRefundId: refund.id,
-      updatedAt: new Date().toISOString()
-    }, { merge: true });
-
-    await matchRef.set({
-      refundOperationId: operationId,
-      stripeRefundId: refund.id,
-      refundStatus: refund.status || "pending",
-      refundSubmittedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
+    // Do not overwrite a webhook's succeeded state if it races this worker.
+    await db.runTransaction(async (tx: any) => {
+      const operationRef = db.collection("refund_operations").doc(operationId);
+      const operationSnap = await tx.get(operationRef);
+      const current = operationSnap.exists ? operationSnap.data() : null;
+      if (current?.status !== "succeeded") {
+        tx.set(operationRef, {
+          status: "submitted",
+          stripeRefundId: refund.id,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      }
+      tx.set(matchRef, {
+        refundOperationId: operationId,
+        stripeRefundId: refund.id,
+        refundStatus: current?.status === "succeeded" ? "succeeded" : (refund.status || "pending"),
+        refundSubmittedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    });
   } catch (error: any) {
     // Keep the reservation and deterministic key. A retry after an ambiguous
     // network failure will ask Stripe for the same operation, not a new refund.
