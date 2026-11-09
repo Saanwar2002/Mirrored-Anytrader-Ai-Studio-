@@ -379,11 +379,12 @@ async function initiateNextAttempt(db: admin.firestore.Firestore, matchRef: admi
   });
   
   if (availableTraders.length === 0) {
-    // No more traders!
+    // No more traders: expire and use the same durable refund path as timeout exhaustion.
     await matchRef.update({
       status: "expired",
       expiredAt: new Date().toISOString()
     });
+    await refundExpiredInstantMatch(db, matchRef, match);
     return;
   }
 
