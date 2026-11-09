@@ -190,6 +190,8 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
       "firestore_transaction_committed",
       "firestore_transaction_start",
       "firestore_transaction_committed",
+      "firestore_transaction_start",
+      "firestore_transaction_committed",
       "stripe_transfer_create",
     ]);
 
