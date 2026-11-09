@@ -777,3 +777,37 @@ Before adoption, inspect the complete webhook terminal paths: every exception af
 ### Implementation status correction
 
 The exact PR patches were inspected, but no code was ported. Integration remains 41 commits ahead and zero behind main, with its seven-path net diff as recorded in Section 23. The financial/checkout code candidate is still pending.
+
+
+## 25. PR #5 mediation-stake reservation and emulator-gate review (2026-11-09)
+
+Reviewed PR #5's new `src/server/mediationStake.ts` and its unit + real Firestore emulator test patches.
+
+### Positive design to preserve
+
+- Reservation is performed in a Firestore transaction against the job document.
+- It requires `status === disputed`, derives participants through the shared `getJobParticipantIds` helper, and rejects nonparticipants.
+- It rejects already-paid/pending-arbitration states.
+- It reserves a stable `stakePaymentAttemptId` and records the initiating participant before Stripe PaymentIntent creation.
+- A retry reuses the same attempt and existing PaymentIntent ID; only the original initiator may retry.
+- Separate functions attach the PaymentIntent, confirm payment and record failure, allowing the webhook to verify the reserved attempt instead of trusting a legacy Checkout Session.
+- The emulator test explicitly races two reservations and expects one stable attempt ID, and checks that the other participant cannot reuse the first participant's reservation.
+
+### Risks / acceptance checks
+
+- The transaction updates the nested `dispute` object by replacing it with a spread of the previously read object. Confirm this does not erase concurrent fields written by other flows; use dotted updates or a transactionally merged shape where safe.
+- Confirm all transaction reads occur before writes in every function in the module, including confirmation and failure paths.
+- Ensure failure after Stripe creates a PaymentIntent but before its ID is attached can recover by the same deterministic idempotency key and does not create a second active attempt.
+- Validate amount and currency from the server catalog in the webhook against the stored attempt; do not trust metadata amount, dispute reason or client-supplied photos as payment authority.
+- Confirm a single stake per job is intended, since either owner or assigned trader may initiate but the reservation locks the other participant out.
+- The memory-backed transaction test serializes calls and is useful for logic, but the real Firestore emulator race test is the authoritative concurrency regression.
+
+### CI script integration finding
+
+PR #5 updates `package.json` to:
+- exclude `mediationStakeFirestoreEmulator.test.ts` from ordinary `npm test`;
+- include it in `test:emulator`, `test:security-rules`, and `test:emulator-concurrency`.
+
+Integration's current package scripts do not yet include this new test path. When porting PR #5, carry the exclusion and all three emulator-gate inclusions together. Otherwise the emulator test may be skipped by default and never run in CI.
+
+**Status:** module and test patches reviewed; not ported or executed. Keep the module + webhook + pricing guard + emulator test + package script updates as one mediation-stake delivery unit.
