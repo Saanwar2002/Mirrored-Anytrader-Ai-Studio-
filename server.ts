@@ -2886,9 +2886,9 @@ async function startServer() {
           error.httpStatus = 409;
           throw error;
         }
-        const ownerId = job.homeownerId || job.userId || job.ownerId || job.customerId;
-        const traderId = job.tradespersonId || job.acceptedTradespersonId || job.assignedTradespersonId || job.traderId;
-        if (authUid !== ownerId && authUid !== traderId) {
+        const ownerIds = [job.homeownerId, job.userId, job.ownerId, job.customerId, job.posterId].filter((id: unknown) => typeof id === "string" && id.length > 0);
+        const traderIds = [job.acceptedTradespersonId, job.acceptedTraderId, job.assignedTraderId, job.tradespersonId, job.traderId].filter((id: unknown) => typeof id === "string" && id.length > 0);
+        if (!ownerIds.includes(authUid) && !traderIds.includes(authUid)) {
           const error: any = new Error("Only a job participant can pay the mediation stake");
           error.httpStatus = 403;
           throw error;
