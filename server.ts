@@ -22,7 +22,7 @@ import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
 import { sanitizeRedirectUrl, getAuthoritativeAppUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
 import { assertCanReview, ReviewType, getJobParticipantIds } from "./src/server/reviewAuthorization.ts";
-import { reserveMediationStakeAttempt, createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure, attachMediationStakePaymentIntent } from "./src/server/mediationStake.ts";
+import { createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure } from "./src/server/mediationStake.ts";
 import { executeBootstrapProfileCommand, bootstrapProfileSchema } from "./src/server/accountBootstrap.ts";
 import {
   listAuthoritativeNotifications,
