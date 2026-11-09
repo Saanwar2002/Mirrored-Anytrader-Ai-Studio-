@@ -2095,14 +2095,13 @@ async function startServer() {
              console.error("[Security Alert] Invalid mediation stake webhook metadata/amount:", pi.id);
              return res.status(400).send("Invalid mediation stake payment");
            }
-           const jobRef = db.collection("jobs").doc(meta.jobId);
            await confirmMediationStakePayment(db, {
              jobId: meta.jobId,
              userId: meta.userId,
              attemptId: meta.paymentAttemptId,
              paymentIntentId: pi.id,
              serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp()
-           }););
+           });
          }
       } else if (event.type === 'payment_intent.payment_failed') {
          const pi = event.data.object as Stripe.PaymentIntent;
