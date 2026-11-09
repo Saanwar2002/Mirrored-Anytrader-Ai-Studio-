@@ -96,7 +96,9 @@ export default function BillingManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token,
+            "Idempotency-Key": crypto.randomUUID()
+          }` } : {})
         },
         body: JSON.stringify({
           userId: user.uid,
@@ -408,7 +410,9 @@ export default function BillingManager() {
                           method: "POST",
                           headers: {
                             "Content-Type": "application/json",
-                            ...(token ? { "Authorization": `Bearer ${token}` } : {})
+                            ...(token ? { "Authorization": `Bearer ${token,
+            "Idempotency-Key": crypto.randomUUID()
+          }` } : {})
                           },
                           body: JSON.stringify({
                             userId: user.uid,
@@ -543,7 +547,9 @@ export default function BillingManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token,
+            "Idempotency-Key": crypto.randomUUID()
+          }` } : {})
         },
         body: JSON.stringify({
           userId: user.uid,
@@ -606,7 +612,9 @@ export default function BillingManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token,
+            "Idempotency-Key": crypto.randomUUID()
+          }` } : {})
         },
         body: JSON.stringify({
           userId: user.uid,
@@ -669,7 +677,9 @@ export default function BillingManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token,
+            "Idempotency-Key": crypto.randomUUID()
+          }` } : {})
         },
         body: JSON.stringify({
           userId: user.uid,
