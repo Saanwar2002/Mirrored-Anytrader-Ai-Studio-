@@ -12,7 +12,8 @@ describe("Stripe taxi trip webhook idempotency", () => {
     const block = source.slice(start, end);
 
     expect(block).toContain("Number.isSafeInteger(amountPence)");
-    expect(block).toContain('doc(`ledg_ride_${session.id}`)');
+    expect(block).toContain("const ledgerEntryId = `ledg_ride_${session.id}`");
+    expect(block).toContain('collection("payment_ledger").doc(ledgerEntryId)');
     expect(block).toContain("db.runTransaction");
     expect(block).toContain("if (ledgerSnap.exists)");
     expect(block).toContain("tx.create(ledgerRef");
