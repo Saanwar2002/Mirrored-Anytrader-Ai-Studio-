@@ -2231,6 +2231,11 @@ async function startServer() {
         stripe = getStripe();
       } catch (e) {
         if (process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
+          await intentRef.update({
+            status: "retryable_failed",
+            lastErrorAt: admin.firestore.FieldValue.serverTimestamp(),
+            failureReason: "stripe_unconfigured"
+          });
           console.error("Stripe is not configured in production/live environment. Refusing mock checkout bypass.");
           return res.status(503).json({ error: "Payment processing is currently unavailable: Stripe gateway is unconfigured." });
         }
