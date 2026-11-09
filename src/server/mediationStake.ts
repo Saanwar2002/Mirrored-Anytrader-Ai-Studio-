@@ -59,10 +59,12 @@ export async function confirmMediationStakePayment(db: any, input: {
     const job = snap.data() || {};
     const dispute = job.dispute || {};
     if (dispute.raisedBy !== input.userId || dispute.stakePaymentAttemptId !== input.attemptId ||
-        dispute.paymentIntentId !== input.paymentIntentId) throw new Error("Mediation stake reservation mismatch");
+        (dispute.paymentIntentId && dispute.paymentIntentId !== input.paymentIntentId)) {
+      throw new Error("Mediation stake reservation mismatch");
+    }
     if (dispute.mediationStakePaid === true && dispute.stakePaymentId === input.paymentIntentId) return;
     tx.update(jobRef, { status: "disputed", dispute: {
-      ...dispute, mediationStakePaid: true, mediationStakeAmount: 25.00,
+      ...dispute, paymentIntentId: input.paymentIntentId, mediationStakePaid: true, mediationStakeAmount: 25.00,
       stakePaymentId: input.paymentIntentId, stakePaymentStatus: "succeeded",
       status: "pending_arbitration", paidAt: input.serverTimestamp()
     }, disputedAt: input.serverTimestamp() });
