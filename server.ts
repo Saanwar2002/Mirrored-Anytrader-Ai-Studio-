@@ -1983,20 +1983,47 @@ async function startServer() {
               });
             }
             } else if (meta?.type === 'fee_settlement' && meta?.driverId && db) {
-              const driverId = meta.driverId;
-              const amount = session.amount_total ? session.amount_total / 100 : 0;
-              
-              if (driverId && amount > 0) {
-                const driverRef = db.collection("users").doc(driverId);
-                const driverDoc = await driverRef.get();
-                const currentPending = Number(driverDoc.data()?.pendingPlatformFees || 0);
+              const driverId = String(meta.driverId);
+              const amountPence = Number(session.amount_total);
+              if (!session.id || !Number.isSafeInteger(amountPence) || amountPence <= 0 || session.currency !== "gbp") {
+                throw new Error("Invalid platform fee settlement Checkout Session amount, currency or ID");
+              }
+
+              // A repeated Stripe delivery must never deduct the same settlement twice.
+              const driverRef = db.collection("users").doc(driverId);
+              const settlementRef = db.collection("platform_fee_settlements").doc(session.id);
+              await db.runTransaction(async (tx: any) => {
+                const [settlementSnap, driverSnap] = await Promise.all([
+                  tx.get(settlementRef),
+                  tx.get(driverRef)
+                ]);
+                if (settlementSnap.exists) {
+                  const existing = settlementSnap.data();
+                  if (existing?.driverId !== driverId || existing?.amountPence !== amountPence) {
+                    throw new Error("Platform fee settlement session conflicts with its existing ledger record");
+                  }
+                  return;
+                }
+                if (!driverSnap.exists) throw new Error("Platform fee settlement driver does not exist");
+                const amount = amountPence / 100;
+                const currentPending = Number(driverSnap.data()?.pendingPlatformFees || 0);
+                if (!Number.isFinite(currentPending) || currentPending < 0) {
+                  throw new Error("Driver pending platform fee balance is invalid");
+                }
                 const newPending = Math.max(0, Number((currentPending - amount).toFixed(2)));
-                await driverRef.update({
+                tx.update(driverRef, {
                   pendingPlatformFees: newPending,
                   lastFeeSettlementAt: admin.firestore.FieldValue.serverTimestamp()
                 });
-                console.log(`Driver ${driverId} settled £${amount} in platform fees (remaining pending: £${newPending})`);
-              }
+                tx.set(settlementRef, {
+                  checkoutSessionId: session.id,
+                  driverId,
+                  amountPence,
+                  currency: session.currency,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              });
+              console.log(`Driver ${driverId} settled £${amountPence / 100} in platform fees`);
             } else if (meta?.type === 'taxi_trip' && meta?.rideId && db) {
               const rideId = meta.rideId;
               const driverId = meta.driverId;
