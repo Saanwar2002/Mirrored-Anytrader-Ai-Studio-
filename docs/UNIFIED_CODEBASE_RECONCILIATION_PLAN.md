@@ -944,3 +944,43 @@ Do not port the PR #5 refund handler or worker unchanged. Implement as one packa
 7. Keep taxi/AnyRoller and direct payout refund behavior out of scope.
 
 **Status:** integration source and PR patches reviewed; no source code changed and no tests executed in this step.
+
+
+## 29. Instant Match original payment creation is a hard prerequisite for refunds (2026-11-09)
+
+Traced the current integration Checkout Session fulfillment and PR #5's replacement hunk for `meta.type === 'boost' && meta.tier === 'instant_match'`.
+
+### Current integration defect
+
+Current integration creates an `instant_matches` document with:
+- random Firestore document ID;
+- `jobId`, `customerId`, `chargeAmountPence`;
+- status and attempt metadata.
+
+It does **not** persist `stripePaymentIntentId` or `currency` on the match. It also does not create a corresponding original `payment_ledger` `PLATFORM_COMMISSION` entry for this Instant Match Checkout Session.
+
+Therefore PR #5's `refundExpiredInstantMatch` cannot work correctly if the worker is ported alone: it requires PaymentIntent ID, currency and exactly one completed `PLATFORM_COMMISSION` ledger entry matching the payment amount. Missing fields cause a `refund_review` item and no refund; missing ledger entry also causes review and no refund.
+
+### PR #5 source correction reviewed
+
+The PR #5 `server.ts` patch addresses this prerequisite as one atomic fulfillment path:
+- validates the Checkout Session PaymentIntent, paid status, amount/currency and authoritative stored checkout-intent metadata for Instant Match;
+- uses the Checkout Session ID as the stable `instant_matches` document ID (webhook retry identity);
+- stores `stripePaymentIntentId`, exact `chargeAmountPence`, and `currency: "gbp"`;
+- creates the original completed `PLATFORM_COMMISSION` ledger entry with a deterministic ID and Stripe PaymentIntent transaction ID;
+- transactionally links the job to the match and validates existing match/ledger records on replay.
+
+This must be ported with the worker and refund module. It is not optional bookkeeping: it creates the original immutable payment record that authorizes a later refund. The stable Checkout Session key also prevents duplicate match creation on webhook retries.
+
+### Additional acceptance checks for this path
+
+1. Verify the server-created checkout intent binds user, job, product/tier, exact amount and currency; reject absent or mismatched intent records rather than using `session.amount_total || 299` or client metadata.
+2. Confirm the ledger entry amount and `PLATFORM_COMMISSION` type reflect the actual gross customer charge and are consistent with the refund amount; clarify whether this is a gross Instant Match service fee or commission semantics.
+3. Ensure transaction replay validates all immutable ledger fields (PaymentIntent, amount, currency, payer, payee, type, status) and fails closed on any mismatch.
+4. Ensure job-to-match linkage conflicts are retryable or durably reviewed; do not silently return a success response that leaves a paid checkout unfulfilled.
+5. Add tests for duplicate Checkout Session delivery, conflicting existing match, conflicting existing ledger, missing/invalid checkout intent, unpaid session, missing PaymentIntent, and exact amount/currency mismatch.
+6. Confirm mock checkout path remains test-only and cannot create production financial records.
+
+**Decision:** PR #5's Instant Match webhook fulfillment + original ledger creation, refund worker, refund module and charge-refunded webhook form one inseparable delivery unit. Do not cherry-pick the worker or webhook refund handler without this original payment creation path.
+
+**Status:** source review only; no code port or tests executed.
