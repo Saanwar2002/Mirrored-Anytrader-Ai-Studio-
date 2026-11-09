@@ -209,8 +209,7 @@ export default function GothamHousingPortal() {
       } else if (data.error) {
         toast.error(data.error);
       } else {
-        toast.success(`⚡ Gotham SaaS Subscription Active (${plan.tierName})!`);
-        setIsSaaSCalculatorOpen(false);
+        toast.error("Checkout did not return a payment URL. Gotham SaaS has not been activated.");
       }
     } catch (e) {
       console.error(e);
