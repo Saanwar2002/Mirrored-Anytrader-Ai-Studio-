@@ -2415,6 +2415,16 @@ async function startServer() {
         } else if (subscriptionType === "video_pro") {
           fieldUpdates.videoProCancelAtPeriodEnd = true;
           fieldUpdates.videoProCurrentPeriodEnd = periodEndIso;
+        } else if (subscriptionType === "gotham_saas") {
+          fieldUpdates.gothamCancelAtPeriodEnd = true;
+          fieldUpdates.gothamCurrentPeriodEnd = periodEndIso;
+          fieldUpdates.cancelAtPeriodEnd = true;
+          fieldUpdates.currentPeriodEnd = periodEndIso;
+        } else if (subscriptionType === "driver_gold") {
+          fieldUpdates.driverCancelAtPeriodEnd = true;
+          fieldUpdates.driverCurrentPeriodEnd = periodEndIso;
+          fieldUpdates.cancelAtPeriodEnd = true;
+          fieldUpdates.currentPeriodEnd = periodEndIso;
         } else {
           fieldUpdates.cancelAtPeriodEnd = true;
           fieldUpdates.currentPeriodEnd = periodEndIso;
