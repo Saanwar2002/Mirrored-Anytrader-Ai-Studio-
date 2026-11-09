@@ -21,7 +21,7 @@ import { validateJobTransition, validateMilestoneTransition, validateRideTransit
 import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
 import { sanitizeRedirectUrl, getAuthoritativeAppUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
-import { assertCanReview, ReviewType } from "./src/server/reviewAuthorization.ts";
+import { assertCanReview, ReviewType, getJobParticipantIds } from "./src/server/reviewAuthorization.ts";
 import { executeBootstrapProfileCommand, bootstrapProfileSchema } from "./src/server/accountBootstrap.ts";
 import {
   listAuthoritativeNotifications,
@@ -2886,8 +2886,7 @@ async function startServer() {
           error.httpStatus = 409;
           throw error;
         }
-        const ownerIds = [job.homeownerId, job.userId, job.ownerId, job.customerId, job.posterId].filter((id: unknown) => typeof id === "string" && id.length > 0);
-        const traderIds = [job.acceptedTradespersonId, job.acceptedTraderId, job.assignedTraderId, job.tradespersonId, job.traderId].filter((id: unknown) => typeof id === "string" && id.length > 0);
+        const { ownerIds, traderIds } = getJobParticipantIds(job);
         if (!ownerIds.includes(authUid) && !traderIds.includes(authUid)) {
           const error: any = new Error("Only a job participant can pay the mediation stake");
           error.httpStatus = 403;
