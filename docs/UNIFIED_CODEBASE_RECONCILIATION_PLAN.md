@@ -1627,3 +1627,16 @@ The cancellation endpoint already separated Gotham and Gold Driver subscription 
 Fixed the Stripe-success path so Gotham and Gold Driver now persist Stripe's returned `current_period_end` into both their product-specific period-end field and the generic compatibility field. This prevents the UI/product-specific record from retaining a fabricated 30-day estimate after a successful Stripe cancellation update.
 
 **Verification:** static source edit only; no tests/build/lint or Stripe test mode. The mock/no-Stripe fallback still uses the existing 30-day estimate and remains a known issue. No main/AI Studio/deployment changes.
+
+
+## 50. Remove false-positive checkout success messaging (2026-11-09)
+
+A review of the Gold Driver and Gotham SaaS checkout callers found that both displayed an "Active" success toast when the checkout API returned neither a redirect URL nor an explicit error. This did not directly grant Firestore entitlement, but it falsely told users a paid subscription was active even though Stripe Checkout had not started.
+
+- Gold Driver now reports that checkout did not return a payment URL and explicitly says the subscription has not been activated.
+- Gotham SaaS now does the same and no longer closes the licensing calculator on this non-success path.
+- The only success path remains redirecting the user to the Stripe Checkout URL; entitlement activation remains server-webhook controlled.
+
+### Verification
+- Static source replacement only; no build, lint, unit, browser, emulator or Stripe test-mode verification.
+- No changes to main, AI Studio, production Firebase or deployment.
