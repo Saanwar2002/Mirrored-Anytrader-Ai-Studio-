@@ -1012,3 +1012,19 @@ Reviewed the integration-branch `src/server/paymentLedger.ts`, `src/server/prici
 ### Integration decision
 
 Treat Checkout Session validation + transactional match creation + original PLATFORM_COMMISSION ledger creation + refund operation reservation/worker + verified refund webhook as one inseparable feature slice. Do not port the worker or webhook in isolation. No source code was changed and no tests were run in this review step.
+
+
+## 31. Checkout-intent authority and pricing patch cross-check
+
+Reviewed the complete PR #5 `src/server/pricingCatalog.ts` patch against the Instant Match webhook fulfilment contract.
+
+- The pricing resolver validates boost job ownership and active job status through `loadAuthorizedCheckoutJob`; Instant Match resolves to the fixed server catalog item `price_instant_match` (£2.99, GBP, one-off payment). This is the correct source for the price, not client amount fields.
+- The checkout-intent resolver patch itself does not add a new intent schema or explicitly demonstrate that `payment_intents/<intentId>` persists an immutable currency and a normalized integer `amount` in pence. The webhook assumes `checkoutIntentRecord.userId`, `mode`, `amount`, and `metadata` are present and authoritative. Before merge, trace the existing checkout-intent writer and assert these exact fields are persisted server-side for Instant Match.
+- The patch accepts `price_mock_boost` and `price_mock_instant_match` as explicit boost IDs in the same branch as production IDs. This must be gated to a non-production/test environment; a production request must not obtain a real checkout for a mock price ID.
+- `hasExplicitMembershipSelection` treats any nonempty `body.tierName` as explicit, even an unknown/forged tier string. That can divert legitimate metadata-driven flows away from their specialized handlers and then fall through to the default Pro catalog item. Validate explicit tier names against an allowlist and reject unknown values rather than silently defaulting.
+- The resolver selects the fixed Instant Match catalog amount, but the downstream Checkout Session creator must use that resolved line item and persist the resulting amount/mode/currency in the checkout-intent record. The webhook must compare both the Stripe Session and PaymentIntent against that record; session validation alone is not enough to prove the intent was created for the expected product.
+- Boost job authorization is performed before checkout, but it is not a substitute for fulfilment-time revalidation. The webhook must confirm the job still exists and its canonical owner still matches the recorded checkout user before linking an Instant Match.
+
+### Next evidence required
+
+Trace the integration branch's checkout-intent creation route and its `payment_intents` document write, including the exact Stripe Checkout Session creation parameters. Verify server-only price selection, amount in minor units, currency, mode, user, job, tier, and intent ID are persisted and replay-bound. Then update the porting dependency matrix. No code changes or tests were performed.
