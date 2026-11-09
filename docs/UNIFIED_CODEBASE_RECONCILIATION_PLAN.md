@@ -741,3 +741,39 @@ A fresh GitHub compare was run for `main...integration/pr-consolidation-20261109
 6. Only after all checks pass should a reviewed integration candidate be considered for main. AI Studio sync must remain paused until main is intentionally updated and the safe Pull/Push sequence is agreed.
 
 No production/main or AI Studio action was performed during this comparison.
+
+
+## 24. Overlapping PR hunk review: pricing resolver and Stripe webhook (2026-11-09)
+
+Compared exact changed-file patches for both PRs on their overlapping files.
+
+### Confirmed overlap
+
+- PR #2 and PR #5 carry the same `src/server/pricingCatalog.ts` patch. Do not apply it twice. It should be treated as one shared candidate patch.
+- PR #2's `server.ts` change (Stripe unavailable / DB unavailable => HTTP 503) is also present in PR #5's larger `server.ts` patch. PR #5 extends this with claim leases, async payment success, refund and mediation flows. Compose the superset once; do not cherry-pick both copies.
+- This explains why the implementation plan should be behavior-based rather than a sequence of blind PR merges.
+
+### Additional pricing resolver risks to test before port
+
+1. `hasExplicitMembershipSelection` treats any non-empty client `body.tierName` as explicit membership selection, not only a canonical catalog tier. A forged/unknown tierName can suppress metadata-based boost/top-up/add-on routing and fall through to the default membership resolver. Validate tierName against an allowlist and reject unknown explicit values; do not silently default an invalid selection to Pro.
+2. The boost branch accepts `price_mock_boost` and `price_mock_instant_match` identifiers in the same resolver used for real checkout. Confirm those are test-only and cannot produce a live Stripe Checkout Session in production. Prefer environment-gated mock IDs or test injection.
+3. The owner and assigned-trader aliases in `loadAuthorizedCheckoutJob` are permissive fallbacks. Establish the canonical job schema and define deterministic precedence; conflicting owner fields must fail closed rather than selecting the first truthy value.
+4. Mediation stake authorization checks `mediationStakePaid` and `dispute.mediationStakePaid` before payment, but two concurrent checkout attempts may both pass this read. The downstream reserved payment attempt must transactionally enforce a single active/unpaid stake. Verify PR #5's mediation reservation transaction covers this race and rejects duplicate PaymentIntents.
+5. A job owner and assigned trader can both be authorized to pay the same stake. Confirm product semantics: whether either participant may pay once, or whether each party owes a separate stake. The current paid flag implies one per job; test that exact rule.
+
+### Webhook composition review
+
+PR #5's webhook patch:
+- keeps PR #2's retryable 503 behavior when Stripe or Firestore is unavailable;
+- returns 503 for an actively claimed event and reclaims stale claims after five minutes;
+- acknowledges only completed/rejected duplicates as final;
+- accepts `checkout.session.async_payment_succeeded` in addition to `checkout.session.completed`;
+- uses a checkout intent record for authoritative amount/user/mode checks in sensitive fulfillment;
+- makes ad-wallet top-up idempotent by Checkout Session ID with a Firestore transaction;
+- explicitly refuses legacy Checkout Session mediation-stake fulfillment, requiring the verified PaymentIntent path.
+
+Before adoption, inspect the complete webhook terminal paths: every exception after claim must leave a retryable/reclaimable state, and no handler may acknowledge success after partial fulfillment. Verify rejected events are truly terminal and cannot later become payable/fulfillable. Add crash-after-claim, crash-after-side-effect, and concurrent duplicate delivery tests.
+
+### Implementation status correction
+
+The exact PR patches were inspected, but no code was ported. Integration remains 41 commits ahead and zero behind main, with its seven-path net diff as recorded in Section 23. The financial/checkout code candidate is still pending.
