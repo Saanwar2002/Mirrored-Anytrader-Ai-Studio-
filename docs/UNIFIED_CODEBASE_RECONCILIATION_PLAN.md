@@ -523,3 +523,22 @@ A line-aware comparison found 74 changed/added/removed lines overall (integratio
 - regression tests for invitation deletion and expired/revoked invitations.
 
 Rules acceptance remains pending emulator execution; this analysis is not a test result.
+
+
+## 17. Complete Firestore rules normalized comparison (2026-11-09)
+
+A full text normalization check was performed on the current GitHub `main` and `integration/pr-consolidation-20261109` versions of `firestore.rules`: the complete invitation match block was replaced with a sentinel, and the remaining files were compared byte-for-byte.
+
+**Result: the rules files are identical outside `match /invitations/{invitationId}`.** This confirms the earlier path-level assessment: the invitation block is the sole rules delta between these two GitHub refs, not merely the largest visible difference. The integration file is 1,658 lines and main is 1,608 lines because its invitation block contains additional helper predicates and acceptance constraints.
+
+### Consolidated candidate decision
+
+- Retain integration's invitation block as the candidate rules version; it is materially narrower than main for recipient reads and updates.
+- No other Firestore rules changes need to be reconciled between GitHub main and integration at this point.
+- ZIP/AI Studio rules parity remains unverified; the ZIP is a separate snapshot and cannot be inferred from this GitHub comparison.
+- Existing emulator security tests still need mapping to invitation cases and actual execution against the candidate. A textual comparison is not a test result.
+- Before any main synchronization, confirm rules deployment/index/config parity separately; repository rules alone do not prove deployed Firebase state.
+
+### Next rules task
+
+Inspect `tests/unit/firebaseEmulatorSecurityRules.test.ts` and the ZIP's `firestore.rules`/security test files, then add any missing invitation acceptance, field-restriction, query, and missing-document regression cases on integration. Run the Firebase emulator suite only when the available environment supports it and record the actual result.
