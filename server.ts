@@ -1694,21 +1694,24 @@ async function startServer() {
          return res.status(503).send("Payment database temporarily unavailable");
       }
 
-      // Idempotency: Use a transaction to atomically claim 'processing' state
+      // Idempotency: atomically claim the event. Completed duplicates are acknowledged,
+      // but an active claim must remain retryable: acknowledging it could lose the event
+      // if the worker holding the claim crashes before completing its side effects.
       const eventRef = db.collection("processed_stripe_events").doc(event.id);
       try {
-        const claimSuccess = await db.runTransaction(async (t: admin.firestore.Transaction) => {
+        const claimResult = await db.runTransaction(async (t: admin.firestore.Transaction) => {
           const existing = await t.get(eventRef);
           if (existing.exists) {
             const data = existing.data();
-            if (data?.status === 'completed') {
-               return false; // Already processed
+            if (data?.status === 'completed' || data?.status === 'rejected') {
+               return 'already_finalized';
             }
             if (data?.status === 'processing') {
-               // Check if it's a stale processing claim (e.g., > 5 minutes old)
+               // Reclaim only after the lease expires. A duplicate delivery while a
+               // worker is active receives 503 below so Stripe will retry it.
                const ageMs = Date.now() - (data.claimedAt?.toMillis ? data.claimedAt.toMillis() : Date.now());
                if (ageMs < 5 * 60 * 1000) {
-                 return false; // Still processing by another worker
+                 return 'currently_processing';
                }
             }
           }
@@ -1717,11 +1720,15 @@ async function startServer() {
             claimedAt: admin.firestore.FieldValue.serverTimestamp(),
             workerId: `worker_${Math.random().toString(36).substring(7)}`
           });
-          return true;
+          return 'claimed';
         });
 
-        if (!claimSuccess) {
-           return res.status(200).send("Already processed or currently processing");
+        if (claimResult === 'already_finalized') {
+           return res.status(200).send("Already processed");
+        }
+        if (claimResult === 'currently_processing') {
+           res.set('Retry-After', '30');
+           return res.status(503).send("Webhook is still processing; retry delivery");
         }
       } catch (txErr) {
         console.error("Webhook idempotency transaction error:", txErr);
