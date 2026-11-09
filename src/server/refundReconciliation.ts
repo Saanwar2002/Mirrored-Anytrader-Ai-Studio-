@@ -173,12 +173,23 @@ export async function recordConfirmedRefund(
     if (String(original.currency || "").toLowerCase() !== currency) {
       throw new ConflictError("Refund currency does not match the original payment.");
     }
-    if (original.status !== "completed" || original.type === "REFUND") {
+    if (
+      original.status !== "completed" ||
+      !["ESCROW_DEPOSIT", "RIDE_PAYMENT", "PLATFORM_COMMISSION"].includes(original.type)
+    ) {
       throw new ConflictError("Only completed original payment entries can be refunded.");
     }
 
     const originalAmount = requirePositiveMinorAmount(original.amount, "original payment amount");
-    const previousRefunded = totalSnap?.exists ? Number(totalSnap.data()?.refundedAmountPence || 0) : 0;
+    const totalData = totalSnap?.exists ? totalSnap.data() : null;
+    if (totalData && (
+      totalData.originalLedgerEntryId !== originalLedgerEntryId ||
+      totalData.originalAmountPence !== originalAmount ||
+      String(totalData.currency || "").toLowerCase() !== currency
+    )) {
+      throw new ConflictError("Existing refund totals are bound to a different original payment.");
+    }
+    const previousRefunded = totalData ? Number(totalData.refundedAmountPence || 0) : 0;
     if (!Number.isSafeInteger(previousRefunded) || previousRefunded < 0 || previousRefunded > originalAmount) {
       throw new ConflictError("Stored refund total is inconsistent with the original payment.");
     }
@@ -191,7 +202,12 @@ export async function recordConfirmedRefund(
     }
     if (operationSnap?.exists) {
       const operation = operationSnap.data();
-      if (operation.paymentIntentId !== paymentIntentId || operation.requestedAmountPence !== amountPence) {
+      if (
+        operation.paymentIntentId !== paymentIntentId ||
+        operation.requestedAmountPence !== amountPence ||
+        String(operation.currency || "").toLowerCase() !== currency ||
+        (operation.stripeRefundId && operation.stripeRefundId !== refundId)
+      ) {
         throw new ConflictError("Refund operation does not match the confirmed Stripe refund.");
       }
     }
