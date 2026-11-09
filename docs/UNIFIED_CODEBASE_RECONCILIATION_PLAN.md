@@ -984,3 +984,31 @@ This must be ported with the worker and refund module. It is not optional bookke
 **Decision:** PR #5's Instant Match webhook fulfillment + original ledger creation, refund worker, refund module and charge-refunded webhook form one inseparable delivery unit. Do not cherry-pick the worker or webhook refund handler without this original payment creation path.
 
 **Status:** source review only; no code port or tests executed.
+
+
+## 30. Payment-ledger contract review for Instant Match refunds
+
+Reviewed the integration-branch `src/server/paymentLedger.ts`, `src/server/pricingCatalog.ts`, and PR #5's exact `server.ts` / `instantMatchWorker.ts` patches.
+
+### Confirmed ledger semantics
+
+- `LedgerEntry.amount` is in minor units (pence/cents), with `currency` normalized to lowercase. The allowed ledger types include `PLATFORM_COMMISSION`; completed entries are the financial source of truth.
+- The pricing catalog explicitly describes Instant Match as a one-off platform dispatch fee (£2.99, `price_instant_match`, `mode: payment`). The catalog's platform-money rule distinguishes platform fees from client money held for escrow/ride flows.
+- PR #5 creates one deterministic original ledger document per Checkout Session: `ledg_instant_match_<sessionId>`, transactionId=PaymentIntent ID, payerId=customer, payeeId=platform, amount=verified Checkout Session amount, platformFee=amount, netPayout=0, currency=gbp, type=PLATFORM_COMMISSION, status=completed. This is semantically consistent with a platform-only Instant Match fee, provided the server-side checkout-intent record really is authoritative and the checkout is configured as a platform charge (not a Connect client-money flow).
+- PR #5's worker then requires exactly one completed `PLATFORM_COMMISSION` entry for that PaymentIntent with the exact amount and currency before requesting a refund. This closes the prerequisite gap previously found in the integration branch, where the match record lacked PI/currency and there was no original refundable ledger entry.
+
+### Findings / required fixes before porting
+
+1. **Checkout intent lifecycle ordering (blocking):** the webhook patch marks the `payment_intents/<intentId>` record completed and writes `paymentIntentId` before validating Instant Match's expected amount/currency/type/job binding. A later validation failure can leave the checkout intent marked completed despite no match/ledger fulfillment. Validate the complete intent/session binding first, then finalize it in the same transaction as match + ledger creation, or record a terminal rejected/review state explicitly.
+2. **Missing job existence/ownership binding (blocking):** the Instant Match transaction reads the job but does not require `jobSnap.exists`, nor verify the job belongs to the checkout customer. The server-created intent's job binding helps, but fulfilment should still revalidate canonical job existence and owner/customer identity before linking the match.
+3. **Ledger replay comparison incomplete:** an existing original ledger record is compared on transactionId, amount, payerId, type, currency, but not payeeId, platformFee, netPayout, idempotencyKey, source, or checkoutSessionId. Compare all immutable identity/economic fields; conflicts must fail closed.
+4. **Match replay comparison incomplete:** existing match comparison omits currency, chargeTier, feeWaived and stable session/aggregate identity fields. Validate the full immutable record.
+5. **Job link transaction invariant:** transaction reads the job snapshot and checks its current instantMatchId, but if the job document is missing it still proceeds to set it with merge. Require the job to exist and verify ownership. Decide explicitly whether an already-linked different match means a refund is automatically initiated or only manual review; current patch writes review but does not automatically refund this just-captured fee.
+6. **PaymentLedgerEngine idempotency helper is not sufficient for this webhook write:** its generic executor performs external work outside the claim transaction and releases the lock on any thrown error. The new Instant Match fulfilment's Firestore transaction is a stronger local atomic unit; preserve that design and ensure the Stripe event claim does not become completed before all effects are committed.
+7. **Currency comparison:** the checkout session currency is checked as GBP and the ledger writes `gbp`; ensure the checkout-intent record itself also stores and validates currency, not just mode/amount/metadata. Otherwise the trusted intent binding is incomplete.
+8. **Refund path still needs prior R1–R3 corrections:** worker reservation/Stripe request and webhook ledger reversal must share one immutable operation identity; do not mark operation failed for ambiguous Stripe outcomes in a way that loses the submitted/unknown distinction; replay must compare all refund identity fields; missing aggregate state must rebuild or fail closed. A Stripe refund response alone is not ledger confirmation.
+9. **Fee accounting:** PR #5 models the full Instant Match fee as both `amount` and `platformFee`, with zero net payout. This matches the stated platform-fee model. Confirm no separate fee/commission ledger is also created for the same PaymentIntent, and preserve exactly one original entry so the worker's exact-one check remains valid.
+
+### Integration decision
+
+Treat Checkout Session validation + transactional match creation + original PLATFORM_COMMISSION ledger creation + refund operation reservation/worker + verified refund webhook as one inseparable feature slice. Do not port the worker or webhook in isolation. No source code was changed and no tests were run in this review step.
