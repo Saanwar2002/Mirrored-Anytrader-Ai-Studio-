@@ -1843,23 +1843,38 @@ async function startServer() {
               }
 
               if (isIM) {
-                 const matchRef = db.collection("instant_matches").doc();
-                 await matchRef.set({
-                   id: matchRef.id,
-                   jobId: meta.jobId,
-                   customerId: userId || "",
-                   chargeAmountPence: session.amount_total || 299,
-                   chargeTier: "instant_match",
-                   feeWaived: false,
-                   status: "searching",
-                   currentAttempt: 0,
-                   createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                   searchingAt: admin.firestore.FieldValue.serverTimestamp()
+                 // A Stripe delivery can be retried after partial processing. Use the
+                 // Checkout Session ID as a stable match key and atomically create the
+                 // match plus job pointer so retries cannot create duplicate matches.
+                 const matchRef = db.collection("instant_matches").doc(session.id);
+                 const jobRef = db.collection("jobs").doc(meta.jobId);
+                 const createdOrAlreadyLinked = await db.runTransaction(async (tx: any) => {
+                   const [matchSnap, jobSnap] = await Promise.all([tx.get(matchRef), tx.get(jobRef)]);
+                   const linkedMatchId = jobSnap.data()?.instantMatchId;
+                   if (linkedMatchId && linkedMatchId !== matchRef.id) return false;
+                   if (!matchSnap.exists) {
+                     tx.create(matchRef, {
+                       id: matchRef.id,
+                       jobId: meta.jobId,
+                       customerId: userId || "",
+                       chargeAmountPence: session.amount_total || 299,
+                       chargeTier: "instant_match",
+                       feeWaived: false,
+                       status: "searching",
+                       currentAttempt: 0,
+                       createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                       searchingAt: admin.firestore.FieldValue.serverTimestamp()
+                     });
+                   }
+                   tx.set(jobRef, {
+                     instantMatchId: matchRef.id,
+                     matchedViaInstantMatch: true
+                   }, { merge: true });
+                   return true;
                  });
-                 await db.collection("jobs").doc(meta.jobId).set({
-                    instantMatchId: matchRef.id,
-                    matchedViaInstantMatch: true
-                 }, { merge: true });
+                 if (!createdOrAlreadyLinked) {
+                   console.error(`[Security Alert] Instant-match checkout ${session.id} did not replace existing job match ${meta.jobId}.`);
+                 }
               }
             } else if (meta?.type === 'milestone_funding' && meta?.jobId && meta?.quoteId && meta?.milestoneId && db) {
               // Log successful funding of a milestone with V6 Payment Ledger & State Machine
