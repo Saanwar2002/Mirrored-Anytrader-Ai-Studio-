@@ -22,7 +22,7 @@ import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
 import { sanitizeRedirectUrl, getAuthoritativeAppUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
 import { assertCanReview, ReviewType, getJobParticipantIds } from "./src/server/reviewAuthorization.ts";
-import { reserveMediationStakeAttempt, confirmMediationStakePayment } from "./src/server/mediationStake.ts";
+import { reserveMediationStakeAttempt, confirmMediationStakePayment, recordMediationStakePaymentFailure, attachMediationStakePaymentIntent } from "./src/server/mediationStake.ts";
 import { executeBootstrapProfileCommand, bootstrapProfileSchema } from "./src/server/accountBootstrap.ts";
 import {
   listAuthoritativeNotifications,
@@ -2105,13 +2105,24 @@ async function startServer() {
          }
       } else if (event.type === 'payment_intent.payment_failed') {
          const pi = event.data.object as Stripe.PaymentIntent;
+         const meta = pi.metadata || {};
+         if (db && meta.type === "mediation_stake") {
+           if (!meta.jobId || !meta.paymentAttemptId || !meta.userId || pi.currency !== "gbp" || pi.amount !== 2500) {
+             console.error("[Security Alert] Invalid mediation stake failure webhook:", pi.id);
+             return res.status(400).send("Invalid mediation stake failure");
+           }
+           await recordMediationStakePaymentFailure(db, {
+             jobId: meta.jobId, userId: meta.userId, attemptId: meta.paymentAttemptId,
+             paymentIntentId: pi.id, paymentIntentStatus: pi.status,
+             lastPaymentError: pi.last_payment_error?.message || "Payment attempt failed",
+             serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp()
+           });
+         }
          if (db && pi.id) {
            console.warn(`[Webhook] PaymentIntent ${pi.id} failed: ${pi.last_payment_error?.message || "Unknown error"}`);
            await db.collection("failed_payments").doc(`fail_${event.id}`).set({
-             paymentIntentId: pi.id,
-             lastError: pi.last_payment_error?.message || "Failed",
-             status: "failed",
-             createdAt: admin.firestore.FieldValue.serverTimestamp()
+             paymentIntentId: pi.id, lastError: pi.last_payment_error?.message || "Failed",
+             status: "failed", createdAt: admin.firestore.FieldValue.serverTimestamp()
            }, { merge: true });
          }
       } else if (event.type === 'checkout.session.expired') {
@@ -2894,16 +2905,8 @@ async function startServer() {
             automatic_payment_methods: { enabled: true }
           }, { idempotencyKey: `mediation-stake:${jobId}:${attemptId}` });
 
-      await db.runTransaction(async (tx: any) => {
-        const snap = await tx.get(jobRef);
-        if (!snap.exists) throw new Error("Job not found");
-        const dispute = (snap.data() || {}).dispute || {};
-        if (dispute.stakePaymentAttemptId !== attemptId) {
-          throw new Error("Mediation stake reservation changed; refusing to attach PaymentIntent");
-        }
-        tx.update(jobRef, {
-          dispute: { ...dispute, paymentIntentId: paymentIntent.id, stakePaymentStatus: paymentIntent.status }
-        });
+      await attachMediationStakePaymentIntent(db, {
+        jobId, attemptId, paymentIntentId: paymentIntent.id, paymentIntentStatus: paymentIntent.status
       });
 
       return res.json({
