@@ -655,3 +655,35 @@ Reviewed individual changed-file patches (source review only; no code port or te
 ### Port status and acceptance gate
 
 No PR #2/#5 financial implementation has been ported to integration in this review. Before adoption, produce a file-level merge matrix and then implement focused changes with regression tests. Minimum acceptance: replay identity mismatch tests; concurrent cumulative refund limit; refund event replay and pagination/review; Instant Match refund retry/recovery; authoritative membership metadata spoof tests; task-queue emulator isolation; domain-event handler failure recovery; and full CI/Actions validation. Main remains unchanged until those gates pass.
+
+
+## 22. PR #2 checkout authorization / pricing patch deep review (2026-11-09)
+
+Read the complete PR #2 pricingCatalog patch. This is more than metadata cleanup: it introduces a shared `loadAuthorizedCheckoutJob` guard.
+
+### New checkout authorization behavior
+
+- Boost checkout loads the job from Firestore and requires the authenticated UID to match the canonical owner field (with legacy owner-field fallbacks); job must be in an allowed active/bidding state.
+- Mediation stake checkout requires authenticated job owner or assigned trader, job status exactly `disputed`, and stake not already paid.
+- The guard requires a valid jobId and available Firestore DB and fails closed for missing job.
+- PR #2 applies this guard to boost and mediation checkout. **Do not port only the price-ID precedence changes while omitting this ownership/state validation.**
+
+### Pricing precedence/security
+
+- PR #2 uses an explicit membership selection marker to stop conflicting metadata (milestone funding, wallet top-up, boosts, add-ons, Video Pro) from hijacking a membership checkout.
+- Explicit catalog price IDs route the intended product; membership tier resolution prioritizes priceId, then tierName, then metadata fallback.
+- Removes client metadata spread from Stripe membership metadata. Entitlement fields are canonical server output.
+- The helper's legacy owner/assigned-trader field fallbacks need validation against actual AnyTrader job schema and tests; avoid adding arbitrary aliases without confirming data model.
+- Boost mock price IDs are accepted by resolver; verify production configuration cannot treat mock IDs as real payable products.
+
+### Required integration tests before port acceptance
+
+1. Non-owner cannot buy a boost for another user's job; owner can for allowed job status.
+2. Boost rejected for missing job, missing jobId, DB unavailable, and terminal/ineligible job status.
+3. Mediation stake restricted to participants and disputed jobs; duplicate paid stake rejected.
+4. Conflicting client metadata cannot redirect a membership price into boost, wallet top-up, milestone, or add-on flow.
+5. Membership metadata spoofing (`tier`, `subscriptionType`, `userId`) is ignored and canonical metadata is emitted.
+6. Explicit price ID beats conflicting metadata; legacy tier metadata remains only where no explicit selection is supplied.
+7. Stripe webhook unavailable dependencies return retryable 503 and do not mark events complete.
+
+**Status:** reviewed but not yet ported. This security helper and its tests are now a required part of the PR #2 integration, not an optional enhancement.
