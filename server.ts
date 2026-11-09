@@ -1874,9 +1874,16 @@ async function startServer() {
               const targetMilestone = milestones.find((m: any) => m.id === milestoneId);
               const expectedPence = targetMilestone ? Math.round(Number(targetMilestone.amount || targetMilestone.verifiedAmount || 0) * 100) : 0;
 
-              if (session.amount_total && expectedPence > 0 && session.amount_total < expectedPence) {
-                console.error(`[Security Alert] Underpayment rejected in webhook: expected ${expectedPence} pence, received ${session.amount_total} pence.`);
-                return res.status(400).send("Underpayment rejected");
+              if (!targetMilestone || !Number.isFinite(expectedPence) || expectedPence <= 0 || session.amount_total !== expectedPence) {
+                console.error(`[Security Alert] Milestone payment amount mismatch: expected ${expectedPence} pence, received ${session.amount_total} pence.`);
+                await eventRef.update({
+                  status: "rejected",
+                  rejectionReason: "milestone_payment_amount_mismatch",
+                  expectedAmountPence: expectedPence,
+                  receivedAmountPence: session.amount_total ?? null,
+                  rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                return res.status(400).send("Milestone payment amount mismatch");
               }
 
               const paymentIntentId = session.payment_intent as string;
