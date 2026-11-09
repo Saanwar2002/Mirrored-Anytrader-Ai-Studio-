@@ -1772,51 +1772,81 @@ async function startServer() {
         const meta = intent.metadata || {};
           
           if ((meta?.isVideoPro === 'true' || meta?.type === 'video_pro_subscription') && userId && db) {
-            await db.collection("users").doc(userId).update({
-               hasVerifiedVideoProSubscription: true,
-               videoProSubscribedAt: new Date().toISOString(),
-               videoVerificationStatus: "verified",
-               videoProSubscriptionId: session.subscription as string || session.id,
-               updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.id;
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`video_pro_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Video Pro subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.videoProSubscriptionId && current.videoProSubscriptionId !== subscriptionId) {
+                throw new Error("A different Video Pro subscription is already linked; manual reconciliation required.");
+              }
+              tx.update(userRef, {
+                hasVerifiedVideoProSubscription: true,
+                videoProSubscribedAt: current.videoProSubscribedAt || new Date().toISOString(),
+                videoVerificationStatus: "verified",
+                videoProSubscriptionId: subscriptionId,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "video_pro_subscription", createdAt: admin.firestore.FieldValue.serverTimestamp() });
             });
           }
           else if ((meta?.isExclusiveAddon === 'true' || meta?.type === 'exclusive_leads') && userId && db) {
-            await db.collection("users").doc(userId).update({
-               hasExclusiveAddon: true,
-               isExclusiveActive: true,
-               exclusiveSubscribedAt: new Date().toISOString(),
-               exclusiveSubscriptionId: session.subscription as string || session.id, // Depending on mode
-               updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.id;
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`exclusive_leads_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Exclusive Leads subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.exclusiveSubscriptionId && current.exclusiveSubscriptionId !== subscriptionId) {
+                throw new Error("A different Exclusive Leads subscription is already linked; manual reconciliation required.");
+              }
+              tx.update(userRef, {
+                hasExclusiveAddon: true,
+                isExclusiveActive: true,
+                exclusiveSubscribedAt: current.exclusiveSubscribedAt || new Date().toISOString(),
+                exclusiveSubscriptionId: subscriptionId,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "exclusive_leads", createdAt: admin.firestore.FieldValue.serverTimestamp() });
             });
           }
           else if (session.mode === 'subscription') {
-            const subscriptionId = session.subscription as string;
-            if (userId && db) {
-              const rawTier = meta?.tierName || "Pro";
-              const lowerTier = rawTier.toLowerCase();
-              let canonicalTier = 'pro';
-              let isLandlord = false;
-              if (lowerTier.includes('landlord') || meta?.tier === 'landlord' || meta?.subscriptionType === 'landlord') {
-                canonicalTier = 'landlord';
-                isLandlord = true;
+            const subscriptionId = typeof session.subscription === "string" ? session.subscription : "";
+            if (!userId || !db || !subscriptionId) throw new Error("Membership subscription fulfillment is missing user or Stripe subscription ID.");
+            const rawTier = meta?.tierName || "Pro";
+            const lowerTier = String(rawTier).toLowerCase();
+            let canonicalTier = 'pro';
+            let isLandlord = false;
+            if (lowerTier.includes('landlord') || meta?.tier === 'landlord' || meta?.subscriptionType === 'landlord') {
+              canonicalTier = 'landlord'; isLandlord = true;
+            } else if (lowerTier.includes('platinum') || lowerTier.includes('enterprise powerhouse')) canonicalTier = 'platinum';
+            else if (lowerTier.includes('gold') || lowerTier.includes('elite') || lowerTier.includes('premium') || lowerTier.includes('business professional')) canonicalTier = 'premium';
+            else if (lowerTier.includes('silver') || lowerTier.includes('pro') || lowerTier.includes('professional')) canonicalTier = 'pro';
+            else canonicalTier = 'payg';
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`membership_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Membership subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.subscriptionId && current.subscriptionId !== subscriptionId && current.subscriptionStatus === "active") {
+                throw new Error("A different active membership subscription is already linked; manual reconciliation required.");
               }
-              else if (lowerTier.includes('platinum') || lowerTier.includes('enterprise powerhouse')) canonicalTier = 'platinum';
-              else if (lowerTier.includes('gold') || lowerTier.includes('elite') || lowerTier.includes('premium') || lowerTier.includes('business professional')) canonicalTier = 'premium';
-              else if (lowerTier.includes('silver') || lowerTier.includes('pro') || lowerTier.includes('professional')) canonicalTier = 'pro';
-              else canonicalTier = 'payg';
-
-              await db.collection("users").doc(userId).update({
-                subscriptionStatus: "active",
-                subscriptionId: subscriptionId,
-                tierId: rawTier,
-                tier: canonicalTier,
+              tx.update(userRef, {
+                subscriptionStatus: "active", subscriptionId, tierId: rawTier, tier: canonicalTier,
                 isLandlord: isLandlord || canonicalTier === 'landlord',
                 subscriptionType: isLandlord ? 'landlord' : (canonicalTier !== 'payg' ? 'tier' : 'standard'),
-                isPro: canonicalTier !== 'payg',
-                isProInvoiceSubscriber: canonicalTier !== 'payg',
+                isPro: canonicalTier !== 'payg', isProInvoiceSubscriber: canonicalTier !== 'payg',
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
               });
-            }
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, tier: canonicalTier, type: "membership_subscription", createdAt: admin.firestore.FieldValue.serverTimestamp() });
+            });
           } else if (session.mode === 'payment') {
             if (meta?.type === 'ad_wallet_topup' && userId && db) {
               const topupAmount = Number(meta?.topupAmount) || (session.amount_total ? session.amount_total / 100 : 0);
