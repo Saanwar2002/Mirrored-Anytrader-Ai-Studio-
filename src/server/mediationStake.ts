@@ -1,0 +1,70 @@
+import { getJobParticipantIds } from "./reviewAuthorization.ts";
+
+function httpError(message: string, status?: number): Error {
+  const error: any = new Error(message);
+  if (status) error.httpStatus = status;
+  return error;
+}
+
+export async function reserveMediationStakeAttempt(db: any, input: {
+  jobId: string; userId: string; candidateAttemptId: string;
+  disputeReason?: string; technicalFaultReport?: string; isPropertyDamage?: boolean;
+  photos?: unknown[]; serverTimestamp: () => unknown;
+}): Promise<{ attemptId: string; existingPaymentIntentId: string }> {
+  const jobRef = db.collection("jobs").doc(input.jobId);
+  let attemptId = "";
+  let existingPaymentIntentId = "";
+  await db.runTransaction(async (tx: any) => {
+    const snap = await tx.get(jobRef);
+    if (!snap.exists) throw httpError("Job not found", 404);
+    const job = snap.data() || {};
+    const dispute = job.dispute || {};
+    if (job.status !== "disputed") throw httpError("Mediation stake can only be paid for a disputed job", 409);
+    const { ownerIds, traderIds } = getJobParticipantIds(job);
+    if (!ownerIds.includes(input.userId) && !traderIds.includes(input.userId)) {
+      throw httpError("Only a job participant can pay the mediation stake", 403);
+    }
+    if (job.mediationStakePaid === true || dispute.mediationStakePaid === true || dispute.status === "pending_arbitration") {
+      throw httpError("The mediation stake has already been paid for this job", 409);
+    }
+    if (dispute.stakePaymentAttemptId) {
+      if (dispute.raisedBy !== input.userId) throw httpError("Only the participant who initiated this mediation payment can retry it", 403);
+      attemptId = String(dispute.stakePaymentAttemptId);
+      existingPaymentIntentId = String(dispute.paymentIntentId || "");
+    } else {
+      attemptId = input.candidateAttemptId;
+      tx.update(jobRef, { dispute: {
+        ...dispute, raisedBy: input.userId,
+        reason: input.disputeReason || dispute.reason || "Dispute raised",
+        technicalFaultReport: input.technicalFaultReport || dispute.technicalFaultReport || "",
+        isPropertyDamage: Boolean(input.isPropertyDamage), mediationStakePaid: false,
+        mediationStakeAmount: 25.00, stakePaymentAttemptId: attemptId,
+        stakePaymentStatus: "creating",
+        photos: Array.isArray(input.photos) ? input.photos : (dispute.photos || []),
+        status: "awaiting_payment", createdAt: dispute.createdAt || input.serverTimestamp()
+      }});
+    }
+  });
+  return { attemptId, existingPaymentIntentId };
+}
+
+export async function confirmMediationStakePayment(db: any, input: {
+  jobId: string; userId: string; attemptId: string; paymentIntentId: string;
+  serverTimestamp: () => unknown;
+}): Promise<void> {
+  const jobRef = db.collection("jobs").doc(input.jobId);
+  await db.runTransaction(async (tx: any) => {
+    const snap = await tx.get(jobRef);
+    if (!snap.exists) throw new Error("Mediation stake job not found");
+    const job = snap.data() || {};
+    const dispute = job.dispute || {};
+    if (dispute.raisedBy !== input.userId || dispute.stakePaymentAttemptId !== input.attemptId ||
+        dispute.paymentIntentId !== input.paymentIntentId) throw new Error("Mediation stake reservation mismatch");
+    if (dispute.mediationStakePaid === true && dispute.stakePaymentId === input.paymentIntentId) return;
+    tx.update(jobRef, { status: "disputed", dispute: {
+      ...dispute, mediationStakePaid: true, mediationStakeAmount: 25.00,
+      stakePaymentId: input.paymentIntentId, stakePaymentStatus: "succeeded",
+      status: "pending_arbitration", paidAt: input.serverTimestamp()
+    }, disputedAt: input.serverTimestamp() });
+  });
+}
