@@ -1606,3 +1606,15 @@ The server pricing resolver already recalculates Gotham pricing and returns auth
 - No merge to main, AI Studio sync, production Firebase change, or deployment.
 
 **Status:** dedicated checkout fulfilment committed to integration; automated verification required before deployment.
+
+
+## 48. Complete product entitlement fields for Gold Driver and Gotham (2026-11-09)
+
+Follow-up comparison against the existing changelog and product schema revealed additional legacy entitlement fields required by downstream features.
+
+- Gold Driver fulfilment now also grants `destinationFilters: 4`, `advanceBookingDays: 14`, and `priorityDispatch: 50`, matching the documented Gold Driver benefits. It resets `driverCancelAtPeriodEnd` on a new subscription.
+- Gotham fulfilment now also sets `subscriptionType: gotham_saas`, `tier: gotham`, `tierId` from the authoritative tier name, and `gothamCancelAtPeriodEnd: false`, in addition to its dedicated subscription/licensing fields.
+
+These fields were found in the repository's historic product documentation/schema references; their consumers still need a full code search and runtime verification.
+
+**Verification:** static diff only. No tests/build/lint or Stripe test mode. No main/AI Studio/deployment changes.
