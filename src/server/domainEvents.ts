@@ -93,7 +93,10 @@ class DomainEventEmitter {
           const created = await firestoreDb.runTransaction(async (transaction: any) => {
             const existing = await transaction.get(eventRef);
             if (existing.exists) return false;
-            transaction.create(eventRef, event);
+            // set() is supported by both Firestore transactions and the lightweight
+            // transaction adapters used by callers/tests. The preceding read makes
+            // this deterministic-ID write concurrency-safe for correlated events.
+            transaction.set(eventRef, event);
             return true;
           });
           if (!created) return event;
