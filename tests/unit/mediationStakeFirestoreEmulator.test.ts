@@ -13,7 +13,7 @@ describe("Mediation stake transactions — real Firestore Emulator", () => {
   const projectId = "demo-anytrader";
   const appName = "mediation-stake-real-emulator-suite";
   let db: admin.firestore.Firestore;
-  let app: admin.app.App;
+  let app: any;
   let sequence = 0;
 
   const newJobId = () => `mediation_stake_emulator_${Date.now()}_${++sequence}`;
