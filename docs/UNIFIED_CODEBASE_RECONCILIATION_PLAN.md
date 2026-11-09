@@ -1572,3 +1572,37 @@ All inspected recurring products explicitly request `mode: "subscription"` and p
 - No merge to main, AI Studio sync, production Firebase change, or deployment was performed.
 
 **Status:** committed on integration only; do not deploy until automated tests and payment-flow verification pass.
+
+
+## 47. Dedicated Gold Driver and Gotham SaaS checkout fulfilment (2026-11-09)
+
+### Changes on integration
+
+Added product-specific subscription fulfilment branches before generic membership classification in the Stripe checkout webhook.
+
+**Gold Driver**
+- Routes using authoritative intent metadata `type=driver_gold` or `subscriptionType=driver_gold`.
+- Requires subscription-mode Checkout and a real Stripe Subscription ID.
+- Transactionally writes a deterministic `driver_gold_<sessionId>` fulfilment marker and the dedicated user fields: `isGoldDriver`, `driverTier=gold`, `driverSubscriptionId`, `driverSubscriptionStatus=active`, `commissionRate=0.10`, and `driverSubscribedAt`.
+- Rejects replacing a different linked Gold Driver subscription.
+
+**Gotham SaaS**
+- Routes using authoritative intent metadata `type=gotham_saas` or `subscriptionType=gotham_saas`.
+- Requires subscription-mode Checkout and a real Stripe Subscription ID.
+- Transactionally writes a deterministic `gotham_saas_<sessionId>` marker and dedicated user fields: `isGothamSubscriber`, `gothamSubscriptionId`, `gothamSubscriptionStatus=active`, `gothamDoorsCount`, `gothamTierName`, `gothamBillingCycle`, and `gothamSubscribedAt`.
+- Door count is bounded to 1..100000; billing cycle is normalised to monthly/annual.
+- Rejects replacing a different linked Gotham subscription.
+
+### Mapping caveat
+
+The server pricing resolver already recalculates Gotham pricing and returns authoritative Gotham metadata. The Gold Driver resolver returns canonical `tier=driver_gold` and `subscriptionType=driver_gold`; the generic webhook previously classified its display name containing "Gold" as the ordinary Premium trader tier. This dedicated branch prevents that incorrect classification.
+
+### Verification and remaining work
+
+- Static source edit only. No TypeScript, lint, build, unit, emulator, or Stripe test-mode run.
+- Confirm downstream driver dispatch/commission logic consumes `commissionRate` and `driverTier`; this write mirrors the existing Gold Driver UI/schema cues but must be verified against all consumers.
+- Confirm Gotham UI/authorization reads the exact `gothamDoorsCount`, `gothamTierName`, and `gothamBillingCycle` field names across the full codebase.
+- Lifecycle events, cancellation status synchronisation, and grace-period policy remain unimplemented.
+- No merge to main, AI Studio sync, production Firebase change, or deployment.
+
+**Status:** dedicated checkout fulfilment committed to integration; automated verification required before deployment.
