@@ -1028,3 +1028,44 @@ Reviewed the complete PR #5 `src/server/pricingCatalog.ts` patch against the Ins
 ### Next evidence required
 
 Trace the integration branch's checkout-intent creation route and its `payment_intents` document write, including the exact Stripe Checkout Session creation parameters. Verify server-only price selection, amount in minor units, currency, mode, user, job, tier, and intent ID are persisted and replay-bound. Then update the porting dependency matrix. No code changes or tests were performed.
+
+
+## 32. Checkout-intent writer trace — verified integration implementation
+
+Traced `POST /api/create-checkout-session` in integration's actual `server.ts` and compared it with the PR #5 webhook assumptions. This closes the evidence gap from Section 31.
+
+### Current writer fields (verified)
+
+The route resolves pricing server-side with `resolveAuthoritativeLineItem(req.body, authUid, db)`, then creates a pre-checkout record at `payment_intents/{intentId}` containing:
+
+- `intentId`
+- `userId` (derived from authenticated Firebase UID)
+- `createdAt`
+- `metadata` (from authoritative resolver)
+- `mode`
+- `amount` (authoritative amount in pence, or zero)
+- `status: "pending"`
+
+It does **not** persist `currency`, resolved price/catalog ID, Checkout Session ID, or an explicit product/type field outside metadata. Stripe Checkout Session metadata contains only `intentId`, and the session is created from the authoritative resolver's line item.
+
+### Confirmed blockers
+
+1. **Currency absent from intent:** PR #5 webhook needs an authoritative currency comparison. Current intent cannot prove GBP; adding a currency field at write time is required (from resolved server catalog, normalized lowercase).
+2. **Product/price binding is weak:** amount + arbitrary metadata are insufficient to prove which catalog item was purchased. Persist canonical `priceId/productKey` from the server resolver and validate it at fulfilment.
+3. **Intent created before Stripe call, with no session binding:** Stripe session ID is not written back to the intent. A webhook should bind one intent to exactly one Checkout Session and reject a second unrelated session attempting to consume it.
+4. **No request-level idempotency:** `intentId` is generated from timestamp + Math.random. Repeated client requests create separate intents and separate Checkout Sessions. Introduce a server-validated idempotency key scoped to authenticated user + checkout payload, and persist the request hash to prevent key reuse with changed product/amount.
+5. **Potential orphaned intents:** the pending record is created before Stripe client initialization/session creation. If Stripe creation fails, the intent remains pending indefinitely. Add explicit failed/retryable state and cleanup/expiry policy; retries must reuse the same logical intent where appropriate.
+6. **Intent completion happens too early in current webhook:** integration's webhook marks the intent `completed` and stores PaymentIntent ID immediately after lookup, before product-specific validation and fulfilment. This must move into the successful atomic fulfilment transaction or use explicit `processing`, `completed`, `review_required`, and retryable failure states.
+7. **Missing database fail-closed behavior:** route currently conditionally writes intent only when `db` exists, but continues toward Stripe session creation. A paid checkout must not be created if the authoritative intent cannot be persisted. Return retryable 503 before Stripe call when DB is unavailable.
+8. **Mock fulfillment parity:** mock Instant Match creates a random match with hardcoded 299 pence and no PaymentIntent/currency/original ledger record. Keep mock path explicitly non-production, but ensure tests do not mistake mock fulfillment for real financial settlement and never let it write production ledger state.
+
+### Required intent schema for safe unified flow
+
+At minimum, a persisted intent should bind:
+`intentId`, `userId`, `productKey`, `priceId`, `amount` (integer minor units), `currency` (lowercase), `mode`, canonical metadata, request idempotency key/hash, `status`, `createdAt`, expiry, and eventually exactly one `checkoutSessionId` and `paymentIntentId`.
+
+For Instant Match specifically it must additionally bind `jobId` and the canonical customer/owner relationship. The webhook must compare the paid Stripe Session's ID, client reference, mode, amount_total, currency, metadata intentId, PaymentIntent ID and payment status against that persisted record before any entitlement/match/ledger side effect.
+
+### Decision
+
+Section 31's question is answered: the current checkout-intent writer does **not** yet persist all fields required by PR #5's stronger fulfilment contract. Porting PR #5 webhook code without first upgrading this writer would make its authority checks incomplete or cause valid events to be sent to review. Implement the intent schema and lifecycle first, with route + webhook tests, then port Instant Match fulfilment/refund as a single slice. No source code was changed and no tests were run.
