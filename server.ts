@@ -2211,20 +2211,60 @@ async function startServer() {
         "gbp"
       ).toLowerCase();
 
-      // Persist the server-resolved financial contract before contacting Stripe.
-      const intentId = `chk_intent_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-      const intentRef = db.collection("payment_intents").doc(intentId);
-      await intentRef.create({
-        intentId,
+      // Client supplies one stable key per logical checkout attempt. Scope it to the
+      // authenticated user and bind it to the canonical server-resolved purchase.
+      const rawIdempotencyKey = String(req.get("Idempotency-Key") || "").trim();
+      if (!/^[A-Za-z0-9._:-]{16,128}$/.test(rawIdempotencyKey)) {
+        return res.status(400).json({ error: "A valid Idempotency-Key (16-128 characters) is required." });
+      }
+      const requestHash = crypto.createHash("sha256").update(JSON.stringify({
         userId,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
         metadata: authoritativeResult.metadata,
         mode: authoritativeResult.mode,
         amount: authoritativeResult.authoritativeAmountPence || 0,
         currency,
-        status: "session_creating",
-        expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + 30 * 60 * 1000))
+        price: authoritativeResult.lineItem?.price,
+        product: authoritativeResult.lineItem?.price_data?.product,
+        quantity: authoritativeResult.lineItem?.quantity || 1
+      })).digest("hex");
+      const intentId = "chk_intent_" + crypto.createHash("sha256")
+        .update(userId + ":" + rawIdempotencyKey).digest("hex");
+      const intentRef = db.collection("payment_intents").doc(intentId);
+      const intentReservation = await db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(intentRef);
+        if (snap.exists) {
+          const existing = snap.data() || {};
+          if (existing.requestHash !== requestHash) {
+            return { conflict: true, status: existing.status };
+          }
+          return { existing: true, status: existing.status, checkoutSessionId: existing.checkoutSessionId };
+        }
+        tx.create(intentRef, {
+          intentId,
+          userId,
+          requestHash,
+          idempotencyKeyHash: crypto.createHash("sha256").update(rawIdempotencyKey).digest("hex"),
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          metadata: authoritativeResult.metadata,
+          mode: authoritativeResult.mode,
+          amount: authoritativeResult.authoritativeAmountPence || 0,
+          currency,
+          status: "session_creating",
+          expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + 30 * 60 * 1000))
+        });
+        return { existing: false, status: "session_creating" };
       });
+      if (intentReservation.conflict) {
+        return res.status(409).json({ error: "Idempotency-Key was already used for a different checkout request." });
+      }
+      if (intentReservation.existing) {
+        if (intentReservation.checkoutSessionId) {
+          const existingStripe = getStripe();
+          const existingSession = await existingStripe.checkout.sessions.retrieve(intentReservation.checkoutSessionId);
+          if (existingSession.url) return res.json({ url: existingSession.url, reused: true });
+        }
+        return res.status(409).json({ error: "Checkout request is already being processed. Retry with the same Idempotency-Key.", status: intentReservation.status });
+      }
 
       let stripe;
       try {
