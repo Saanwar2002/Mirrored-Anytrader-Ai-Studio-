@@ -2824,93 +2824,160 @@ async function startServer() {
   });
 
   // Dispute Mediation Stake Stripe PaymentIntent (£25.00)
+  // Atomic reservation + stable Stripe idempotency key prevents concurrent duplicate intents.
   app.post("/api/disputes/create-stake-intent", requireAuth, paymentLimiter, async (req, res) => {
+    const authUid = (req as any).user.uid;
+    const { jobId, disputeReason, technicalFaultReport, isPropertyDamage = false, photos = [] } = req.body || {};
+
+    if (!jobId || typeof jobId !== "string") {
+      return res.status(400).json({ error: "jobId is required" });
+    }
+    if (!db) {
+      return res.status(500).json({ error: "Database service unavailable" });
+    }
+
+    const jobRef = db.collection("jobs").doc(jobId);
+    const candidateAttemptId = db.collection("payment_attempts").doc().id;
+    const stakeAmountPence = 2500;
+    let attemptId = "";
+    let existingPaymentIntentId = "";
+    let isMock = false;
+
     try {
-      const authUid = (req as any).user.uid;
-      const { jobId, disputeReason, technicalFaultReport, isPropertyDamage = false, photos = [] } = req.body;
+      // Reserve the single stake attempt in a transaction. Concurrent requests
+      // conflict on the same job document; only one can create the reservation.
+      await db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(jobRef);
+        if (!snap.exists) {
+          const error: any = new Error("Job not found");
+          error.httpStatus = 404;
+          throw error;
+        }
 
-      if (!jobId) {
-        return res.status(400).json({ error: "jobId is required" });
-      }
+        const jobData = snap.data() || {};
+        const dispute = jobData.dispute || {};
+        const ownerId = jobData.homeownerId || jobData.userId || jobData.ownerId || jobData.posterId || jobData.customerId;
+        const traderId = jobData.acceptedTradespersonId || jobData.acceptedTraderId || jobData.assignedTraderId || jobData.tradespersonId || jobData.traderId;
+        if (authUid !== ownerId && authUid !== traderId) {
+          const error: any = new Error("Only a job participant can pay the mediation stake");
+          error.httpStatus = 403;
+          throw error;
+        }
+        if (jobData.status !== "disputed") {
+          const error: any = new Error("Mediation stake can only be paid after the job has entered disputed status");
+          error.httpStatus = 400;
+          throw error;
+        }
+        if (jobData.mediationStakePaid === true || dispute.mediationStakePaid === true ||
+            dispute.status === "pending_arbitration") {
+          const error: any = new Error("The mediation stake has already been paid for this job");
+          error.httpStatus = 409;
+          throw error;
+        }
 
-      if (!db) {
-        return res.status(500).json({ error: "Database service unavailable" });
-      }
-
-      const jobDoc = await db.collection("jobs").doc(jobId).get();
-      if (!jobDoc.exists) {
-        return res.status(404).json({ error: "Job not found" });
-      }
-
-      const jobData = jobDoc.data() || {};
-      const stakeAmountPence = 2500; // £25.00
+        // Reuse an existing reservation on client retry. Do not mint a new
+        // idempotency key after an ambiguous Stripe/network failure.
+        if (dispute.stakePaymentAttemptId) {
+          attemptId = String(dispute.stakePaymentAttemptId);
+          existingPaymentIntentId = String(dispute.paymentIntentId || "");
+        } else {
+          attemptId = candidateAttemptId;
+          const nextDispute = {
+            ...dispute,
+            raisedBy: authUid,
+            reason: disputeReason || dispute.reason || "Dispute raised",
+            technicalFaultReport: technicalFaultReport || dispute.technicalFaultReport || "",
+            isPropertyDamage: Boolean(isPropertyDamage),
+            mediationStakePaid: false,
+            mediationStakeAmount: 25.00,
+            stakePaymentAttemptId: attemptId,
+            stakePaymentStatus: "creating",
+            photos: Array.isArray(photos) ? photos : (dispute.photos || []),
+            status: "awaiting_payment",
+            createdAt: dispute.createdAt || admin.firestore.FieldValue.serverTimestamp()
+          };
+          tx.update(jobRef, { dispute: nextDispute });
+        }
+      });
 
       let stripe;
       try {
         stripe = getStripe();
-      } catch (e) {
-        // Fallback for mock/dev environment
-        await db.collection("jobs").doc(jobId).update({
-          status: "disputed",
-          dispute: {
-            raisedBy: authUid,
-            reason: disputeReason || "Dispute raised",
-            technicalFaultReport: technicalFaultReport || "",
-            isPropertyDamage: Boolean(isPropertyDamage),
-            mediationStakePaid: true,
-            mediationStakeAmount: 25.00,
-            stakePaymentId: "mock_pi_stake_" + Math.random().toString(36).substring(7),
-            photos: Array.isArray(photos) ? photos : [],
-            status: "pending_arbitration",
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-          },
-          disputedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
+      } catch (_e) {
+        isMock = true;
+      }
 
+      if (isMock) {
+        // Never mark a production stake paid without a verified Stripe event.
+        // In mock mode retain the same attempt identity and merge existing data.
+        await db.runTransaction(async (tx: any) => {
+          const snap = await tx.get(jobRef);
+          if (!snap.exists) throw new Error("Job not found");
+          const current = snap.data() || {};
+          const dispute = current.dispute || {};
+          if (dispute.stakePaymentAttemptId !== attemptId) throw new Error("Payment reservation changed");
+          tx.update(jobRef, {
+            dispute: {
+              ...dispute,
+              mediationStakePaid: true,
+              mediationStakeAmount: 25.00,
+              stakePaymentId: "mock_pi_stake_" + attemptId,
+              stakePaymentStatus: "succeeded",
+              status: "pending_arbitration"
+            },
+            status: "disputed",
+            disputedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        });
         return res.json({
-          success: true,
-          mock: true,
-          amount: 25.00,
-          status: "succeeded",
+          success: true, mock: true, amount: 25.00, status: "succeeded",
           message: "Mediation stake of £25.00 authorized successfully. Dispute is now pending arbitration."
         });
       }
 
-      // Create real Stripe PaymentIntent
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: stakeAmountPence,
-        currency: "gbp",
-        metadata: {
-          type: "mediation_stake",
-          jobId,
-          disputeReason: disputeReason || "",
-          technicalFaultReport: technicalFaultReport || "",
-          isPropertyDamage: String(isPropertyDamage),
-          userId: authUid
-        },
-        description: `Mediation Dispute Stake for Job #${jobData.jobNo || jobId} (£25.00)`,
-        automatic_payment_methods: {
-          enabled: true
+      let paymentIntent: any;
+      if (existingPaymentIntentId) {
+        paymentIntent = await stripe.paymentIntents.retrieve(existingPaymentIntentId);
+      } else {
+        paymentIntent = await stripe.paymentIntents.create({
+          amount: stakeAmountPence,
+          currency: "gbp",
+          metadata: {
+            type: "mediation_stake",
+            jobId,
+            disputeReason: disputeReason || "",
+            technicalFaultReport: technicalFaultReport || "",
+            isPropertyDamage: String(Boolean(isPropertyDamage)),
+            userId: authUid,
+            paymentAttemptId: attemptId
+          },
+          description: `Mediation Dispute Stake for Job #${jobId} (£25.00)`,
+          automatic_payment_methods: { enabled: true }
+        }, {
+          idempotencyKey: `mediation-stake:${jobId}:${attemptId}`
+        });
+      }
+
+      // Persist the PaymentIntent against the reservation. If this write fails,
+      // a retry reuses the same attempt id and Stripe idempotency key.
+      await db.runTransaction(async (tx: any) => {
+        const snap = await tx.get(jobRef);
+        if (!snap.exists) throw new Error("Job not found");
+        const current = snap.data() || {};
+        const dispute = current.dispute || {};
+        if (dispute.stakePaymentAttemptId !== attemptId) {
+          throw new Error("Mediation stake reservation changed; refusing to attach PaymentIntent");
         }
+        tx.update(jobRef, {
+          dispute: {
+            ...dispute,
+            paymentIntentId: paymentIntent.id,
+            stakePaymentStatus: "requires_payment_method"
+          }
+        });
       });
 
-      // Save pending dispute record
-      await db.collection("jobs").doc(jobId).update({
-        dispute: {
-          raisedBy: authUid,
-          reason: disputeReason || "Dispute raised",
-          technicalFaultReport: technicalFaultReport || "",
-          isPropertyDamage: Boolean(isPropertyDamage),
-          mediationStakePaid: false,
-          mediationStakeAmount: 25.00,
-          paymentIntentId: paymentIntent.id,
-          photos: Array.isArray(photos) ? photos : [],
-          status: "awaiting_payment",
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        }
-      });
-
-      res.json({
+      return res.json({
         success: true,
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
@@ -2918,7 +2985,10 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error("Create Dispute Stake Intent Error:", error);
-      res.status(500).json({ error: error.message || "Failed to initiate mediation stake" });
+      const status = Number(error?.httpStatus) || 500;
+      return res.status(status).json({
+        error: status === 500 ? "Failed to initiate mediation stake" : error.message
+      });
     }
   });
 
