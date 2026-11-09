@@ -486,3 +486,40 @@ PR #5 improves missing Stripe/DB and active-processing responses to retryable 50
 ### Decision
 
 PR #5's refund and webhook foundations are stronger than integration's current direct-refund behavior, but remain **candidate-only** until replay identity hardening, concurrent worker/recovery tests, webhook claim lifecycle coverage, PR #2 pricing/ownership safeguards, and the full rule/CI validation are completed. No production/main changes made.
+
+
+## 16. Firestore invitation rules: main vs integration (2026-11-09)
+
+### Exact path difference
+
+The first meaningful security delta is match /invitations/{invitationId}. Integration replaces main's broad invitation get/list and update conditions with named recipient predicates and a constrained acceptance transition.
+
+**Integration:**
+- get: admin, verified email recipient (case-normalized), or inviter; does not grant arbitrary missing-document reads.
+- list: admin, exact verified-email recipient predicate (query-compatible), or inviter.
+- create: registered caller who is inviter, or admin.
+- update: verified recipient may only transition pending -> accepted, with acceptedAt == request.time and affected keys limited to status/acceptedAt; inviter or admin retains update path.
+- delete: registered inviter or admin.
+
+**Main:**
+- get/list condition includes `resource == null` and a broader email expression, and also allows inviter; this is materially less constrained and has query-proof concerns.
+- update allows any registered verified-email matching recipient update (not only pending->accepted and not field-limited), as well as inviter/admin. This can permit recipient mutation of invitation fields beyond acceptance.
+
+The integration invitation update rule is a clear least-privilege hardening and should be retained in candidate. Do not copy main's broad update. Verify intended inviter update/delete workflow separately; inviter currently has unrestricted update under both branches (business/admin server should be authoritative for sensitive invitation fields if that is intentional).
+
+### Other rules delta
+
+A line-aware comparison found 74 changed/added/removed lines overall (integration 1,658 lines; main 1,608). Most differences are concentrated in this invitation block, but do not conclude all other paths are identical from a truncated diff. Next perform a complete normalized diff grouped by match path and map each changed path to existing Firebase emulator tests. The ZIP invitation block should be included as a third comparison; it was previously observed to use broader inline recipient matching than integration's helper/acceptance predicates.
+
+### Candidate tests required
+
+- verified exact-email recipient can get invitation;
+- unverified/mismatched recipient denied;
+- recipient can accept only pending invitation and only status/acceptedAt fields;
+- recipient cannot edit inviter, email, role/permissions, expiry, or arbitrary metadata;
+- inviter and admin can perform their intended lifecycle actions;
+- recipient list query uses exact email equality and succeeds only when constrained;
+- missing document get behavior is intentionally denied to non-admin/non-inviter;
+- regression tests for invitation deletion and expired/revoked invitations.
+
+Rules acceptance remains pending emulator execution; this analysis is not a test result.
