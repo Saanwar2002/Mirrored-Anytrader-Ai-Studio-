@@ -2199,11 +2199,17 @@ async function startServer() {
            const ledgerQuery = await db.collection("payment_ledger")
              .where("transactionId", "==", paymentIntentId)
              .get();
-           const eligibleOriginals = ledgerQuery.docs.filter((doc: any) => {
+           const primaryOriginals = ledgerQuery.docs.filter((doc: any) => {
              const entry = doc.data() || {};
              return entry.status === "completed" &&
-               ["ESCROW_DEPOSIT", "RIDE_PAYMENT", "DIRECT_PAYOUT", "PLATFORM_COMMISSION"].includes(entry.type);
+               ["ESCROW_DEPOSIT", "RIDE_PAYMENT", "DIRECT_PAYOUT"].includes(entry.type);
            });
+           const eligibleOriginals = primaryOriginals.length > 0
+             ? primaryOriginals
+             : ledgerQuery.docs.filter((doc: any) => {
+                 const entry = doc.data() || {};
+                 return entry.status === "completed" && entry.type === "PLATFORM_COMMISSION";
+               });
 
            for (const refund of refundItems) {
              const refundPaymentIntentId = typeof refund.payment_intent === "string"
