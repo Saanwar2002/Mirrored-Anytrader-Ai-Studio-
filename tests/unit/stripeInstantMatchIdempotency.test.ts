@@ -15,7 +15,8 @@ describe("Stripe instant-match checkout idempotency", () => {
     expect(source).toContain('const matchRef = db.collection("instant_matches").doc(session.id)');
     expect(block).toContain("tx.get(matchRef)");
     expect(block).toContain("tx.get(jobRef)");
-    expect(block).toContain("if (!matchSnap.exists)");
+    expect(block).toContain("if (matchSnap.exists)");
+    expect(block).toContain("} else {");
     expect(block).toContain("tx.create(matchRef");
     expect(block).toContain("tx.set(jobRef");
     expect(block).toContain("linkedMatchId !== matchRef.id");
