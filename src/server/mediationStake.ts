@@ -68,3 +68,51 @@ export async function confirmMediationStakePayment(db: any, input: {
     }, disputedAt: input.serverTimestamp() });
   });
 }
+
+
+export async function recordMediationStakePaymentFailure(db: any, input: {
+  jobId: string; userId: string; attemptId: string; paymentIntentId: string;
+  paymentIntentStatus: string; lastPaymentError?: string; serverTimestamp: () => unknown;
+}): Promise<void> {
+  const jobRef = db.collection("jobs").doc(input.jobId);
+  await db.runTransaction(async (tx: any) => {
+    const snap = await tx.get(jobRef);
+    if (!snap.exists) throw new Error("Mediation stake job not found");
+    const job = snap.data() || {};
+    const dispute = job.dispute || {};
+    if (dispute.raisedBy !== input.userId || dispute.stakePaymentAttemptId !== input.attemptId ||
+        (dispute.paymentIntentId && dispute.paymentIntentId !== input.paymentIntentId)) {
+      throw new Error("Mediation stake failure reservation mismatch");
+    }
+    if (dispute.mediationStakePaid === true || dispute.stakePaymentStatus === "succeeded") return;
+    tx.update(jobRef, { dispute: {
+      ...dispute, paymentIntentId: input.paymentIntentId,
+      stakePaymentStatus: input.paymentIntentStatus,
+      lastPaymentError: input.lastPaymentError || "Payment attempt failed",
+      lastPaymentFailedAt: input.serverTimestamp()
+    }});
+  });
+}
+
+export async function attachMediationStakePaymentIntent(db: any, input: {
+  jobId: string; attemptId: string; paymentIntentId: string; paymentIntentStatus: string;
+}): Promise<void> {
+  const jobRef = db.collection("jobs").doc(input.jobId);
+  await db.runTransaction(async (tx: any) => {
+    const snap = await tx.get(jobRef);
+    if (!snap.exists) throw new Error("Job not found");
+    const dispute = (snap.data() || {}).dispute || {};
+    if (dispute.stakePaymentAttemptId !== input.attemptId) {
+      throw new Error("Mediation stake reservation changed; refusing to attach PaymentIntent");
+    }
+    if (dispute.paymentIntentId && dispute.paymentIntentId !== input.paymentIntentId) {
+      throw new Error("A different PaymentIntent is already attached to this mediation attempt");
+    }
+    if (dispute.mediationStakePaid === true || dispute.stakePaymentStatus === "succeeded") return;
+    const hasWebhookFailure = dispute.paymentIntentId === input.paymentIntentId && Boolean(dispute.lastPaymentFailedAt);
+    tx.update(jobRef, { dispute: {
+      ...dispute, paymentIntentId: input.paymentIntentId,
+      stakePaymentStatus: hasWebhookFailure ? dispute.stakePaymentStatus : input.paymentIntentStatus
+    }});
+  });
+}
