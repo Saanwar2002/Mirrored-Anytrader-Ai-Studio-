@@ -226,3 +226,67 @@ Continue using the existing `integration/pr-consolidation-20261109` branch. Do n
 Preserve the AI Studio workspace, ZIP, integration branch, sync branch and PR #5. Do not use the currently diverged AI Studio Pull/Push controls until the unified main is validated. No production Firebase changes or deployment. Proceed read-only through the branch audit, file comparison and security review before proposing writes.
 
 **The measure of success is not merely a merged PR: it is a verified, safe, repeatable AI Studio ↔ original GitHub `main` workflow.**
+
+
+---
+
+## 10. Dated progress update — 9 November 2026 (continued audit)
+
+This update supersedes earlier estimated branch counts and adds verified findings from the Library reconciliation checklist and current GitHub reads. Always re-fetch before acting.
+
+### 10.1 Current branch relationship observed
+
+- Current `main` base SHA observed: `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- Current integration branch is **28 commits ahead and 0 behind** `main` (the reconciliation-plan documentation commit increased the prior count from 27 to 28).
+- `sync/integration-into-pr5-20261109` is **0 ahead and 2 behind** the current integration branch. It is not an alternative integration destination; inspect its two commits only if needed.
+- Comparing integration with PR #5 head `6af712f7833f5e60759c87f00f2bc798305210a6` reports PR head **102 commits ahead and 2 behind** integration, with a diverged status. This confirms PR #5 must not be merged blindly.
+- The integration branch now contains `docs/UNIFIED_CODEBASE_RECONCILIATION_PLAN.md`; its addition is included in the 28-commit comparison.
+
+### 10.2 Verified ZIP-to-current-integration parity
+
+The Library contains an existing reconciliation checklist with exact snapshot comparisons against integration SHA `e0653deb65657c91a17d1f9355662d67f4b70231`. I independently rechecked the current integration file blob hashes against the ZIP's raw bytes. The following six files are still byte-identical in the current integration head:
+
+| File | Git blob SHA |
+|---|---|
+| `server.ts` | `0e935945b0cb7a3e6009030884aa620cc5dba175` |
+| `package.json` | `973603b055a65607106d2afac29b248d0b915b27` |
+| `firebase.json` | `64ea2d94c5ae7ae149a6c897624b71b3f1d293d1` |
+| `firestore.indexes.json` | `7ba42a1c5f715f2a11d07b6768939f30bf60064b` |
+| `storage.rules` | `b2a628977784f6bc3189c9d4592e4e40d590e8f1` |
+| `instantMatchWorker.ts` | `118f2cbd0ee3eb7986b9885dd5706b8897118875` |
+
+The ZIP has 605 files. It contains `firebase-applet-config.json`; preserve it exactly. It does **not** contain `MASTER_BUILD_PLAN.md` or `AI_STUDIO_FIREBASE_PRECHANGE_REVIEW.md`; preserve those GitHub documents. The ZIP contains `DEVELOPMENT.md`, but it differs from the integration version and must be reconciled additively, not replaced wholesale.
+
+### 10.3 Firestore invitation rule finding
+
+The current integration `firestore.rules` is 77,835 bytes / 1,658 lines. The ZIP copy is 76,053 bytes / 1,607 lines. Both contain `email_verified`, so the difference is not simply that one has verification and the other does not.
+
+The ZIP invitation block uses broad inline email matching for get/list/update. The integration block introduces dedicated verified-recipient helper functions for recipient read, list and acceptance paths, with explicit `email_verified == true` checks. This is a meaningful security-policy difference. Preserve the AI Studio PL-01–PL-15 protections and reconcile the stricter invitation policy with all legitimate invitation acceptance flows and emulator expectations. Do not select either file solely by recency or size.
+
+### 10.4 PR #5 reconciliation warning
+
+PR #5's changed-file list includes substantial changes to `server.ts`, `instantMatchWorker.ts`, `package.json`, `src/server/pricingCatalog.ts`, `src/server/domainEvents.ts`, and new mediation/refund modules and tests. At the current integration head, the following PR #5 paths were confirmed absent (GitHub contents API returned 404):
+
+- `src/server/mediationStake.ts`
+- `src/server/refundReconciliation.ts`
+- `tests/unit/refundReconciliation.test.ts`
+- `tests/unit/mediationStakeTransactions.test.ts`
+- `tests/unit/mediationStakeFirestoreEmulator.test.ts`
+- `tests/unit/stripeWebhookRetryClaim.test.ts`
+
+The PR #5 diff against integration includes 24 changed paths (see live compare endpoint). The PR's earlier Library checklist describes it as an open draft, unmerged, based on integration and a candidate consolidated replacement for PR #2. Re-fetch the actual PR metadata before any merge decision. **Do not merge PR #2 and PR #5 together without proving they are not overlapping alternatives.**
+
+The earlier checklist also identifies unresolved design/test coverage for concurrent mediation-stake intent requests, retry after ambiguous Stripe timeout, and duplicate success webhook handling. A green CI run does not settle these risks.
+
+### 10.5 Immediate next actions (updated)
+
+1. Retrieve current PR #5 metadata (state, draft, base/head refs and SHAs) and confirm whether PR #2 remains open/merged/closed.
+2. Inspect the full PR #5 diff against the current integration branch, prioritising the changed `server.ts`, `package.json`, `pricingCatalog.ts`, `domainEvents.ts`, `mediationStake.ts`, `refundReconciliation.ts` and associated tests.
+3. Compare the ZIP and integration `DEVELOPMENT.md` additively. Preserve AI Studio Tasks 31–34 and PL-01–PL-15 history while retaining GitHub PR/reconciliation entries.
+4. Reconcile `firestore.rules` using a rule-by-rule policy matrix and emulator tests. Specifically test verified/unverified invite reads, lists, acceptance, inviter actions, admin actions and missing-document query semantics.
+5. Confirm `firebase-applet-config.json` in the ZIP is retained exactly in the eventual unified codebase.
+6. Produce and review the complete path manifest before any code edits.
+
+### 10.6 Scope boundary
+
+This reconciliation is for **AnyTrader only**. Keep taxi/AnyRoller work unchanged and deferred as recorded in `MASTER_BUILD_PLAN.md`. Do not deploy Firebase rules or alter production configuration as part of this repository reconciliation.
