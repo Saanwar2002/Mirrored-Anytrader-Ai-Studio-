@@ -1129,3 +1129,33 @@ Recoverable errors transition to `retryable_failed`; ambiguous Stripe outcomes t
 Do not refactor the whole Express webhook in one change. First extract a small checkout-intent repository/service with pure validation and transaction methods; test it independently. Then update the route to require Firestore, persist the canonical intent, create Stripe Session with stable idempotency, and bind the Session ID. Finally change webhook claim/fulfilment to validate the full binding and complete the intent only with successful idempotent fulfillment. Keep existing subscription, add-on, escrow and ride flows covered; Instant Match should be enabled only after its own match + ledger transaction is proven.
 
 **Status:** control-flow review only. No source code changed; no tests run.
+
+
+## 35. First checkout-intent hardening implementation (2026-11-09)
+
+Implemented a deliberately narrow first fix in integration's `server.ts` (no main/AI Studio changes):
+
+1. **Fail closed without Firestore:** `POST /api/create-checkout-session` now returns HTTP 503 before Stripe session creation if the authoritative database is unavailable.
+2. **Persist richer intent contract:** intent records now store normalized currency derived from the server-resolved line item (fallback GBP), authoritative amount, mode, authenticated user, canonical resolver metadata, expiry (30 minutes), and initial `session_creating` status.
+3. **Prevent accidental intent overwrite:** uses Firestore `create()` rather than `set()` for a new random intent ID.
+4. **Stripe request idempotency per intent:** Checkout Session creation now supplies `checkout_session_<intentId>` as Stripe's idempotency key.
+5. **Bind returned session:** after Stripe returns a session, the intent is updated with `checkoutSessionId`, `sessionCreatedAt` and `session_created`.
+6. **Persist Stripe failure state:** if session creation throws, the intent is marked `retryable_failed` before the error is rethrown.
+7. **Separate development mock outcome:** mock fulfillment marks the intent `mock_completed` with `mock: true`, rather than leaving it in `session_creating` or presenting it as a real Stripe settlement.
+
+### Explicit limitations — not yet solved
+
+- The intent ID is still generated randomly per HTTP request. This protects a retry using the same intent ID at the Stripe API boundary, but does **not** provide client-request idempotency across separate HTTP requests. A server-validated idempotency key + canonical request hash is still required.
+- Currency fallback to GBP is only a transitional compatibility default. The pricing resolver should expose canonical `priceId/productKey/currency` explicitly; do not use fallback as the long-term authority.
+- No `checkoutSessionId` binding transaction protects against two sessions consuming one intent yet; the webhook still needs strict intent/session/user/mode/amount/currency/product validation.
+- Webhook still needs to reject missing intent records and must not mark an intent completed before all fulfilment effects commit.
+- Existing mock fulfillment is still a separate legacy path and requires an explicit policy/test boundary; `mock_completed` is not a Stripe payment and must never create production ledger settlement.
+- `retryable_failed` records need a safe retry endpoint/process that reuses the same intent and Stripe idempotency key; the current route creates a new intent on a new request.
+- No focused route/service regression tests have been added yet. No lint, unit, emulator or build tests were run after this patch.
+
+### Change commits
+
+- `5c3f55d9aaa17668e5219d92685da36f663029af` — fail closed, enrich intent, Stripe idempotency per intent, session binding and failure state.
+- `951b79757cb7fddad2f12136386806379d4c173c` — explicit development mock intent state.
+
+**Status:** partial implementation committed to `integration/pr-consolidation-20261109`; do not call checkout-intent lifecycle complete or port Instant Match refund code yet.
