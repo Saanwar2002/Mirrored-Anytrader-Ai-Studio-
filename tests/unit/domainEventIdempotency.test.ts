@@ -11,5 +11,7 @@ describe("correlated domain event idempotency", () => {
     expect(source).toContain("if (existing.exists) return false");
     expect(source).toContain("transaction.create(eventRef, event)");
     expect(source).toContain("if (!created) return event");
+    expect(source).toContain("if (correlationId) {");
+    expect(source).toContain("throw dbErr");
   });
 });
