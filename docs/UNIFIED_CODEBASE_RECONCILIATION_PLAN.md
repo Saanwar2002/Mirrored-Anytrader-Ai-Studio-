@@ -1494,3 +1494,57 @@ No lifecycle handler was added in this pass. The current code does not provide a
 - No merge to main, AI Studio Pull/Push, production Firebase change or deployment was performed.
 
 **Status:** lifecycle gap confirmed and documented; implementation intentionally gated on product mapping and entitlement policy.
+
+
+
+## 45. Subscription product checkout-to-entitlement mapping (2026-11-09)
+
+### Sources re-fetched from integration
+
+- `src/components/TraderVideoVerificationCard.tsx`
+- `src/components/BillingManager.tsx`
+- `src/components/TradesDashboard.tsx`
+- `src/components/anytrader/GothamHousingPortal.tsx`
+- `server.ts`
+
+### Confirmed product checkout modes and metadata requested by clients
+
+All inspected recurring products explicitly request `mode: "subscription"` and provide recurring monthly `price_data`:
+
+| Product | Checkout caller | Client metadata | Intended Firestore entitlement |
+|---|---|---|---|
+| Standard membership | BillingManager plan selector | `tierName`, `userId` | `subscriptionId`, `subscriptionStatus`, `tier`, `isPro` |
+| Landlord Pro | BillingManager | `tier: landlord`, `tierName`, `subscriptionType: landlord` | Standard membership slot plus `isLandlord` |
+| Video Pro | TraderVideoVerificationCard and BillingManager | `isVideoPro`, `type: video_pro_subscription` | `videoProSubscriptionId`, Video Pro flags/status |
+| Exclusive Leads | BillingManager and TradesDashboard | `isExclusiveAddon`, `type: exclusive_leads` (TradesDashboard sends only `isExclusiveAddon`) | `exclusiveSubscriptionId`, exclusive add-on flags |
+| Gold Driver | BillingManager | `subscriptionType: driver_gold`, `type: driver_gold` | `driverGoldSubscriptionId`/driver subscription fields and Gold driver entitlements |
+| Gotham SaaS | GothamHousingPortal | `subscriptionType: gotham_saas`, `type: gotham_saas`, doors, tier and billing cycle | `gothamSubscriptionId`, Gotham subscriber/plan fields |
+
+### Important implementation gaps identified
+
+1. **Client metadata is not sent directly to Stripe.** The checkout route intentionally sends only `metadata: { intentId }` to Stripe and later reads product metadata from the authoritative Firestore payment-intent record. Therefore, the next audit must inspect the server-side intent creation/resolver and prove that it copies/normalizes the relevant product metadata into `payment_intents/<intentId>.metadata`. The frontend request payload alone is not proof that webhook metadata survives.
+
+2. **Video Pro and Exclusive Leads do use subscription mode in the inspected UI callers.** This resolves the earlier uncertainty for these two currently inspected flows. Their webhook fallback to `session.id` is still incorrect defensive behavior: when `session.mode === "subscription"`, absence of a valid `session.subscription` should fail fulfilment and be retried/reconciled, not persist a Checkout Session ID in a field named `*SubscriptionId`.
+
+3. **Gold Driver and Gotham do not have explicit fulfilment branches in the inspected checkout webhook block.** The general membership branch currently classifies `tierName` text and writes standard membership fields. It does not visibly set the dedicated Gold Driver entitlements (`isGoldDriver`, `driverTier`, commission/filter/dispatch fields) or Gotham entitlements (`isGothamSubscriber`, `gothamSubscriptionId`, doors/tier/billing-cycle fields). This conflicts with the product UI and historic product documentation and is a likely entitlement regression requiring a dedicated handler or explicit server-side product mapping.
+
+4. **Exclusive Leads has an additional direct-activation bypass in TradesDashboard.** If checkout returns no URL or throws, the component directly updates the user document to activate the add-on. This bypasses Stripe confirmation and server-side fulfilment. It must be removed or replaced with a clearly isolated non-production mock flow; do not grant paid production entitlements from a client-side fallback.
+
+5. The inspected Video Pro, Exclusive Leads, Gold Driver and Gotham callers send a random `Idempotency-Key` per attempt. Server-side checkout idempotency is separately keyed by the authoritative intent ID. Confirm the intent creation layer reuses an intent for safe retries and does not create multiple billable subscriptions after network ambiguity.
+
+### Next implementation sequence
+
+1. Trace the authoritative checkout-intent resolver and document exactly how it derives `mode`, `lineItem`, `metadata`, amount and currency from each product request. Confirm client-supplied prices/metadata are not trusted.
+2. Add strict validation that all subscription-mode sessions contain a Stripe Subscription ID; remove Checkout Session ID fallbacks for Video Pro and Exclusive Leads.
+3. Add dedicated, idempotent transactional fulfilment for Gold Driver and Gotham, using their authoritative metadata and their own subscription ID slots. Do not let these products fall through to generic membership tier classification.
+4. Remove the TradesDashboard direct Firestore entitlement fallback for Exclusive Leads in production.
+5. Add product-by-product tests proving checkout metadata -> intent record -> Stripe session -> webhook -> correct entitlement mapping.
+6. Only then implement lifecycle webhooks against the same explicit product mapping, including old-subscription protection and product-specific cancellation/grace rules.
+
+### Verification
+
+- Integration files were fetched directly from branch `integration/pr-consolidation-20261109`; no source code was changed in this checkpoint.
+- Static inspection only; no tests/build/lint or Stripe test-mode verification.
+- Main and AI Studio remain untouched.
+
+**Status:** product checkout modes mapped for the inspected UI callers; server-side intent resolver and Gold Driver/Gotham webhook fulfilment are the next high-priority gaps.
