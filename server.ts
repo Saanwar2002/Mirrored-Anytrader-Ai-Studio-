@@ -2197,23 +2197,34 @@ async function startServer() {
       const finalSuccessUrl = sanitizeRedirectUrl(successUrl, appUrl, `/profile?session_id={CHECKOUT_SESSION_ID}`);
       const finalCancelUrl = sanitizeRedirectUrl(cancelUrl, appUrl, `/profile`);
 
-      // 1. Resolve strictly server-authoritative pricing and Stripe Connect routing
-      // Completely bypasses and ignores client-provided price_data to prevent price manipulation
-      const authoritativeResult = await resolveAuthoritativeLineItem(req.body, authUid, db);
-      
-      // CREATE PRE-CHECKOUT INTENT (Fixes C-01 and C-03 by never trusting Stripe metadata)
-      const intentId = `chk_intent_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-      if (db) {
-         await db.collection("payment_intents").doc(intentId).set({
-            intentId,
-            userId,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            metadata: authoritativeResult.metadata,
-            mode: authoritativeResult.mode,
-            amount: authoritativeResult.authoritativeAmountPence || 0,
-            status: "pending"
-         });
+      // A paid Checkout Session must never exist without an authoritative Firestore intent.
+      if (!db) {
+        return res.status(503).json({ error: "Payment processing is temporarily unavailable: payment database is unavailable." });
       }
+
+      // 1. Resolve strictly server-authoritative pricing and Stripe Connect routing.
+      // Completely bypasses and ignores client-provided price_data to prevent price manipulation.
+      const authoritativeResult = await resolveAuthoritativeLineItem(req.body, authUid, db);
+      const currency = String(
+        authoritativeResult.lineItem?.price_data?.currency ||
+        authoritativeResult.paymentIntentData?.metadata?.currency ||
+        "gbp"
+      ).toLowerCase();
+
+      // Persist the server-resolved financial contract before contacting Stripe.
+      const intentId = `chk_intent_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      const intentRef = db.collection("payment_intents").doc(intentId);
+      await intentRef.create({
+        intentId,
+        userId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        metadata: authoritativeResult.metadata,
+        mode: authoritativeResult.mode,
+        amount: authoritativeResult.authoritativeAmountPence || 0,
+        currency,
+        status: "session_creating",
+        expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + 30 * 60 * 1000))
+      });
 
       let stripe;
       try {
@@ -2448,7 +2459,25 @@ async function startServer() {
         }
       }
 
-      const session = await stripe.checkout.sessions.create(sessionOptions);
+      let session: Stripe.Checkout.Session;
+      try {
+        session = await stripe.checkout.sessions.create(sessionOptions, {
+          idempotencyKey: `checkout_session_${intentId}`
+        });
+        await intentRef.update({
+          status: "session_created",
+          checkoutSessionId: session.id,
+          sessionCreatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      } catch (stripeError) {
+        await intentRef.update({
+          status: "retryable_failed",
+          lastErrorAt: admin.firestore.FieldValue.serverTimestamp()
+        }).catch((statusError: any) => {
+          console.error("Could not persist checkout intent failure state:", statusError);
+        });
+        throw stripeError;
+      }
 
       res.json({ url: session.url });
     } catch (error: any) {
