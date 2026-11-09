@@ -101,6 +101,11 @@ class DomainEventEmitter {
           await eventRef.set(event);
         }
       } catch (dbErr: any) {
+        if (correlationId) {
+          // Correlated financial/business events must be durable before the caller
+          // acknowledges success; propagate so Stripe or the caller can retry.
+          throw dbErr;
+        }
         console.warn(`[DomainEvent Persistence Notice] Failed to persist event ${event.eventId}:`, dbErr?.message);
       }
     }
