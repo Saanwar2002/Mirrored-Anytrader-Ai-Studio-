@@ -22,7 +22,7 @@ import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
 import { sanitizeRedirectUrl, getAuthoritativeAppUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
 import { assertCanReview, ReviewType, getJobParticipantIds } from "./src/server/reviewAuthorization.ts";
-import { reserveMediationStakeAttempt, confirmMediationStakePayment, recordMediationStakePaymentFailure, attachMediationStakePaymentIntent } from "./src/server/mediationStake.ts";
+import { reserveMediationStakeAttempt, createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure, attachMediationStakePaymentIntent } from "./src/server/mediationStake.ts";
 import { executeBootstrapProfileCommand, bootstrapProfileSchema } from "./src/server/accountBootstrap.ts";
 import {
   listAuthoritativeNotifications,
@@ -2852,32 +2852,14 @@ async function startServer() {
   });
 
   // Dispute Mediation Stake Stripe PaymentIntent (£25.00)
-  // A Firestore transaction reserves one attempt; Stripe idempotency protects retries.
+  // Firestore reserves one attempt; Stripe's stable idempotency key makes retries/concurrent calls safe.
   app.post("/api/disputes/create-stake-intent", requireAuth, paymentLimiter, async (req, res) => {
     const authUid = (req as any).user.uid;
     const { jobId, disputeReason, technicalFaultReport, isPropertyDamage = false, photos = [] } = req.body || {};
     if (!jobId || typeof jobId !== "string") return res.status(400).json({ error: "jobId is required" });
     if (!db) return res.status(500).json({ error: "Database service unavailable" });
 
-    const candidateAttemptId = db.collection("payment_attempts").doc().id;
-    let attemptId = "";
-    let existingPaymentIntentId = "";
-
     try {
-      const reservation = await reserveMediationStakeAttempt(db, {
-        jobId,
-        userId: authUid,
-        candidateAttemptId,
-        disputeReason,
-        technicalFaultReport,
-        isPropertyDamage,
-        photos,
-        serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp()
-      });
-      attemptId = reservation.attemptId;
-      existingPaymentIntentId = reservation.existingPaymentIntentId;
-
-      // Fail closed: a missing Stripe configuration must never simulate payment.
       let stripe;
       try {
         stripe = getStripe();
@@ -2886,32 +2868,20 @@ async function startServer() {
         return res.status(503).json({ error: "Payment service temporarily unavailable. Please try again shortly." });
       }
 
-      const paymentIntent = existingPaymentIntentId
-        ? await stripe.paymentIntents.retrieve(existingPaymentIntentId)
-        : await stripe.paymentIntents.create({
-            amount: 2500,
-            currency: "gbp",
-            metadata: {
-              type: "mediation_stake",
-              jobId,
-              disputeReason: disputeReason || "",
-              technicalFaultReport: technicalFaultReport || "",
-              isPropertyDamage: String(Boolean(isPropertyDamage)),
-              userId: authUid,
-              paymentAttemptId: attemptId
-            },
-            description: `Mediation Dispute Stake for Job #${jobId} (£25.00)`,
-            automatic_payment_methods: { enabled: true }
-          }, { idempotencyKey: `mediation-stake:${jobId}:${attemptId}` });
-
-      await attachMediationStakePaymentIntent(db, {
-        jobId, attemptId, paymentIntentId: paymentIntent.id, paymentIntentStatus: paymentIntent.status
+      const result = await createMediationStakePaymentIntent(db, stripe, {
+        jobId,
+        userId: authUid,
+        candidateAttemptId: db.collection("payment_attempts").doc().id,
+        disputeReason,
+        technicalFaultReport,
+        isPropertyDamage,
+        photos,
+        serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp()
       });
-
       return res.json({
         success: true,
-        clientSecret: paymentIntent.client_secret,
-        paymentIntentId: paymentIntent.id,
+        clientSecret: result.paymentIntent.client_secret,
+        paymentIntentId: result.paymentIntent.id,
         amount: 25.00
       });
     } catch (error: any) {
