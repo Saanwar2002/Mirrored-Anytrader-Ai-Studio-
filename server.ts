@@ -2401,6 +2401,11 @@ async function startServer() {
             }
           }
         }
+        await intentRef.update({
+          status: "mock_completed",
+          completedAt: admin.firestore.FieldValue.serverTimestamp(),
+          mock: true
+        });
         return res.json({ url: finalSuccessUrl.replace("{CHECKOUT_SESSION_ID}", "mock_session_success") });
       }
 
