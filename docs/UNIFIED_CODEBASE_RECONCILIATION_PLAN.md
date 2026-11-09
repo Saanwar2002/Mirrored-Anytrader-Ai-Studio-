@@ -1069,3 +1069,36 @@ For Instant Match specifically it must additionally bind `jobId` and the canonic
 ### Decision
 
 Section 31's question is answered: the current checkout-intent writer does **not** yet persist all fields required by PR #5's stronger fulfilment contract. Porting PR #5 webhook code without first upgrading this writer would make its authority checks incomplete or cause valid events to be sent to review. Implement the intent schema and lifecycle first, with route + webhook tests, then port Instant Match fulfilment/refund as a single slice. No source code was changed and no tests were run.
+
+
+## 33. Checkout-intent regression coverage audit
+
+Enumerated integration's current `tests/unit` directory and inspected the closest financial/payment test suites: `stripeConnectFinancialAudit.test.ts`, `task6PaymentAuthority.test.ts`, and `task35FStripeRedirectIntegrity.test.ts`.
+
+### Coverage found
+
+- `stripeConnectFinancialAudit.test.ts` verifies server-side catalog amounts, GBP currency, platform-owned versus client-money routing, and destination-charge behavior at the pricing resolver layer.
+- `task6PaymentAuthority.test.ts` exercises payment-ledger authority and webhook/transfer behavior through a test-local handler, but does not cover the current `/api/create-checkout-session` intent writer.
+- `task35FStripeRedirectIntegrity.test.ts` covers redirect URL security, not checkout intent persistence or Stripe session binding.
+- No dedicated integration unit test currently covers the `payment_intents` document schema, checkout request idempotency, Checkout Session-to-intent binding, intent expiry/failure, or webhook completion transition.
+
+### Required new test suite
+
+Create focused tests for the actual checkout route and its intent repository/service (prefer extracting a small testable service rather than importing the entire Express server):
+
+1. Authenticated UID is the only user identity persisted; body userId is ignored.
+2. Persisted intent contains canonical productKey/priceId, integer minor-unit amount, lowercase currency, mode, userId, jobId where relevant, metadata, status and expiry.
+3. Missing Firestore fails closed before creating a Stripe Checkout Session.
+4. Same user + same idempotency key + same canonical payload returns/reuses the same intent; same key + changed payload returns conflict.
+5. Two concurrent identical requests cannot create two intents or two Stripe sessions.
+6. Stripe session creation failure leaves a recoverable failed/retryable intent; retry reuses the same logical intent and cannot orphan multiple pending intents.
+7. On successful session creation, one intent binds to exactly one Checkout Session; a second session cannot consume it.
+8. Webhook rejects wrong client_reference_id, mode, amount_total, currency, metadata intentId, PaymentIntent ID, product/price, or expired/terminal intent.
+9. Webhook does not set intent completed before product validation and atomic fulfilment.
+10. Duplicate event and duplicate session delivery are idempotent; same intent with a different session is a conflict/manual-review event.
+11. Mock checkout never creates production settlement ledger entries or a production-looking completed intent.
+12. For Instant Match, job exists and belongs to the authenticated checkout customer at both checkout and fulfilment time.
+
+### Gate status
+
+Current pricing resolver tests are useful but insufficient. No route-level checkout-intent tests are present in the inspected integration test set. Add this suite before porting PR #5's stronger webhook fulfilment contract. No code changes or tests were run in this audit.
