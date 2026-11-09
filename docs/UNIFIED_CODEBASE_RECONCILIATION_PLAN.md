@@ -1548,3 +1548,27 @@ All inspected recurring products explicitly request `mode: "subscription"` and p
 - Main and AI Studio remain untouched.
 
 **Status:** product checkout modes mapped for the inspected UI callers; server-side intent resolver and Gold Driver/Gotham webhook fulfilment are the next high-priority gaps.
+
+
+## 46. Subscription ID validation and Exclusive Leads client-side entitlement bypass removal (2026-11-09)
+
+### Changes made on integration
+
+1. Video Pro and Exclusive Leads webhook fulfilment now require subscription mode and a non-empty string Stripe Subscription ID. They no longer substitute a Checkout Session ID into fields named subscription ID. Missing subscription data throws so the webhook can be retried/reconciled rather than corrupting subscription identity.
+2. Removed the Exclusive Leads client-side Firestore entitlement writes from checkout failure/missing redirect handling, exception fallback, and success-return URL handling. The client now reports checkout failure without granting paid access. The success URL flag only controls UI messaging; it is not proof of payment. The verified Stripe webhook remains the entitlement authority.
+
+### Authoritative intent resolver trace
+
+- The webhook reads payment_intents/<intentId> using the intent ID in Stripe Checkout Session metadata and verifies user binding, Checkout Session ID, mode, amount, currency, optional PaymentIntent ID, and allowed intent status before using intent.metadata for product routing.
+- The Checkout Session is created with only metadata containing intentId and uses deterministic Stripe idempotency key checkout_session_<intentId>.
+- The full intent-creation/product-resolution section still requires targeted inspection to establish precisely how each client's metadata and pricing catalog result are persisted. No conclusion is made here that every product metadata path is correct.
+- Stripe customer lookup/creation currently catches errors and continues without a customer ID; this is not changed because compatibility with customer-less flows needs product-specific verification.
+
+### Verification and limitations
+
+- Static source edits only. No TypeScript, lint, build, unit, emulator, browser, or Stripe test-mode tests were run.
+- Gold Driver and Gotham still require dedicated server-side entitlement mapping; no generic membership fallthrough was changed.
+- Subscription lifecycle webhooks remain unimplemented pending product-specific status/grace-period policy.
+- No merge to main, AI Studio sync, production Firebase change, or deployment was performed.
+
+**Status:** committed on integration only; do not deploy until automated tests and payment-flow verification pass.
