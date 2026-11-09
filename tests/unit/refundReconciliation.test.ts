@@ -106,6 +106,31 @@ describe("refund reconciliation", () => {
     expect(db.store.get(Object.keys(Object.fromEntries(db.store)).find(k => k.startsWith("payment_refund_totals/"))!)?.remainingAmountPence).toBe(7500);
   });
 
+  it("marks a reserved operation succeeded when its Stripe refund is confirmed", async () => {
+    const db = createMemoryDb({ "payment_ledger/ledg_original": original });
+    await reserveRefundOperation(db, {
+      operationId: "instant_match_match_1",
+      paymentIntentId: "pi_original",
+      requestedAmountPence: 299,
+      currency: "gbp",
+    });
+
+    await recordConfirmedRefund(db, {
+      refundId: "re_instant_match",
+      chargeId: "ch_original",
+      paymentIntentId: "pi_original",
+      originalLedgerEntryId: "ledg_original",
+      amountPence: 299,
+      currency: "gbp",
+      operationId: "instant_match_match_1",
+    });
+
+    const operation = db.store.get("refund_operations/instant_match_match_1");
+    expect(operation.status).toBe("succeeded");
+    expect(operation.stripeRefundId).toBe("re_instant_match");
+    expect(operation.confirmedAmountPence).toBe(299);
+  });
+
   it("prevents cumulative partial refunds from exceeding the original payment", async () => {
     const db = createMemoryDb({ "payment_ledger/ledg_original": original });
     await recordConfirmedRefund(db, {
