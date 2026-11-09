@@ -1821,6 +1821,64 @@ async function startServer() {
               tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "exclusive_leads", createdAt: admin.firestore.FieldValue.serverTimestamp() });
             });
           }
+          else if (meta?.type === "driver_gold" || meta?.subscriptionType === "driver_gold") {
+            if (session.mode !== "subscription" || typeof session.subscription !== "string" || !session.subscription) {
+              throw new Error("Gold Driver fulfilment requires a valid Stripe Subscription ID.");
+            }
+            const subscriptionId = session.subscription;
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`driver_gold_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Gold Driver subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.driverSubscriptionId && current.driverSubscriptionId !== subscriptionId) {
+                throw new Error("A different Gold Driver subscription is already linked; manual reconciliation required.");
+              }
+              tx.update(userRef, {
+                isGoldDriver: true,
+                driverTier: "gold",
+                driverSubscriptionId: subscriptionId,
+                driverSubscriptionStatus: "active",
+                commissionRate: 0.10,
+                driverSubscribedAt: current.driverSubscribedAt || new Date().toISOString(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "driver_gold", createdAt: admin.firestore.FieldValue.serverTimestamp() });
+            });
+          }
+          else if (meta?.type === "gotham_saas" || meta?.subscriptionType === "gotham_saas") {
+            if (session.mode !== "subscription" || typeof session.subscription !== "string" || !session.subscription) {
+              throw new Error("Gotham SaaS fulfilment requires a valid Stripe Subscription ID.");
+            }
+            const subscriptionId = session.subscription;
+            const doorsCount = Math.max(1, Math.min(100000, Math.floor(Number(meta.gothamDoorsCount) || 100)));
+            const billingCycle = meta.gothamBillingCycle === "annual" ? "annual" : "monthly";
+            const gothamTierName = String(meta.gothamTierName || meta.tierName || "Starter Housing Authority");
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`gotham_saas_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Gotham SaaS subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.gothamSubscriptionId && current.gothamSubscriptionId !== subscriptionId) {
+                throw new Error("A different Gotham SaaS subscription is already linked; manual reconciliation required.");
+              }
+              tx.update(userRef, {
+                isGothamSubscriber: true,
+                gothamSubscriptionId: subscriptionId,
+                gothamSubscriptionStatus: "active",
+                gothamDoorsCount: doorsCount,
+                gothamTierName,
+                gothamBillingCycle: billingCycle,
+                gothamSubscribedAt: current.gothamSubscribedAt || new Date().toISOString(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "gotham_saas", doorsCount, tierName: gothamTierName, billingCycle, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+            });
+          }
           else if (session.mode === 'subscription') {
             const subscriptionId = typeof session.subscription === "string" ? session.subscription : "";
             if (!userId || !db || !subscriptionId) throw new Error("Membership subscription fulfillment is missing user or Stripe subscription ID.");
