@@ -1200,3 +1200,39 @@ A follow-up static inspection confirmed 16 located checkout call sites across th
 - Client call-site commits add the header across 10 components; subsequent header syntax corrections were committed separately. Latest relevant client fix: `801641e56a6fb2921ffbc1a70ba72dd8d28dcf84`.
 
 **Status:** request-key reservation and call-site header plumbing committed, but retry/recovery semantics and tests remain incomplete. This is not yet safe to call fully idempotent. Main and AI Studio remain untouched.
+
+
+## 37. Stripe webhook authoritative-intent gate (2026-11-09)
+
+Implemented a first webhook safety gate in `server.ts` for `checkout.session.completed`.
+
+### Changes
+
+- Rejects checkout fulfillment if Firestore, `session.metadata.intentId`, or `client_reference_id` is missing.
+- Rejects fulfillment when the referenced `payment_intents/{intentId}` document does not exist. The previous fallback to session metadata is removed.
+- Validates the Stripe session against the stored intent before product fulfillment:
+  - authenticated user / `client_reference_id`
+  - exact Checkout Session ID
+  - Checkout mode
+  - integer amount in minor units
+  - session amount total
+  - normalized currency
+  - PaymentIntent ID if one has already been recorded
+  - allowed intent lifecycle status (`session_created` or recoverable `processing`)
+- Binding mismatches move the intent to `review_required` and stop fulfillment.
+- Moves the intent to `processing` before product side effects.
+- Removes the previous premature `completed` write at intent lookup.
+- Marks the intent `completed` only after the webhook's product fulfillment branch finishes successfully; then marks the Stripe event completed.
+
+### Important compatibility and correctness gate
+
+This is a conservative enforcement change and requires immediate test coverage before deployment. Verify all checkout product modes (one-time payment, subscription, setup if ever routed through this webhook), zero-cost/test products, and Connect destination charges against the actual resolver's amount/currency semantics. In particular, confirm `session.amount_total` is always populated and equal to `intent.amount` for every supported paid checkout mode. If not, define mode-specific amount validation from authoritative Stripe fields; do not weaken the user/session/product binding.
+
+The webhook still has broader architectural risks: fulfillment side effects are not one Firestore transaction, some downstream writes may not be idempotent, and the event claim may become stale after partial effects. A retry after partial fulfillment can repeat non-idempotent effects. This patch does not solve those issues and must not be represented as full webhook exactly-once processing.
+
+### Verification status
+
+- Source update committed to integration: `00a34114ef72eb2e1f6609dce34b81fa4c6e7971`.
+- Documentation update follows this commit.
+- No TypeScript, lint, unit, emulator, Stripe test-mode or build tests have been executed in this environment. Do not deploy or merge until those checks pass, especially the per-product amount/mode matrix.
+
