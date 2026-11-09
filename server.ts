@@ -1735,7 +1735,7 @@ async function startServer() {
         return res.status(500).send("Internal Error");
       }
 
-      if (event.type === 'checkout.session.completed') {
+      if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
         const session = event.data.object as Stripe.Checkout.Session;
         if (session.payment_status !== 'paid') {
           console.warn(`[Webhook Warning] Checkout session ${session.id} completed with payment_status '${session.payment_status}'. Skipping fulfillment until paid.`);
