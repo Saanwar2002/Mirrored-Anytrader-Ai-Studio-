@@ -1102,3 +1102,30 @@ Create focused tests for the actual checkout route and its intent repository/ser
 ### Gate status
 
 Current pricing resolver tests are useful but insufficient. No route-level checkout-intent tests are present in the inspected integration test set. Add this suite before porting PR #5's stronger webhook fulfilment contract. No code changes or tests were run in this audit.
+
+
+## 34. Checkout route and webhook control-flow verification
+
+Re-opened the exact integration route and webhook blocks to confirm the proposed intent changes against real control flow.
+
+### Additional confirmed control-flow defects
+
+- The route writes the pre-checkout intent only inside `if (db)`; when Firestore is absent it continues to Stripe Checkout creation. This is a paid-session-without-authoritative-intent failure mode. Change to fail closed with retryable 503 before Stripe initialization/session creation.
+- The route creates the intent before `getStripe()`. If Stripe is unconfigured in a permitted mock environment or Stripe session creation throws, the pre-created record can remain `pending`; introduce explicit state transitions and a bounded expiry/retry strategy.
+- The Stripe Checkout Session is created without a Stripe idempotency option. A client retry after a timeout can create another session for the same logical purchase.
+- On webhook, when `session.metadata.intentId` is present but the intent document is missing, integration only logs an error and continues using `session.metadata` as fallback. This means a missing authoritative intent is not a hard stop; the event may still trigger downstream fulfillment based on session metadata.
+- When an intent exists, it is marked `completed` immediately after lookup, before validating the session's amount/currency/mode/product and before product-specific side effects. A later failure can leave a completed intent with no completed fulfillment.
+- The webhook derives `userId` from `session.client_reference_id` rather than first binding it to the stored intent's `userId`. The client reference must match the authenticated user persisted in the intent; it must not independently authorize fulfillment.
+- The current handler's processed-event claim is separate from product fulfillment. A failure after some side effects must be recoverable; the intent and each fulfillment record need independent idempotency, with event claim state returning to retryable/reclaimable rather than permanently completed after partial effects.
+
+### Safe state machine recommendation
+
+Use an explicit persisted lifecycle:
+`created -> session_creating -> session_created -> processing -> completed`.
+Recoverable errors transition to `retryable_failed`; ambiguous Stripe outcomes transition to `unknown_reconciling`; permanent binding/authorization mismatches transition to `review_required` or `rejected`. Never transition directly to completed until all verified fulfilment writes have committed. Expired unconsumed intents must be terminal and unusable.
+
+### Sequenced implementation boundary
+
+Do not refactor the whole Express webhook in one change. First extract a small checkout-intent repository/service with pure validation and transaction methods; test it independently. Then update the route to require Firestore, persist the canonical intent, create Stripe Session with stable idempotency, and bind the Session ID. Finally change webhook claim/fulfilment to validate the full binding and complete the intent only with successful idempotent fulfillment. Keep existing subscription, add-on, escrow and ride flows covered; Instant Match should be enabled only after its own match + ledger transaction is proven.
+
+**Status:** control-flow review only. No source code changed; no tests run.
