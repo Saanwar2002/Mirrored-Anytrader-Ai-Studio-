@@ -1350,3 +1350,37 @@ Audited the `taxi_trip` checkout fulfillment path and replaced its sequence of i
 - No TypeScript, lint, build, unit, emulator or Stripe test-mode tests were run.
 
 **Status:** committed on integration only; verify Connect payout and asynchronous payment semantics before deployment.
+
+
+## 41. Mediation stake and platform-fee settlement replay protection (2026-11-09)
+
+### Mediation stake
+
+- Replaced unconditional job update with a Firestore transaction.
+- Requires the referenced job to exist.
+- Uses a deterministic `stripe_fulfillments/mediation_stake_<sessionId>` marker.
+- Rejects a stake already bound to a different Checkout Session.
+- Atomically updates dispute state and creates the fulfillment marker.
+- Stores the amount from the actual Stripe session in minor-unit-derived GBP value instead of hardcoding £25.00.
+
+### Driver platform-fee settlement
+
+- Replaced independent read/update with a Firestore transaction.
+- Uses deterministic `stripe_fulfillments/fee_settlement_<sessionId>` marker.
+- Atomically reduces pending fees and creates the marker.
+- Duplicate webhook delivery cannot reduce the pending balance twice.
+- Fails if the driver record is missing.
+
+### Commit
+
+- `fb6b30a97514d4546fe0549b942889550fdf395d` — make mediation stake and fee settlement fulfillment idempotent.
+
+### Important remaining checks
+
+- Confirm the mediation-stake Checkout Session resolver guarantees the intended fixed stake amount and currency; this handler records the Stripe amount but does not itself compare it to a separately stored expected amount.
+- Fee settlement currently clamps pending fees to zero. Confirm the checkout amount cannot exceed the driver's pending fee balance; otherwise this could hide overpayment or stale-checkout conditions. The next hardening step should persist the expected settlement amount at checkout creation and compare it to the Stripe session before applying.
+- Neither transaction creates an external transfer; this only updates Firestore dispute/fee state.
+- Boost fulfillment remains non-atomic: job and public-card updates occur before the Instant Match-specific transaction. It still needs a deterministic general boost marker and an atomic job update, followed by retryable public-card projection.
+- No tests, TypeScript, lint, build, emulator or Stripe test-mode run performed.
+
+**Status:** committed to integration only; not production verified.
