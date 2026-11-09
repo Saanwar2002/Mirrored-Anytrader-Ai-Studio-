@@ -1159,3 +1159,44 @@ Implemented a deliberately narrow first fix in integration's `server.ts` (no mai
 - `951b79757cb7fddad2f12136386806379d4c173c` — explicit development mock intent state.
 
 **Status:** partial implementation committed to `integration/pr-consolidation-20261109`; do not call checkout-intent lifecycle complete or port Instant Match refund code yet.
+
+
+## 36. Request-level checkout idempotency implementation (2026-11-09)
+
+Implemented the next checkout hardening increment on integration.
+
+### Server changes
+
+- Requires an `Idempotency-Key` request header (16–128 safe ASCII characters).
+- Derives a deterministic Firestore intent ID from authenticated UID + client key using SHA-256; raw client key is not stored.
+- Computes a canonical request hash from authenticated user, server-resolved metadata, mode, authoritative amount, currency, resolved Stripe price/product and quantity.
+- Uses a Firestore transaction to reserve the intent exactly once.
+- Reusing a key with a different canonical purchase returns HTTP 409.
+- Reusing a key with a completed Stripe Session retrieves that existing session and returns its URL rather than creating another.
+- Concurrent/repeated requests while the same intent is being created return HTTP 409 instead of starting a second session.
+- The Stripe idempotency key remains derived from the stable intent ID.
+
+### Client changes
+
+Added `Idempotency-Key: crypto.randomUUID()` to all located calls to `/api/create-checkout-session` in:
+`BillingManager.tsx` (5 calls), `Profile.tsx`, `Portfolio.tsx`, `EmergencyJobWizard.tsx`, `TradesDashboard.tsx`, `JobDetails.tsx` (3 calls), `PostJobWizard.tsx`, `TradesBannerAdStudio.tsx`, `TraderVideoVerificationCard.tsx`, and `GothamHousingPortal.tsx`.
+
+A follow-up static inspection confirmed 16 located checkout call sites across these 10 files and all 16 now include the header.
+
+### Important remaining limitations
+
+- The client currently generates a fresh UUID when each call is constructed. It does not yet persist/reuse the same key across a user retry after an ambiguous network failure. For true retry semantics, retain the key for the logical checkout attempt (e.g. in component state/session storage) until the server returns a session or the attempt is explicitly abandoned.
+- A same-key request whose intent is still `session_creating` or `retryable_failed` currently returns 409 unless an existing Session ID is already bound. Add a safe lease/claim and same-intent retry transition; do not simply reset state without handling a Stripe request that may have succeeded but whose response was lost.
+- Current session creation writes `session_created` after Stripe returns. A crash between Stripe success and Firestore update is recoverable only by repeating the same Stripe idempotency key while Stripe retains it; add explicit reconciliation and document the retry window.
+- The canonical request hash includes server-resolved fields but needs a dedicated tested canonicalization helper. Confirm nested metadata ordering is stable and include every economic/authorization field (e.g. Connect destination/application fee, customer, job binding and subscription settings).
+- Existing endpoint client calls are now required to supply the header. Any unlisted/external API client must be updated; monitor 400 responses during rollout.
+- `crypto.randomUUID()` requires supported secure browser contexts. Confirm supported client/browser baseline or provide a cryptographically secure fallback.
+- The Firestore intent schema still lacks an explicit canonical `productKey/priceId` persisted separately from metadata; the hash uses resolved line-item fields where available.
+- No route/service tests, lint, build, emulator or Stripe integration tests have been run after these changes.
+
+### Commits
+
+- `976b1c49bbddc58a3d014f4ed238653b4bde9ef1` — deterministic request-key intent reservation and canonical request hash.
+- Client call-site commits add the header across 10 components; subsequent header syntax corrections were committed separately. Latest relevant client fix: `801641e56a6fb2921ffbc1a70ba72dd8d28dcf84`.
+
+**Status:** request-key reservation and call-site header plumbing committed, but retry/recovery semantics and tests remain incomplete. This is not yet safe to call fully idempotent. Main and AI Studio remain untouched.
