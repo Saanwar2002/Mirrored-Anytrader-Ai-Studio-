@@ -2000,82 +2000,91 @@ async function startServer() {
             } else if (meta?.type === 'taxi_trip' && meta?.rideId && db) {
               const rideId = meta.rideId;
               const driverId = meta.driverId;
-            const amount = session.amount_total ? session.amount_total / 100 : 0;
-
-            const rideRef = db.collection("ride_requests").doc(rideId);
-            const rideSnap = await rideRef.get();
-            const rideData = rideSnap.data();
-
-            try {
-              validateRideTransition(rideData?.status || "in_progress", "completed");
-            } catch (rideTransErr) {
-              console.warn(`Ride transition warning on ${rideId}:`, rideTransErr);
-            }
-
-            // 1. Update ride status
-            await rideRef.update({
-              status: "completed",
-              paymentStatus: "paid",
-              payoutTransferred: true, // Handled automatically by Stripe transfer_data
-              stripePaymentIntentId: session.payment_intent as string,
-              paidAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            // 2. Record ledger entry for ride payment
-            const ledgerEntryId = `ledg_ride_${event.id}`;
-            const farePence = session.amount_total || Math.round(amount * 100);
-            const feePence = Math.round(farePence * 0.12);
-            await db.collection("payment_ledger").doc(ledgerEntryId).set({
-              entryId: ledgerEntryId,
-              transactionId: session.payment_intent as string || `pi_${event.id}`,
-              idempotencyKey: `webhook_ride_${event.id}`,
-              payerId: rideData?.passengerId || session.client_reference_id || "passenger",
-              payeeId: driverId || "driver",
-              amount: farePence,
-              platformFee: feePence,
-              netPayout: farePence - feePence,
-              currency: session.currency || "gbp",
-              type: "DIRECT_PAYOUT",
-              status: "completed",
-              createdAt: new Date().toISOString()
-            });
-
-            // 3. Update driver metrics
-            if (driverId) {
-              const today = new Date().toISOString().split('T')[0];
-              const metricsRef = db.collection("driver_metrics").doc(driverId);
-              const metricsDoc = await metricsRef.get();
-              
-              if (metricsDoc.exists) {
-                const data = metricsDoc.data();
-                if (data?.date === today) {
-                  await metricsRef.update({
-                    dailyEarnings: admin.firestore.FieldValue.increment(amount * 0.88), // 88% after commission
-                    jobsDoneToday: admin.firestore.FieldValue.increment(1),
-                    lastTripAt: admin.firestore.FieldValue.serverTimestamp()
-                  });
-                } else {
-                  // Reset for a new day
-                  await metricsRef.set({
-                    driverId,
-                    date: today,
-                    dailyEarnings: amount * 0.88,
-                    jobsDoneToday: 1,
-                    lastAssignmentAt: admin.firestore.FieldValue.serverTimestamp(),
-                    lastTripAt: admin.firestore.FieldValue.serverTimestamp()
-                  });
-                }
-              } else {
-                await metricsRef.set({
-                  driverId,
-                  date: today,
-                  dailyEarnings: amount * 0.88,
-                  jobsDoneToday: 1,
-                  lastAssignmentAt: admin.firestore.FieldValue.serverTimestamp(),
-                  lastTripAt: admin.firestore.FieldValue.serverTimestamp()
-                });
+              const amountPence = Number(session.amount_total);
+              const paymentIntentId = session.payment_intent as string;
+              if (!Number.isSafeInteger(amountPence) || amountPence <= 0) {
+                throw new Error("Taxi trip checkout amount must be a positive integer in pence");
               }
-            }
+              if (!paymentIntentId && !session.id.startsWith("cs_mock_") && !session.id.startsWith("mock_")) {
+                throw new Error("Stripe PaymentIntent ID is required for production taxi trip fulfilment");
+              }
+
+              const rideRef = db.collection("ride_requests").doc(rideId);
+              const ledgerEntryId = `ledg_ride_${session.id}`;
+              const ledgerRef = db.collection("payment_ledger").doc(ledgerEntryId);
+              const metricsRef = driverId ? db.collection("driver_metrics").doc(driverId) : null;
+              const today = new Date().toISOString().split("T")[0];
+              const farePence = amountPence;
+              const feePence = Math.round(farePence * 0.12);
+
+              await db.runTransaction(async (tx: any) => {
+                const rideSnap = await tx.get(rideRef);
+                const ledgerSnap = await tx.get(ledgerRef);
+                const metricsSnap = metricsRef ? await tx.get(metricsRef) : null;
+                if (!rideSnap.exists) throw new Error(`Taxi ride not found: ${rideId}`);
+                const rideData = rideSnap.data();
+
+                if (ledgerSnap.exists) {
+                  const existing = ledgerSnap.data();
+                  if (existing?.transactionId !== (paymentIntentId || `pi_${session.id}`) ||
+                      existing?.amount !== farePence || existing?.payeeId !== (driverId || "driver")) {
+                    throw new Error("Taxi trip payment session conflicts with an existing ledger entry");
+                  }
+                  return;
+                }
+
+                if (rideData?.paymentStatus === "paid" &&
+                    rideData?.stripePaymentIntentId &&
+                    rideData.stripePaymentIntentId !== paymentIntentId) {
+                  throw new Error("Taxi ride is already paid by a different PaymentIntent");
+                }
+                if (rideData?.status !== "completed") {
+                  validateRideTransition(rideData?.status || "in_progress", "completed");
+                }
+
+                tx.set(rideRef, {
+                  status: "completed",
+                  paymentStatus: "paid",
+                  payoutTransferred: true,
+                  stripePaymentIntentId: paymentIntentId || `pi_${session.id}`,
+                  paidAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+
+                tx.create(ledgerRef, {
+                  entryId: ledgerEntryId,
+                  transactionId: paymentIntentId || `pi_${session.id}`,
+                  idempotencyKey: `webhook_ride_${session.id}`,
+                  payerId: rideData?.passengerId || session.client_reference_id || "passenger",
+                  payeeId: driverId || "driver",
+                  amount: farePence,
+                  platformFee: feePence,
+                  netPayout: farePence - feePence,
+                  currency: session.currency || "gbp",
+                  type: "DIRECT_PAYOUT",
+                  status: "completed",
+                  createdAt: new Date().toISOString()
+                });
+
+                if (metricsRef) {
+                  const earnings = (farePence - feePence) / 100;
+                  if (metricsSnap?.exists && metricsSnap.data()?.date === today) {
+                    tx.update(metricsRef, {
+                      dailyEarnings: admin.firestore.FieldValue.increment(earnings),
+                      jobsDoneToday: admin.firestore.FieldValue.increment(1),
+                      lastTripAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                  } else {
+                    tx.set(metricsRef, {
+                      driverId,
+                      date: today,
+                      dailyEarnings: earnings,
+                      jobsDoneToday: 1,
+                      lastAssignmentAt: admin.firestore.FieldValue.serverTimestamp(),
+                      lastTripAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                  }
+                }
+              });
           }
         }
       } else if (event.type === 'customer.subscription.updated') {
