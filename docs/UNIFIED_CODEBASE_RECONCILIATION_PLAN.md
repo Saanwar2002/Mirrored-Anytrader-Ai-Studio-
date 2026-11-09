@@ -1308,3 +1308,45 @@ Implemented a focused improvement to the `milestone_funding` Stripe webhook bran
 - No tests, TypeScript, lint, build, Firestore emulator or Stripe test-mode verification have been run.
 
 **Status:** implementation committed on integration only; do not deploy or merge until the payment amount contract and ledger/domain-event replay semantics are tested.
+
+
+## 40. Taxi-trip webhook atomicity and replay protection (2026-11-09)
+
+Audited the `taxi_trip` checkout fulfillment path and replaced its sequence of independent writes with one Firestore transaction.
+
+### Previously identified risks
+
+- Ride completion was updated independently from ledger creation.
+- The ride update could repeat on webhook retry.
+- Ledger used event ID and `set`, allowing separate Stripe event IDs for the same Checkout Session to create duplicate ride ledger entries.
+- Driver daily earnings and trip count used increments outside a transaction and could be applied more than once.
+- Ride transition failures were logged as warnings and processing continued.
+
+### Implemented
+
+- Requires a ride ID, driver ID, positive integer amount in minor units, and PaymentIntent ID.
+- Uses Checkout Session-derived deterministic IDs for the ledger entry and fulfillment marker.
+- Transactionally reads ride, ledger, marker and driver metrics before writing.
+- Requires the ride to exist.
+- Checks assigned driver and passenger binding when those fields are present.
+- Rejects a ride already bound to a different PaymentIntent.
+- Enforces the ride state transition rather than swallowing transition errors.
+- Atomically updates ride completion/payment state, creates the ledger entry, updates driver daily metrics and creates the fulfillment marker.
+- Computes driver net earnings from the same 12% fee calculation used in the ledger.
+- Duplicate webhook deliveries or separate Stripe events for the same Checkout Session observe the marker and do not repeat metrics or ledger effects.
+- An orphan ledger entry without a marker is treated as a manual-reconciliation condition rather than silently overwritten.
+
+### Commit
+
+- `8d643f56bd89fc8ca42a5c424afb7de5b08ecba8` — make taxi trip webhook fulfillment atomic and idempotent.
+
+### Important unresolved questions
+
+- Confirm the actual ride schema always uses `assignedDriverId` and `passengerId`; if not, map the authoritative field names before rollout.
+- Confirm the ride Checkout Session uses the same currency and amount contract as the payment intent; the outer intent gate checks session amount/currency against the stored intent.
+- Confirm Stripe Connect transfer creation is actually configured for this Checkout Session. The current `payoutTransferred: true` field is still set on session completion and must not be interpreted as proof that an external transfer settled unless `transfer_data`/transfer reconciliation confirms it.
+- Confirm whether `checkout.session.completed` is sufficient for all enabled payment methods; asynchronous methods may require `checkout.session.async_payment_succeeded` handling before marking ride paid.
+- This transaction is limited to Firestore state. It cannot atomically commit Stripe's external transfer.
+- No TypeScript, lint, build, unit, emulator or Stripe test-mode tests were run.
+
+**Status:** committed on integration only; verify Connect payout and asynchronous payment semantics before deployment.
