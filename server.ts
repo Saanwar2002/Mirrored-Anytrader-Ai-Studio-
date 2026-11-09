@@ -2093,6 +2093,11 @@ async function startServer() {
          if (db && meta.type === "mediation_stake") {
            if (!meta.jobId || !meta.paymentAttemptId || !meta.userId || pi.currency !== "gbp" || pi.amount !== 2500) {
              console.error("[Security Alert] Invalid mediation stake webhook metadata/amount:", pi.id);
+             await eventRef.update({
+               status: "rejected",
+               rejectionReason: "invalid_mediation_stake_success_metadata_or_amount",
+               rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+             });
              return res.status(400).send("Invalid mediation stake payment");
            }
            await confirmMediationStakePayment(db, {
@@ -2109,6 +2114,11 @@ async function startServer() {
          if (db && meta.type === "mediation_stake") {
            if (!meta.jobId || !meta.paymentAttemptId || !meta.userId || pi.currency !== "gbp" || pi.amount !== 2500) {
              console.error("[Security Alert] Invalid mediation stake failure webhook:", pi.id);
+             await eventRef.update({
+               status: "rejected",
+               rejectionReason: "invalid_mediation_stake_failure_metadata_or_amount",
+               rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+             });
              return res.status(400).send("Invalid mediation stake failure");
            }
            await recordMediationStakePaymentFailure(db, {
