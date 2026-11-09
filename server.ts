@@ -22,6 +22,7 @@ import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
 import { sanitizeRedirectUrl, getAuthoritativeAppUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
 import { assertCanReview, ReviewType, getJobParticipantIds } from "./src/server/reviewAuthorization.ts";
+import { reserveMediationStakeAttempt, confirmMediationStakePayment } from "./src/server/mediationStake.ts";
 import { executeBootstrapProfileCommand, bootstrapProfileSchema } from "./src/server/accountBootstrap.ts";
 import {
   listAuthoritativeNotifications,
@@ -2095,31 +2096,13 @@ async function startServer() {
              return res.status(400).send("Invalid mediation stake payment");
            }
            const jobRef = db.collection("jobs").doc(meta.jobId);
-           await db.runTransaction(async (tx: any) => {
-             const snap = await tx.get(jobRef);
-             if (!snap.exists) throw new Error("Mediation stake job not found");
-             const job = snap.data() || {};
-             const dispute = job.dispute || {};
-             if (dispute.raisedBy !== meta.userId ||
-                 dispute.stakePaymentAttemptId !== meta.paymentAttemptId ||
-                 dispute.paymentIntentId !== pi.id) {
-               throw new Error("Mediation stake reservation mismatch");
-             }
-             if (dispute.mediationStakePaid === true && dispute.stakePaymentId === pi.id) return;
-             tx.update(jobRef, {
-               status: "disputed",
-               dispute: {
-                 ...dispute,
-                 mediationStakePaid: true,
-                 mediationStakeAmount: 25.00,
-                 stakePaymentId: pi.id,
-                 stakePaymentStatus: "succeeded",
-                 status: "pending_arbitration",
-                 paidAt: admin.firestore.FieldValue.serverTimestamp()
-               },
-               disputedAt: admin.firestore.FieldValue.serverTimestamp()
-             });
-           });
+           await confirmMediationStakePayment(db, {
+             jobId: meta.jobId,
+             userId: meta.userId,
+             attemptId: meta.paymentAttemptId,
+             paymentIntentId: pi.id,
+             serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp()
+           }););
          }
       } else if (event.type === 'payment_intent.payment_failed') {
          const pi = event.data.object as Stripe.PaymentIntent;
@@ -2872,61 +2855,18 @@ async function startServer() {
     let existingPaymentIntentId = "";
 
     try {
-      await db.runTransaction(async (tx: any) => {
-        const snap = await tx.get(jobRef);
-        if (!snap.exists) {
-          const error: any = new Error("Job not found");
-          error.httpStatus = 404;
-          throw error;
-        }
-        const job = snap.data() || {};
-        const dispute = job.dispute || {};
-        if (job.status !== "disputed") {
-          const error: any = new Error("Mediation stake can only be paid for a disputed job");
-          error.httpStatus = 409;
-          throw error;
-        }
-        const { ownerIds, traderIds } = getJobParticipantIds(job);
-        if (!ownerIds.includes(authUid) && !traderIds.includes(authUid)) {
-          const error: any = new Error("Only a job participant can pay the mediation stake");
-          error.httpStatus = 403;
-          throw error;
-        }
-        if (job.mediationStakePaid === true || dispute.mediationStakePaid === true ||
-            dispute.status === "pending_arbitration") {
-          const error: any = new Error("The mediation stake has already been paid for this job");
-          error.httpStatus = 409;
-          throw error;
-        }
-
-        if (dispute.stakePaymentAttemptId) {
-          if (dispute.raisedBy !== authUid) {
-            const error: any = new Error("Only the participant who initiated this mediation payment can retry it");
-            error.httpStatus = 403;
-            throw error;
-          }
-          attemptId = String(dispute.stakePaymentAttemptId);
-          existingPaymentIntentId = String(dispute.paymentIntentId || "");
-        } else {
-          attemptId = candidateAttemptId;
-          tx.update(jobRef, {
-            dispute: {
-              ...dispute,
-              raisedBy: authUid,
-              reason: disputeReason || dispute.reason || "Dispute raised",
-              technicalFaultReport: technicalFaultReport || dispute.technicalFaultReport || "",
-              isPropertyDamage: Boolean(isPropertyDamage),
-              mediationStakePaid: false,
-              mediationStakeAmount: 25.00,
-              stakePaymentAttemptId: attemptId,
-              stakePaymentStatus: "creating",
-              photos: Array.isArray(photos) ? photos : (dispute.photos || []),
-              status: "awaiting_payment",
-              createdAt: dispute.createdAt || admin.firestore.FieldValue.serverTimestamp()
-            }
-          });
-        }
+      const reservation = await reserveMediationStakeAttempt(db, {
+        jobId,
+        userId: authUid,
+        candidateAttemptId,
+        disputeReason,
+        technicalFaultReport,
+        isPropertyDamage,
+        photos,
+        serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp()
       });
+      attemptId = reservation.attemptId;
+      existingPaymentIntentId = reservation.existingPaymentIntentId;
 
       // Fail closed: a missing Stripe configuration must never simulate payment.
       let stripe;
