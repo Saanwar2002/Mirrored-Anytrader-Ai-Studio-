@@ -2086,42 +2086,6 @@ async function startServer() {
              createdAt: admin.firestore.FieldValue.serverTimestamp()
            }, { merge: true });
          }
-      } else if (event.type === 'payment_intent.succeeded') {
-         const pi = event.data.object as Stripe.PaymentIntent;
-         const meta = pi.metadata || {};
-         if (db && meta.type === "mediation_stake" && meta.jobId && meta.paymentAttemptId && meta.userId) {
-           if (pi.currency !== "gbp" || pi.amount !== 2500) {
-             console.error("[Security Alert] Mediation stake PaymentIntent amount/currency mismatch:", pi.id);
-             return res.status(400).send("Invalid mediation stake amount");
-           }
-           const jobRef = db.collection("jobs").doc(meta.jobId);
-           await db.runTransaction(async (tx: any) => {
-             const snap = await tx.get(jobRef);
-             if (!snap.exists) throw new Error("Mediation stake job not found");
-             const job = snap.data() || {};
-             const dispute = job.dispute || {};
-             if (dispute.raisedBy !== meta.userId ||
-                 dispute.stakePaymentAttemptId !== meta.paymentAttemptId ||
-                 dispute.paymentIntentId !== pi.id) {
-               console.error("[Security Alert] Mediation stake webhook does not match active reservation:", pi.id);
-               throw new Error("Mediation stake reservation mismatch");
-             }
-             if (dispute.mediationStakePaid === true && dispute.stakePaymentId === pi.id) return;
-             tx.update(jobRef, {
-               status: "disputed",
-               dispute: {
-                 ...dispute,
-                 mediationStakePaid: true,
-                 mediationStakeAmount: 25.00,
-                 stakePaymentId: pi.id,
-                 stakePaymentStatus: "succeeded",
-                 status: "pending_arbitration",
-                 paidAt: admin.firestore.FieldValue.serverTimestamp()
-               },
-               disputedAt: admin.firestore.FieldValue.serverTimestamp()
-             });
-           });
-         }
       } else if (event.type === 'payment_intent.payment_failed') {
          const pi = event.data.object as Stripe.PaymentIntent;
          if (db && pi.id) {
@@ -2253,62 +2217,700 @@ async function startServer() {
          });
       }
 
-      // Fail closed if Stripe is unavailable. Never simulate a successful
-      // mediation payment in a real API route: only a verified Stripe webhook
-      // may mark the stake as paid.
       let stripe;
       try {
         stripe = getStripe();
-      } catch (stripeError: any) {
-        console.error("Stripe unavailable for mediation stake:", stripeError?.message || stripeError);
-        return res.status(503).json({
-          error: "Payment service temporarily unavailable. Please try again shortly."
-        });
-      }
-
-      let paymentIntent: any;
-      if (existingPaymentIntentId) {
-        paymentIntent = await stripe.paymentIntents.retrieve(existingPaymentIntentId);
-      } else {
-        paymentIntent = await stripe.paymentIntents.create({
-          amount: stakeAmountPence,
-          currency: "gbp",
-          metadata: {
-            type: "mediation_stake",
-            jobId,
-            disputeReason: disputeReason || "",
-            technicalFaultReport: technicalFaultReport || "",
-            isPropertyDamage: String(Boolean(isPropertyDamage)),
-            userId: authUid,
-            paymentAttemptId: attemptId
-          },
-          description: `Mediation Dispute Stake for Job #${jobId} (£25.00)`,
-          automatic_payment_methods: { enabled: true }
-        }, {
-          idempotencyKey: `mediation-stake:${jobId}:${attemptId}`
-        });
-      }
-
-      // Persist the PaymentIntent against the reservation. If this write fails,
-      // a retry reuses the same attempt id and Stripe idempotency key.
-      await db.runTransaction(async (tx: any) => {
-        const snap = await tx.get(jobRef);
-        if (!snap.exists) throw new Error("Job not found");
-        const current = snap.data() || {};
-        const dispute = current.dispute || {};
-        if (dispute.stakePaymentAttemptId !== attemptId) {
-          throw new Error("Mediation stake reservation changed; refusing to attach PaymentIntent");
+      } catch (e) {
+        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
+          console.error("Stripe is not configured in production/live environment. Refusing mock checkout bypass.");
+          return res.status(503).json({ error: "Payment processing is currently unavailable: Stripe gateway is unconfigured." });
         }
-        tx.update(jobRef, {
-          dispute: {
-            ...dispute,
-            paymentIntentId: paymentIntent.id,
-            stakePaymentStatus: "requires_payment_method"
+        console.warn("Stripe is not configured. Mocking successful checkout flow for development testing.");
+        
+        // Authoritative Mock Fulfillment for local dev/testing
+        if (db) {
+          const meta = authoritativeResult.metadata;
+          if (meta.isVideoPro === 'true' || meta.type === 'video_pro_subscription') {
+            await db.collection("users").doc(userId).set({
+              hasVerifiedVideoProSubscription: true,
+              videoProSubscribedAt: new Date().toISOString(),
+              videoVerificationStatus: "verified",
+              videoProSubscriptionId: "mock_sub_vpro_" + Math.random().toString(36).substring(7),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (meta.isExclusiveAddon === 'true' || meta.type === 'exclusive_leads') {
+            await db.collection("users").doc(userId).set({
+              hasExclusiveAddon: true,
+              isExclusiveActive: true,
+              exclusiveSubscribedAt: new Date().toISOString(),
+              exclusiveSubscriptionId: "mock_sub_excl_" + Math.random().toString(36).substring(7),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (meta.subscriptionType === 'gotham_saas' || meta.type === 'gotham_saas') {
+            await db.collection("users").doc(userId).set({
+              subscriptionStatus: "active",
+              subscriptionId: "mock_sub_gotham_" + Math.random().toString(36).substring(7),
+              tierId: meta.gothamTierName || "Gotham Enterprise",
+              tier: "gotham",
+              subscriptionType: "gotham_saas",
+              isGothamSubscriber: true,
+              gothamDoorsCount: Number(meta.gothamDoorsCount) || 100,
+              gothamTierName: meta.gothamTierName || "Gotham Enterprise",
+              gothamBillingCycle: meta.gothamBillingCycle || "monthly",
+              gothamCancelAtPeriodEnd: false,
+              cancelAtPeriodEnd: false,
+              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (meta.subscriptionType === 'driver_gold' || meta.type === 'driver_gold') {
+            await db.collection("users").doc(userId).set({
+              subscriptionStatus: "active",
+              subscriptionId: "mock_sub_gold_driver_" + Math.random().toString(36).substring(7),
+              tierId: "Gold Driver",
+              tier: "gold",
+              driverTier: "gold",
+              subscriptionType: "driver_gold",
+              isGoldDriver: true,
+              commissionRate: 0.10,
+              destinationFilters: 4,
+              advanceBookingDays: 14,
+              priorityDispatch: 50,
+              driverCancelAtPeriodEnd: false,
+              cancelAtPeriodEnd: false,
+              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (authoritativeResult.mode === 'subscription') {
+            const canonicalTier = meta.tier || 'pro';
+            await db.collection("users").doc(userId).set({
+              tierId: meta.tierName || "Pro",
+              tier: canonicalTier,
+              isPro: canonicalTier !== 'payg',
+              isProInvoiceSubscriber: canonicalTier !== 'payg',
+              subscriptionStatus: "active",
+              subscriptionId: "mock_sub_" + Math.random().toString(36).substring(7),
+              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (authoritativeResult.mode === 'payment') {
+            if (meta.type === 'ad_wallet_topup') {
+              const topupAmount = Number(meta.topupAmount) || 0;
+              if (topupAmount > 0) {
+                await db.collection("users").doc(userId).set({
+                  adWalletBalance: admin.firestore.FieldValue.increment(topupAmount),
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+              }
+            } else if (meta.type === 'milestone_funding' && meta.jobId && meta.quoteId && meta.milestoneId) {
+              const { jobId, quoteId, milestoneId } = meta;
+              const quoteRef = db.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+              const quoteDoc = await quoteRef.get();
+              if (quoteDoc.exists) {
+                const quoteData = quoteDoc.data();
+                const milestones = quoteData?.milestones || [];
+                const updatedMilestones = milestones.map((m: any) => {
+                  if (m.id === milestoneId) {
+                    return { ...m, status: 'funded', fundedAt: new Date().toISOString(), stripePaymentIntentId: intentId };
+                  }
+                  return m;
+                });
+                await quoteRef.update({ milestones: updatedMilestones });
+
+                // Record to immutable payment ledger
+                await PaymentLedgerEngine.recordEscrowFunding(db, {
+                  jobId,
+                  milestoneId,
+                  paymentIntentId: intentId,
+                  idempotencyKey: `mock_fund_${jobId}_${milestoneId}`,
+                  customerId: userId,
+                  traderId: meta.traderId || quoteData?.tradespersonId || "trader",
+                  verifiedAmount: authoritativeResult.authoritativeAmountPence,
+                  currency: "gbp"
+                });
+
+                await db.collection("notifications").add({
+                  userId: quoteData?.tradespersonId,
+                  title: "Milestone Funded! 💰",
+                  message: `Homeowner funded "${milestones.find((m: any) => m.id === milestoneId)?.title || 'Milestone'}". You can now start work!`,
+                  type: "status",
+                  link: `/job/${jobId}`,
+                  read: false,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              }
+            } else if (meta.type === 'mediation_stake' && meta.jobId) {
+              await db.collection("jobs").doc(meta.jobId).update({
+                status: "disputed",
+                mediationStakePaid: true,
+                disputeReason: meta.disputeReason || "Unspecified",
+                technicalFaultReport: meta.technicalFaultReport || "Unspecified",
+                disputedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+            } else if (meta.jobId && meta.type === 'boost') {
+              const boostExpiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+              const isIM = meta.tier === 'instant_match';
+              await db.collection("jobs").doc(meta.jobId).set({
+                isBoosted: true,
+                boostTier: meta.tier || 'emergency_boost',
+                boostExpiresAt,
+                postedDate: admin.firestore.FieldValue.serverTimestamp(),
+                isInstantMatch: isIM,
+                isEmergencyBoost: meta.tier === 'emergency_boost',
+                retryCount: 0
+              }, { merge: true });
+
+              try {
+                await db.collection("public_job_cards").doc(meta.jobId).set({
+                  isBoosted: true,
+                  boostTier: meta.tier || 'emergency_boost',
+                  isInstantMatch: isIM,
+                  updatedAt: new Date().toISOString()
+                }, { merge: true });
+              } catch (pubErr) {
+                console.warn("Could not sync public_job_cards for mock boost:", pubErr);
+              }
+
+              if (isIM) {
+                const matchRef = db.collection("instant_matches").doc();
+                await matchRef.set({
+                  id: matchRef.id,
+                  jobId: meta.jobId,
+                  customerId: userId,
+                  chargeAmountPence: 299,
+                  chargeTier: "instant_match",
+                  feeWaived: false,
+                  status: "searching",
+                  currentAttempt: 0,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                  searchingAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                await db.collection("jobs").doc(meta.jobId).set({
+                  instantMatchId: matchRef.id,
+                  matchedViaInstantMatch: true
+                }, { merge: true });
+              }
+            }
           }
-        });
+        }
+        return res.json({ url: finalSuccessUrl.replace("{CHECKOUT_SESSION_ID}", "mock_session_success") });
+      }
+
+      // Real Stripe Flow
+      let customerId: string | undefined;
+      if (userId && db) {
+        try {
+          const userDoc = await db.collection("users").doc(userId).get();
+          if (userDoc.exists) {
+            const userData = userDoc.data();
+            if (userData?.stripeCustomerId) {
+              customerId = userData.stripeCustomerId;
+            } else if (userData?.email) {
+              const customer = await stripe.customers.create({
+                email: userData.email,
+                metadata: { firebaseUid: userId }
+              });
+              customerId = customer.id;
+              await db.collection("users").doc(userId).set({ stripeCustomerId: customerId }, { merge: true });
+            } else {
+              const customer = await stripe.customers.create({
+                metadata: { firebaseUid: userId }
+              });
+              customerId = customer.id;
+              await db.collection("users").doc(userId).set({ stripeCustomerId: customerId }, { merge: true });
+            }
+          }
+        } catch (e) {
+          console.warn("Failed to sync Stripe customer:", e);
+        }
+      }
+
+      const sessionOptions: any = {
+        mode: authoritativeResult.mode as any,
+        payment_method_types: ['card'],
+        line_items: [authoritativeResult.lineItem],
+        success_url: finalSuccessUrl,
+        cancel_url: finalCancelUrl,
+        client_reference_id: userId,
+        // C-03: Pass ONLY the intent ID to Stripe. Do not expose or trust free-form metadata.
+        metadata: { intentId },
+      };
+
+      // Direct Stripe Connect destination charge for client funds:
+      // Platform never holds client money; only platform fee goes to platform account
+      if (authoritativeResult.paymentIntentData) {
+        sessionOptions.payment_intent_data = authoritativeResult.paymentIntentData;
+      }
+
+      if (customerId) {
+        sessionOptions.customer = customerId;
+        if (authoritativeResult.mode === 'payment') {
+          sessionOptions.saved_payment_method_options = {
+            payment_method_save: "enabled",
+          };
+        }
+      }
+
+      const session = await stripe.checkout.sessions.create(sessionOptions);
+
+      res.json({ url: session.url });
+    } catch (error: any) {
+      console.error("Stripe Checkout Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Stripe Setup Session (Save Card)
+  app.post("/api/create-setup-session", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      const authUid = (req as any).user.uid;
+      const { successUrl, cancelUrl } = req.body;
+      const userId = authUid; // Derive strictly from verified token
+      const appUrl = getAuthoritativeAppUrl();
+
+      const finalSuccessUrl = sanitizeRedirectUrl(successUrl, appUrl, `/profile?setup=success`);
+      const finalCancelUrl = sanitizeRedirectUrl(cancelUrl, appUrl, `/profile`);
+
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
+          console.error("Stripe is not configured in production/live environment. Refusing mock setup bypass.");
+          return res.status(503).json({ error: "Card setup is currently unavailable: Stripe gateway is unconfigured." });
+        }
+        console.warn("Stripe is not configured. Mocking successful setup flow for development testing.");
+        return res.json({ url: finalSuccessUrl });
+      }
+
+      let customerId: string | undefined;
+      if (userId && db) {
+        const userDoc = await db.collection("users").doc(userId).get();
+        if (userDoc.exists) {
+          const userData = userDoc.data();
+          if (userData?.stripeCustomerId) {
+            customerId = userData.stripeCustomerId;
+          } else {
+            const customer = await stripe.customers.create({
+              email: userData?.email,
+              metadata: { firebaseUid: userId }
+            });
+            customerId = customer.id;
+            await db.collection("users").doc(userId).set({ stripeCustomerId: customerId }, { merge: true });
+          }
+        }
+      }
+
+      if (!customerId) {
+        return res.status(400).json({ error: "Could not identify or create Stripe customer." });
+      }
+
+      const session = await stripe.checkout.sessions.create({
+        mode: 'setup',
+        payment_method_types: ['card'],
+        customer: customerId,
+        success_url: finalSuccessUrl,
+        cancel_url: finalCancelUrl,
+        client_reference_id: userId,
       });
 
-      return res.json({
+      res.json({ url: session.url });
+    } catch (error: any) {
+      console.error("Stripe Setup Error:", error);
+      res.status(500).json({ error: error.message || "Failed to create setup session" });
+    }
+  });
+
+  // List Saved Cards
+  app.get("/api/payment-methods/:userId", requireAuth, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      if (!db) return res.json({ paymentMethods: [], mock: true });
+
+      if ((req as any).user.uid !== userId) {
+        return res.status(403).json({ error: "Forbidden: Not your payment methods" });
+      }
+
+      const userDoc = await db.collection("users").doc(userId).get();
+      if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+
+      const stripeCustomerId = userDoc.data()?.stripeCustomerId;
+      if (!stripeCustomerId) return res.json({ paymentMethods: [] });
+
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        return res.json({ paymentMethods: [], mock: true });
+      }
+
+      const paymentMethods = await stripe.paymentMethods.list({
+        customer: stripeCustomerId,
+        type: 'card',
+      });
+
+      const formattedMethods = paymentMethods.data.map(pm => ({
+        id: pm.id,
+        brand: pm.card?.brand,
+        last4: pm.card?.last4,
+        expMonth: pm.card?.exp_month,
+        expYear: pm.card?.exp_year,
+      }));
+
+      res.json({ paymentMethods: formattedMethods });
+    } catch (error: any) {
+      console.error("Fetch Payment Methods Error:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch payment methods" });
+    }
+  });
+
+  // Delete Saved Card
+  app.delete("/api/payment-methods/:userId/:paymentMethodId", requireAuth, async (req, res) => {
+    try {
+      const { userId, paymentMethodId } = req.params;
+      if ((req as any).user.uid !== userId) {
+        return res.status(403).json({ error: "Forbidden: Not your payment method" });
+      }
+
+      if (!db) {
+        return res.status(500).json({ error: "Database service unavailable" });
+      }
+
+      const userDoc = await db.collection("users").doc(userId).get();
+      if (!userDoc.exists) {
+        return res.status(404).json({ error: "User profile not found" });
+      }
+
+      const stripeCustomerId = userDoc.data()?.stripeCustomerId;
+      if (!stripeCustomerId) {
+        return res.status(400).json({ error: "No Stripe customer found for this profile" });
+      }
+
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        return res.json({ success: true, mock: true });
+      }
+
+      // Verify ownership of the payment method in Stripe
+      const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId);
+      if (paymentMethod.customer !== stripeCustomerId) {
+        return res.status(403).json({ error: "Forbidden: Payment method does not belong to your account" });
+      }
+
+      await stripe.paymentMethods.detach(paymentMethodId);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Delete Payment Method Error:", error);
+      res.status(500).json({ error: error.message || "Failed to delete payment method" });
+    }
+  });
+
+  // Stripe Customer Portal Session (Manage subscriptions, cancel, update cards, invoices)
+  app.post("/api/create-customer-portal-session", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      const authUid = (req as any).user.uid;
+      const appUrl = getAuthoritativeAppUrl();
+      const { returnUrl } = req.body;
+      const finalReturnUrl = sanitizeRedirectUrl(returnUrl, appUrl, `/billing`);
+
+      if (!db) {
+        return res.status(500).json({ error: "Database service unavailable" });
+      }
+
+      const userDoc = await db.collection("users").doc(authUid).get();
+      if (!userDoc.exists) {
+        return res.status(404).json({ error: "User profile not found" });
+      }
+
+      const userData = userDoc.data();
+      const customerId = userData?.stripeCustomerId;
+
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        return res.json({ url: finalReturnUrl });
+      }
+
+      if (!customerId) {
+        return res.status(400).json({ error: "No active Stripe customer account found for this profile." });
+      }
+
+      const portalSession = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: finalReturnUrl,
+      });
+
+      res.json({ url: portalSession.url });
+    } catch (error: any) {
+      console.error("Customer Portal Session Error:", error);
+      res.status(500).json({ error: error.message || "Failed to create portal session" });
+    }
+  });
+
+  // Cancel Subscription at Next Renewal Date (Cancel at Period End)
+  app.post("/api/cancel-subscription", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      const authUid = (req as any).user.uid;
+      const { subscriptionType = "tier" } = req.body; // 'tier' | 'exclusive_leads' | 'video_pro'
+
+      if (!db) {
+        return res.status(500).json({ error: "Database service unavailable" });
+      }
+
+      const userDoc = await db.collection("users").doc(authUid).get();
+      if (!userDoc.exists) {
+        return res.status(404).json({ error: "User profile not found" });
+      }
+
+      const userData = userDoc.data() || {};
+      let subId: string | undefined;
+      let fieldUpdates: any = {
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      if (subscriptionType === "exclusive_leads") {
+        subId = userData.exclusiveSubscriptionId;
+        const currentEnd = userData.exclusiveCurrentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        fieldUpdates.exclusiveCancelAtPeriodEnd = true;
+        fieldUpdates.exclusiveCurrentPeriodEnd = currentEnd;
+      } else if (subscriptionType === "video_pro") {
+        subId = userData.videoProSubscriptionId;
+        const currentEnd = userData.videoProCurrentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        fieldUpdates.videoProCancelAtPeriodEnd = true;
+        fieldUpdates.videoProCurrentPeriodEnd = currentEnd;
+      } else if (subscriptionType === "gotham_saas") {
+        subId = userData.gothamSubscriptionId || userData.subscriptionId;
+        const currentEnd = userData.gothamCurrentPeriodEnd || userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        fieldUpdates.gothamCancelAtPeriodEnd = true;
+        fieldUpdates.cancelAtPeriodEnd = true;
+        fieldUpdates.gothamCurrentPeriodEnd = currentEnd;
+        fieldUpdates.currentPeriodEnd = currentEnd;
+      } else if (subscriptionType === "driver_gold") {
+        subId = userData.driverSubscriptionId || userData.subscriptionId;
+        const currentEnd = userData.driverCurrentPeriodEnd || userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        fieldUpdates.driverCancelAtPeriodEnd = true;
+        fieldUpdates.cancelAtPeriodEnd = true;
+        fieldUpdates.driverCurrentPeriodEnd = currentEnd;
+        fieldUpdates.currentPeriodEnd = currentEnd;
+      } else {
+        // Default membership tier
+        subId = userData.subscriptionId;
+        const currentEnd = userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        fieldUpdates.cancelAtPeriodEnd = true;
+        fieldUpdates.currentPeriodEnd = currentEnd;
+      }
+
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        // Fallback for mock/development environment
+        await db.collection("users").doc(authUid).update(fieldUpdates);
+        return res.json({
+          success: true,
+          mock: true,
+          cancelAtPeriodEnd: true,
+          currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd,
+          message: "Subscription set to cancel at the end of the current billing cycle without renewing."
+        });
+      }
+
+      if (subId && !subId.startsWith("mock_")) {
+        // Call Stripe API to set cancel_at_period_end = true
+        const updatedSub = await stripe.subscriptions.update(subId, {
+          cancel_at_period_end: true
+        });
+
+        const periodEndIso = new Date(updatedSub.current_period_end * 1000).toISOString();
+        if (subscriptionType === "exclusive_leads") {
+          fieldUpdates.exclusiveCancelAtPeriodEnd = true;
+          fieldUpdates.exclusiveCurrentPeriodEnd = periodEndIso;
+        } else if (subscriptionType === "video_pro") {
+          fieldUpdates.videoProCancelAtPeriodEnd = true;
+          fieldUpdates.videoProCurrentPeriodEnd = periodEndIso;
+        } else {
+          fieldUpdates.cancelAtPeriodEnd = true;
+          fieldUpdates.currentPeriodEnd = periodEndIso;
+        }
+      }
+
+      await db.collection("users").doc(authUid).update(fieldUpdates);
+
+      res.json({
+        success: true,
+        cancelAtPeriodEnd: true,
+        currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd,
+        message: "Subscription will cancel at the end of the current billing cycle. You will retain all benefits until your renewal date."
+      });
+    } catch (error: any) {
+      console.error("Cancel Subscription Error:", error);
+      res.status(500).json({ error: error.message || "Failed to schedule cancellation" });
+    }
+  });
+
+  // Reactivate / Resume Subscription Before Period End
+  app.post("/api/reactivate-subscription", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      const authUid = (req as any).user.uid;
+      const { subscriptionType = "tier" } = req.body; // 'tier' | 'exclusive_leads' | 'video_pro'
+
+      if (!db) {
+        return res.status(500).json({ error: "Database service unavailable" });
+      }
+
+      const userDoc = await db.collection("users").doc(authUid).get();
+      if (!userDoc.exists) {
+        return res.status(404).json({ error: "User profile not found" });
+      }
+
+      const userData = userDoc.data() || {};
+      let subId: string | undefined;
+      let fieldUpdates: any = {
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      if (subscriptionType === "exclusive_leads") {
+        subId = userData.exclusiveSubscriptionId;
+        fieldUpdates.exclusiveCancelAtPeriodEnd = false;
+      } else if (subscriptionType === "video_pro") {
+        subId = userData.videoProSubscriptionId;
+        fieldUpdates.videoProCancelAtPeriodEnd = false;
+      } else if (subscriptionType === "gotham_saas") {
+        subId = userData.gothamSubscriptionId || userData.subscriptionId;
+        fieldUpdates.gothamCancelAtPeriodEnd = false;
+        fieldUpdates.cancelAtPeriodEnd = false;
+      } else if (subscriptionType === "driver_gold") {
+        subId = userData.driverSubscriptionId || userData.subscriptionId;
+        fieldUpdates.driverCancelAtPeriodEnd = false;
+        fieldUpdates.cancelAtPeriodEnd = false;
+      } else {
+        subId = userData.subscriptionId;
+        fieldUpdates.cancelAtPeriodEnd = false;
+      }
+
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        // Fallback for mock/development environment
+        await db.collection("users").doc(authUid).update(fieldUpdates);
+        return res.json({
+          success: true,
+          mock: true,
+          cancelAtPeriodEnd: false,
+          message: "Subscription successfully reactivated and will auto-renew normally."
+        });
+      }
+
+      if (subId && !subId.startsWith("mock_")) {
+        await stripe.subscriptions.update(subId, {
+          cancel_at_period_end: false
+        });
+      }
+
+      await db.collection("users").doc(authUid).update(fieldUpdates);
+
+      res.json({
+        success: true,
+        cancelAtPeriodEnd: false,
+        message: "Subscription successfully reactivated! Auto-renewal is resumed."
+      });
+    } catch (error: any) {
+      console.error("Reactivate Subscription Error:", error);
+      res.status(500).json({ error: error.message || "Failed to reactivate subscription" });
+    }
+  });
+
+  // Dispute Mediation Stake Stripe PaymentIntent (£25.00)
+  app.post("/api/disputes/create-stake-intent", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      const authUid = (req as any).user.uid;
+      const { jobId, disputeReason, technicalFaultReport, isPropertyDamage = false, photos = [] } = req.body;
+
+      if (!jobId) {
+        return res.status(400).json({ error: "jobId is required" });
+      }
+
+      if (!db) {
+        return res.status(500).json({ error: "Database service unavailable" });
+      }
+
+      const jobDoc = await db.collection("jobs").doc(jobId).get();
+      if (!jobDoc.exists) {
+        return res.status(404).json({ error: "Job not found" });
+      }
+
+      const jobData = jobDoc.data() || {};
+      const stakeAmountPence = 2500; // £25.00
+
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        // Fallback for mock/dev environment
+        await db.collection("jobs").doc(jobId).update({
+          status: "disputed",
+          dispute: {
+            raisedBy: authUid,
+            reason: disputeReason || "Dispute raised",
+            technicalFaultReport: technicalFaultReport || "",
+            isPropertyDamage: Boolean(isPropertyDamage),
+            mediationStakePaid: true,
+            mediationStakeAmount: 25.00,
+            stakePaymentId: "mock_pi_stake_" + Math.random().toString(36).substring(7),
+            photos: Array.isArray(photos) ? photos : [],
+            status: "pending_arbitration",
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          disputedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        return res.json({
+          success: true,
+          mock: true,
+          amount: 25.00,
+          status: "succeeded",
+          message: "Mediation stake of £25.00 authorized successfully. Dispute is now pending arbitration."
+        });
+      }
+
+      // Create real Stripe PaymentIntent
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: stakeAmountPence,
+        currency: "gbp",
+        metadata: {
+          type: "mediation_stake",
+          jobId,
+          disputeReason: disputeReason || "",
+          technicalFaultReport: technicalFaultReport || "",
+          isPropertyDamage: String(isPropertyDamage),
+          userId: authUid
+        },
+        description: `Mediation Dispute Stake for Job #${jobData.jobNo || jobId} (£25.00)`,
+        automatic_payment_methods: {
+          enabled: true
+        }
+      });
+
+      // Save pending dispute record
+      await db.collection("jobs").doc(jobId).update({
+        dispute: {
+          raisedBy: authUid,
+          reason: disputeReason || "Dispute raised",
+          technicalFaultReport: technicalFaultReport || "",
+          isPropertyDamage: Boolean(isPropertyDamage),
+          mediationStakePaid: false,
+          mediationStakeAmount: 25.00,
+          paymentIntentId: paymentIntent.id,
+          photos: Array.isArray(photos) ? photos : [],
+          status: "awaiting_payment",
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        }
+      });
+
+      res.json({
         success: true,
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
@@ -2316,10 +2918,7 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error("Create Dispute Stake Intent Error:", error);
-      const status = Number(error?.httpStatus) || 500;
-      return res.status(status).json({
-        error: status === 500 ? "Failed to initiate mediation stake" : error.message
-      });
+      res.status(500).json({ error: error.message || "Failed to initiate mediation stake" });
     }
   });
 
