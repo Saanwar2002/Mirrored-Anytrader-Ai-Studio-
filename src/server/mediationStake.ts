@@ -48,6 +48,39 @@ export async function reserveMediationStakeAttempt(db: any, input: {
   return { attemptId, existingPaymentIntentId };
 }
 
+export async function createMediationStakePaymentIntent(db: any, stripe: any, input: {
+  jobId: string; userId: string; candidateAttemptId: string;
+  disputeReason?: string; technicalFaultReport?: string; isPropertyDamage?: boolean;
+  photos?: unknown[]; serverTimestamp: () => unknown;
+}): Promise<{ attemptId: string; paymentIntent: any }> {
+  const reservation = await reserveMediationStakeAttempt(db, input);
+  const paymentIntent = reservation.existingPaymentIntentId
+    ? await stripe.paymentIntents.retrieve(reservation.existingPaymentIntentId)
+    : await stripe.paymentIntents.create({
+        amount: 2500,
+        currency: "gbp",
+        metadata: {
+          type: "mediation_stake",
+          jobId: input.jobId,
+          disputeReason: input.disputeReason || "",
+          technicalFaultReport: input.technicalFaultReport || "",
+          isPropertyDamage: String(Boolean(input.isPropertyDamage)),
+          userId: input.userId,
+          paymentAttemptId: reservation.attemptId
+        },
+        description: `Mediation Dispute Stake for Job #${input.jobId} (£25.00)`,
+        automatic_payment_methods: { enabled: true }
+      }, { idempotencyKey: `mediation-stake:${input.jobId}:${reservation.attemptId}` });
+
+  await attachMediationStakePaymentIntent(db, {
+    jobId: input.jobId,
+    attemptId: reservation.attemptId,
+    paymentIntentId: paymentIntent.id,
+    paymentIntentStatus: paymentIntent.status
+  });
+  return { attemptId: reservation.attemptId, paymentIntent };
+}
+
 export async function confirmMediationStakePayment(db: any, input: {
   jobId: string; userId: string; attemptId: string; paymentIntentId: string;
   serverTimestamp: () => unknown;
