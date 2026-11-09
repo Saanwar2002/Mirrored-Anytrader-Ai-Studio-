@@ -12,7 +12,7 @@ describe("Stripe instant-match checkout idempotency", () => {
     expect(end).toBeGreaterThan(start);
     const block = source.slice(start, end);
 
-    expect(block).toContain('collection("instant_matches").doc(session.id)');
+    expect(source).toContain('const matchRef = db.collection("instant_matches").doc(session.id)');
     expect(block).toContain("tx.get(matchRef)");
     expect(block).toContain("tx.get(jobRef)");
     expect(block).toContain("if (!matchSnap.exists)");
