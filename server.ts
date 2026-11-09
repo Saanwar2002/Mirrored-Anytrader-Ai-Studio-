@@ -1821,10 +1821,29 @@ async function startServer() {
             if (meta?.type === 'ad_wallet_topup' && userId && db) {
               const topupAmount = Number(meta?.topupAmount) || (session.amount_total ? session.amount_total / 100 : 0);
               if (topupAmount > 0) {
-                await db.collection("users").doc(userId).set({
-                  adWalletBalance: admin.firestore.FieldValue.increment(topupAmount),
-                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                }, { merge: true });
+                // Event-scoped marker and wallet credit commit atomically. If a later
+                // webhook side effect fails and Stripe retries this event, the credit
+                // cannot be applied twice.
+                const fulfillmentRef = db.collection("stripe_fulfillments").doc(`ad_wallet_${event.id}`);
+                const walletRef = db.collection("users").doc(userId);
+                await db.runTransaction(async (tx: any) => {
+                  const fulfillment = await tx.get(fulfillmentRef);
+                  if (fulfillment.exists) return;
+                  tx.set(walletRef, {
+                    adWalletBalance: admin.firestore.FieldValue.increment(topupAmount),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                  }, { merge: true });
+                  tx.create(fulfillmentRef, {
+                    eventId: event.id,
+                    sessionId: session.id,
+                    intentId: session.metadata?.intentId || null,
+                    userId,
+                    type: "ad_wallet_topup",
+                    amount: topupAmount,
+                    currency: session.currency || "gbp",
+                    createdAt: admin.firestore.FieldValue.serverTimestamp()
+                  });
+                });
               }
             } else if (meta?.type === 'mediation_stake' && meta?.jobId && db) {
               await db.collection("jobs").doc(meta.jobId).update({
@@ -1864,23 +1883,50 @@ async function startServer() {
               }
 
               if (isIM) {
-                 const matchRef = db.collection("instant_matches").doc();
-                 await matchRef.set({
-                   id: matchRef.id,
-                   jobId: meta.jobId,
-                   customerId: userId || "",
-                   chargeAmountPence: session.amount_total || 299,
-                   chargeTier: "instant_match",
-                   feeWaived: false,
-                   status: "searching",
-                   currentAttempt: 0,
-                   createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                   searchingAt: admin.firestore.FieldValue.serverTimestamp()
+                 // Stable session-derived match ID prevents duplicate match records
+                 // if this webhook is retried after a partial fulfillment failure.
+                 const matchId = `im_${session.id}`;
+                 const matchRef = db.collection("instant_matches").doc(matchId);
+                 const matchJobRef = db.collection("jobs").doc(meta.jobId);
+                 const fulfillmentRef = db.collection("stripe_fulfillments").doc(`instant_match_${session.id}`);
+                 await db.runTransaction(async (tx: any) => {
+                   const [matchSnap, jobSnap, fulfillmentSnap] = await Promise.all([
+                     tx.get(matchRef), tx.get(matchJobRef), tx.get(fulfillmentRef)
+                   ]);
+                   if (!jobSnap.exists) throw new Error("Instant Match job does not exist during payment fulfillment.");
+                   const jobData = jobSnap.data() || {};
+                   if (jobData.homeownerId && jobData.homeownerId !== userId) {
+                     throw new Error("Instant Match payment user does not own the target job.");
+                   }
+                   if (fulfillmentSnap.exists) return;
+                   if (!matchSnap.exists) {
+                     tx.create(matchRef, {
+                       id: matchId,
+                       jobId: meta.jobId,
+                       customerId: userId || "",
+                       chargeAmountPence: session.amount_total || 299,
+                       chargeTier: "instant_match",
+                       feeWaived: false,
+                       status: "searching",
+                       currentAttempt: 0,
+                       createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                       searchingAt: admin.firestore.FieldValue.serverTimestamp()
+                     });
+                   }
+                   tx.set(matchJobRef, {
+                     instantMatchId: matchId,
+                     matchedViaInstantMatch: true
+                   }, { merge: true });
+                   tx.create(fulfillmentRef, {
+                     eventId: event.id,
+                     sessionId: session.id,
+                     intentId: session.metadata?.intentId || null,
+                     userId,
+                     jobId: meta.jobId,
+                     type: "instant_match",
+                     createdAt: admin.firestore.FieldValue.serverTimestamp()
+                   });
                  });
-                 await db.collection("jobs").doc(meta.jobId).set({
-                    instantMatchId: matchRef.id,
-                    matchedViaInstantMatch: true
-                 }, { merge: true });
               }
             } else if (meta?.type === 'milestone_funding' && meta?.jobId && meta?.quoteId && meta?.milestoneId && db) {
               // Log successful funding of a milestone with V6 Payment Ledger & State Machine
