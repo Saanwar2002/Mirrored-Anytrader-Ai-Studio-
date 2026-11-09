@@ -1806,12 +1806,33 @@ async function startServer() {
           } else if (session.mode === 'payment') {
             if (meta?.type === 'ad_wallet_topup' && userId && db) {
               const topupAmount = Number(meta?.topupAmount) || (session.amount_total ? session.amount_total / 100 : 0);
-              if (topupAmount > 0) {
-                await db.collection("users").doc(userId).set({
+              if (!Number.isFinite(topupAmount) || topupAmount <= 0 || !session.id) {
+                throw new Error("Invalid ad wallet top-up amount or Checkout Session ID");
+              }
+              const userRef = db.collection("users").doc(userId);
+              const topupRef = db.collection("ad_wallet_topups").doc(session.id);
+              await db.runTransaction(async (tx: any) => {
+                const [topupSnap, userSnap] = await Promise.all([tx.get(topupRef), tx.get(userRef)]);
+                if (topupSnap.exists) {
+                  const existing = topupSnap.data();
+                  if (existing?.userId !== userId || Number(existing?.amount) !== topupAmount) {
+                    throw new Error("Ad wallet top-up session metadata does not match its existing ledger record");
+                  }
+                  return;
+                }
+                if (!userSnap.exists) throw new Error("Ad wallet top-up user does not exist");
+                tx.update(userRef, {
                   adWalletBalance: admin.firestore.FieldValue.increment(topupAmount),
                   updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                }, { merge: true });
-              }
+                });
+                tx.create(topupRef, {
+                  checkoutSessionId: session.id,
+                  userId,
+                  amount: topupAmount,
+                  currency: session.currency || "gbp",
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              });
             } else if (meta?.type === 'mediation_stake') {
               // Mediation stakes are fulfilled only by the verified PaymentIntent webhook
               // below, which checks the reserved attempt, payer, intent ID, amount and currency.
