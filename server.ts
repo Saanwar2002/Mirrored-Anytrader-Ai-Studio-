@@ -19,6 +19,7 @@ import { sendHttpError, BadRequestError, UnauthorizedError, ForbiddenError, NotF
 import { runProductionChecks } from "./src/server/productionChecks.ts";
 import { validateJobTransition, validateMilestoneTransition, validateRideTransition, validateQuoteTransition, JobStatus } from "./src/server/stateMachine.ts";
 import { PaymentLedgerEngine } from "./src/server/paymentLedger.ts";
+import { recordConfirmedRefund } from "./src/server/refundReconciliation.ts";
 import { sanitizeRedirectUrl, getAuthoritativeAppUrl } from "./src/server/paymentVerification.ts";
 import { assertResourceOwner, assertCanManageMilestone, sanitizeClientPayload, validateNotificationPayload, authorizeNotificationRequest, isUserAdminClaim } from "./src/server/authorization.ts";
 import { assertCanReview, ReviewType, getJobParticipantIds } from "./src/server/reviewAuthorization.ts";
@@ -2165,15 +2166,143 @@ async function startServer() {
          }
       } else if (event.type === 'charge.refunded') {
          const charge = event.data.object as Stripe.Charge;
-         if (db && charge.payment_intent) {
-           console.log(`[Webhook] Processing refund for payment_intent ${charge.payment_intent}`);
+         const paymentIntentId = typeof charge.payment_intent === "string"
+           ? charge.payment_intent
+           : charge.payment_intent?.id || null;
+         if (db && paymentIntentId) {
+           console.log(`[Webhook] Reconciling individual refunds for payment_intent ${paymentIntentId}`);
            await db.collection("refund_events").doc(`ref_${event.id}`).set({
              chargeId: charge.id,
-             paymentIntentId: charge.payment_intent,
+             paymentIntentId,
              amountRefunded: charge.amount_refunded,
              currency: charge.currency,
-             status: "refunded",
+             status: "reconciliation_started",
+             refundIds: (charge.refunds?.data || []).map((refund) => refund.id),
+             refundsHaveMore: Boolean(charge.refunds?.has_more),
              createdAt: admin.firestore.FieldValue.serverTimestamp()
+           }, { merge: true });
+
+           const refundItems = charge.refunds?.data || [];
+           if (refundItems.length === 0 && charge.amount_refunded > 0) {
+             await db.collection("refund_review").doc(`charge_${charge.id}`).set({
+               chargeId: charge.id,
+               paymentIntentId,
+               amountRefunded: charge.amount_refunded,
+               currency: charge.currency,
+               reason: "charge_refunded_event_has_no_individual_refund_objects",
+               status: "requires_review",
+               sourceEventId: event.id,
+               updatedAt: admin.firestore.FieldValue.serverTimestamp()
+             }, { merge: true });
+           }
+
+           const ledgerQuery = await db.collection("payment_ledger")
+             .where("transactionId", "==", paymentIntentId)
+             .get();
+           const eligibleOriginals = ledgerQuery.docs.filter((doc: any) => {
+             const entry = doc.data() || {};
+             return entry.status === "completed" &&
+               ["ESCROW_DEPOSIT", "RIDE_PAYMENT", "DIRECT_PAYOUT", "PLATFORM_COMMISSION"].includes(entry.type);
+           });
+
+           for (const refund of refundItems) {
+             const refundPaymentIntentId = typeof refund.payment_intent === "string"
+               ? refund.payment_intent
+               : refund.payment_intent?.id || paymentIntentId;
+             if (refundPaymentIntentId !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase()) {
+               await db.collection("refund_review").doc(refund.id).set({
+                 refundId: refund.id,
+                 chargeId: charge.id,
+                 paymentIntentId,
+                 refundPaymentIntentId,
+                 amountPence: refund.amount,
+                 currency: refund.currency,
+                 reason: "refund_payment_intent_or_currency_mismatch",
+                 status: "requires_review",
+                 sourceEventId: event.id,
+                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
+               }, { merge: true });
+               continue;
+             }
+
+             if (eligibleOriginals.length !== 1) {
+               await db.collection("refund_review").doc(refund.id).set({
+                 refundId: refund.id,
+                 chargeId: charge.id,
+                 paymentIntentId,
+                 amountPence: refund.amount,
+                 currency: refund.currency,
+                 candidateLedgerEntryIds: eligibleOriginals.map((doc: any) => doc.id),
+                 reason: eligibleOriginals.length === 0
+                   ? "no_matching_completed_original_payment_ledger_entry"
+                   : "multiple_matching_original_payment_ledger_entries",
+                 status: "requires_review",
+                 sourceEventId: event.id,
+                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
+               }, { merge: true });
+               continue;
+             }
+
+             const originalDoc = eligibleOriginals[0];
+             try {
+               const result = await recordConfirmedRefund(db, {
+                 refundId: refund.id,
+                 chargeId: charge.id,
+                 paymentIntentId,
+                 originalLedgerEntryId: originalDoc.id,
+                 amountPence: refund.amount,
+                 currency: refund.currency,
+                 reason: refund.reason || null
+               });
+               console.log(`[Webhook] Refund ${refund.id} reconciled to ledger entry ${result.entry.entryId}`);
+               await db.collection("refund_review").doc(refund.id).delete().catch(() => undefined);
+             } catch (refundError: any) {
+               if (refundError?.statusCode === 400 || refundError?.statusCode === 404 || refundError?.statusCode === 409) {
+                 await db.collection("refund_review").doc(refund.id).set({
+                   refundId: refund.id,
+                   chargeId: charge.id,
+                   paymentIntentId,
+                   originalLedgerEntryId: originalDoc.id,
+                   amountPence: refund.amount,
+                   currency: refund.currency,
+                   reason: refundError.message || "refund_reconciliation_conflict",
+                   status: "requires_review",
+                   sourceEventId: event.id,
+                   updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                 }, { merge: true });
+                 console.error(`[Webhook] Refund ${refund.id} requires manual review:`, refundError.message);
+               } else {
+                 throw refundError;
+               }
+             }
+           }
+
+           if (charge.refunds?.has_more) {
+             await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).set({
+               chargeId: charge.id,
+               paymentIntentId,
+               reason: "stripe_charge_refunds_list_has_more_items; retrieve remaining refunds from Stripe",
+               status: "requires_review",
+               sourceEventId: event.id,
+               updatedAt: admin.firestore.FieldValue.serverTimestamp()
+             }, { merge: true });
+           }
+
+           await db.collection("refund_events").doc(`ref_${event.id}`).set({
+             status: "reconciled",
+             reconciledRefundCount: refundItems.length,
+             requiresPaginationReview: Boolean(charge.refunds?.has_more),
+             reconciledAt: admin.firestore.FieldValue.serverTimestamp()
+           }, { merge: true });
+         } else if (db) {
+           await db.collection("refund_review").doc(`charge_${charge.id}`).set({
+             chargeId: charge.id,
+             amountRefunded: charge.amount_refunded,
+             currency: charge.currency,
+             reason: "charge_refund_missing_payment_intent_reference",
+             status: "requires_review",
+             sourceEventId: event.id,
+             updatedAt: admin.firestore.FieldValue.serverTimestamp()
            }, { merge: true });
          }
       } else if (event.type === 'payment_intent.succeeded') {
