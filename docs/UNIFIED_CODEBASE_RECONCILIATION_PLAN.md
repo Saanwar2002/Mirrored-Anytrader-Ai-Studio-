@@ -1384,3 +1384,33 @@ Audited the `taxi_trip` checkout fulfillment path and replaced its sequence of i
 - No tests, TypeScript, lint, build, emulator or Stripe test-mode run performed.
 
 **Status:** committed to integration only; not production verified.
+
+
+## 42. Boost and Instant Match webhook atomicity (2026-11-09)
+
+Reworked the paid `boost` webhook branch.
+
+### Changes
+
+- Requires the target job to exist.
+- Checks the job's `homeownerId` against the authenticated checkout user when that field is present.
+- Creates a deterministic `boost_<sessionId>` fulfillment marker.
+- Applies boost state and marker atomically in a Firestore transaction.
+- For Instant Match tier, creates the match with stable ID `im_<sessionId>`, links it to the job, and writes its own deterministic fulfillment marker in the same transaction.
+- Uses the actual Stripe session amount in minor units for the Instant Match record rather than the previous hardcoded £2.99 fallback.
+- Public job card is treated as a retryable projection written after the authoritative transaction. A failed projection causes webhook retry; the deterministic markers prevent repeating the underlying boost/match state changes.
+
+### Commit
+
+- `3a43ead8d2c8e1797c23353a86d1c8da423ee9d9` — make boost webhook fulfillment transactional and replay safe.
+
+### Remaining checks
+
+- Confirm the canonical job ownership field is `homeownerId` for all boost-eligible job types.
+- Verify the checkout resolver's expected price for each boost tier and compare the Stripe session amount to the authoritative intent/product amount (the outer intent gate currently compares against the stored intent).
+- Confirm retry behaviour when public-card projection fails and when a second Stripe event references the same Checkout Session.
+- Subscription, video-pro and exclusive-leads entitlement writes remain non-transactional and lack deterministic product fulfillment markers; audit these next.
+- Mock checkout branch still has separate mock fulfilment logic and must be checked for deterministic IDs and parity; it is not Stripe webhook processing.
+- No TypeScript, lint, build, emulator or Stripe test-mode tests run.
+
+**Status:** committed to integration only; not production verified.
