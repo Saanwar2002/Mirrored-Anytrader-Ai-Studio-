@@ -174,7 +174,9 @@ export default function GothamHousingPortal() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token,
+            "Idempotency-Key": crypto.randomUUID()
+          }` } : {})
         },
         body: JSON.stringify({
           userId: user.uid,
