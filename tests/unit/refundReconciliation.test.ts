@@ -152,6 +152,23 @@ describe("refund reconciliation", () => {
     })).rejects.toThrow(ConflictError);
   });
 
+
+  it("does not accept taxi ride or direct-payout ledger entries in the AnyTrader refund path", async () => {
+    for (const type of ["RIDE_PAYMENT", "DIRECT_PAYOUT"]) {
+      const db = createMemoryDb({
+        "payment_ledger/ledg_original": { ...original, type },
+      });
+      await expect(recordConfirmedRefund(db, {
+        refundId: `re_taxi_${type.toLowerCase()}`,
+        chargeId: "ch_taxi",
+        paymentIntentId: "pi_original",
+        originalLedgerEntryId: "ledg_original",
+        amountPence: 1000,
+        currency: "gbp",
+      })).rejects.toThrow(ConflictError);
+    }
+  });
+
   it("rejects invalid minor-unit refund amounts", async () => {
     const db = createMemoryDb({ "payment_ledger/ledg_original": original });
     await expect(recordConfirmedRefund(db, {
