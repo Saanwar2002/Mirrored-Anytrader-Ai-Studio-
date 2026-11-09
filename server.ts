@@ -1846,16 +1846,44 @@ async function startServer() {
                 });
               }
             } else if (meta?.type === 'mediation_stake' && meta?.jobId && db) {
-              await db.collection("jobs").doc(meta.jobId).update({
-                status: "disputed",
-                "dispute.status": "pending_arbitration",
-                "dispute.mediationStakePaid": true,
-                "dispute.mediationStakeAmount": 25.00,
-                "dispute.stakePaymentId": session.id,
-                "dispute.paidAt": admin.firestore.FieldValue.serverTimestamp(),
-                disputeReason: meta.disputeReason || "Unspecified",
-                technicalFaultReport: meta.technicalFaultReport || "Unspecified",
-                disputedAt: admin.firestore.FieldValue.serverTimestamp()
+              const mediationJobRef = db.collection("jobs").doc(meta.jobId);
+              const mediationFulfillmentRef = db.collection("stripe_fulfillments").doc(`mediation_stake_${session.id}`);
+              await db.runTransaction(async (tx: any) => {
+                const [jobSnap, fulfillmentSnap] = await Promise.all([
+                  tx.get(mediationJobRef), tx.get(mediationFulfillmentRef)
+                ]);
+                if (!jobSnap.exists) throw new Error("Mediation stake job does not exist.");
+                if (fulfillmentSnap.exists) return;
+                const jobData = jobSnap.data() || {};
+                const dispute = jobData.dispute || {};
+                if (dispute.stakePaymentId && dispute.stakePaymentId !== session.id) {
+                  throw new Error("Mediation stake is already bound to a different Checkout Session.");
+                }
+                if (dispute.mediationStakePaid && dispute.stakePaymentId !== session.id) {
+                  throw new Error("Mediation stake is already marked paid; manual reconciliation required.");
+                }
+                tx.update(mediationJobRef, {
+                  status: "disputed",
+                  "dispute.status": "pending_arbitration",
+                  "dispute.mediationStakePaid": true,
+                  "dispute.mediationStakeAmount": Number(session.amount_total || 0) / 100,
+                  "dispute.stakePaymentId": session.id,
+                  "dispute.paidAt": dispute.paidAt || admin.firestore.FieldValue.serverTimestamp(),
+                  disputeReason: meta.disputeReason || "Unspecified",
+                  technicalFaultReport: meta.technicalFaultReport || "Unspecified",
+                  disputedAt: jobData.disputedAt || admin.firestore.FieldValue.serverTimestamp()
+                });
+                tx.create(mediationFulfillmentRef, {
+                  eventId: event.id,
+                  sessionId: session.id,
+                  intentId: session.metadata?.intentId || null,
+                  userId,
+                  jobId: meta.jobId,
+                  amount: Number(session.amount_total || 0),
+                  currency: session.currency || "gbp",
+                  type: "mediation_stake",
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
               });
             }
             if (meta?.type === 'boost' && meta?.jobId && db) {
@@ -2029,14 +2057,36 @@ async function startServer() {
               
               if (driverId && amount > 0) {
                 const driverRef = db.collection("users").doc(driverId);
-                const driverDoc = await driverRef.get();
-                const currentPending = Number(driverDoc.data()?.pendingPlatformFees || 0);
-                const newPending = Math.max(0, Number((currentPending - amount).toFixed(2)));
-                await driverRef.update({
-                  pendingPlatformFees: newPending,
-                  lastFeeSettlementAt: admin.firestore.FieldValue.serverTimestamp()
+                const settlementRef = db.collection("stripe_fulfillments").doc(`fee_settlement_${session.id}`);
+                let remainingPending = 0;
+                await db.runTransaction(async (tx: any) => {
+                  const [driverSnap, settlementSnap] = await Promise.all([
+                    tx.get(driverRef), tx.get(settlementRef)
+                  ]);
+                  if (!driverSnap.exists) throw new Error("Fee settlement driver does not exist.");
+                  if (settlementSnap.exists) {
+                    remainingPending = Number(driverSnap.data()?.pendingPlatformFees || 0);
+                    return;
+                  }
+                  const currentPending = Number(driverSnap.data()?.pendingPlatformFees || 0);
+                  const newPending = Math.max(0, Number((currentPending - amount).toFixed(2)));
+                  tx.update(driverRef, {
+                    pendingPlatformFees: newPending,
+                    lastFeeSettlementAt: admin.firestore.FieldValue.serverTimestamp()
+                  });
+                  tx.create(settlementRef, {
+                    eventId: event.id,
+                    sessionId: session.id,
+                    intentId: session.metadata?.intentId || null,
+                    driverId,
+                    amountPence: Number(session.amount_total),
+                    currency: session.currency || "gbp",
+                    type: "fee_settlement",
+                    createdAt: admin.firestore.FieldValue.serverTimestamp()
+                  });
+                  remainingPending = newPending;
                 });
-                console.log(`Driver ${driverId} settled £${amount} in platform fees (remaining pending: £${newPending})`);
+                console.log(`Driver ${driverId} settled £${amount} in platform fees (remaining pending: £${remainingPending})`);
               }
             } else if (meta?.type === 'taxi_trip' && meta?.rideId && db) {
               const rideId = String(meta.rideId);
