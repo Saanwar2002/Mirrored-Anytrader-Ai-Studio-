@@ -558,3 +558,27 @@ Reviewed the integration branch's existing test `94. PL-08` in `tests/unit/fireb
 This is substantially aligned with the integration invitation rule and means these cases should not be duplicated blindly. The test currently does **not visibly assert** recipient acceptance of an already accepted/revoked/expired invitation, recipient deletion denial, or inviter creation/deletion behavior. Add only the missing lifecycle cases if the product contract confirms the expected semantics. The existing inviter update is intentionally broad in the rule and test; treat that as a separate authorization design question rather than silently narrowing it during reconciliation.
 
 **Validation status:** source/test review only; Firebase emulator execution has not been performed in this continuation. The normalized GitHub rules comparison and test mapping are now documented; ZIP rules comparison and actual emulator run remain outstanding.
+
+
+## 19. ZIP backup rules and invitation test comparison (2026-11-09)
+
+The backup ZIP was materialized and inspected locally (705 archive entries; root `firestore.rules` and `tests/unit/firebaseEmulatorSecurityRules.test.ts` present).
+
+### ZIP rules finding
+
+The ZIP invitation block is the older permissive form:
+- `get/list` accepts a token email without requiring `email_verified == true`, and includes `resource == null` access;
+- recipient update is not constrained to pending→accepted or to a field allowlist;
+- inviter/admin management paths remain.
+
+This confirms integration's invitation hardening is not present in the ZIP snapshot. The ZIP must not overwrite the integration rules file wholesale.
+
+### ZIP test suite
+
+The ZIP security test file is present (103,911 characters); integration's version has 2,835 lines and the invitation test 94 (PL-08). A complete ZIP-to-integration test-file diff has not yet been produced, so do not claim that all other security tests are equivalent. The ZIP is a snapshot rather than a Git revision; comparisons must be file/content based.
+
+### Reconciliation disposition
+
+- **Keep integration `firestore.rules`**; do not restore ZIP's permissive invitation block.
+- Preserve the ZIP as evidence of AI Studio-era state and continue reconciling its non-rules source files by targeted path/content diffs.
+- The rules review is now sufficient to move to package/CI inventory, while emulator execution remains a separate validation gate.
