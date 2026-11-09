@@ -1618,3 +1618,12 @@ Follow-up comparison against the existing changelog and product schema revealed 
 These fields were found in the repository's historic product documentation/schema references; their consumers still need a full code search and runtime verification.
 
 **Verification:** static diff only. No tests/build/lint or Stripe test mode. No main/AI Studio/deployment changes.
+
+
+## 49. Correct Stripe cancellation period-end persistence (2026-11-09)
+
+The cancellation endpoint already separated Gotham and Gold Driver subscription IDs and initially wrote product-specific period-end fields. However, after Stripe returned the authoritative subscription object, the shared branch updated only generic `currentPeriodEnd` for both products, leaving `gothamCurrentPeriodEnd` / `driverCurrentPeriodEnd` at their previous or estimated values.
+
+Fixed the Stripe-success path so Gotham and Gold Driver now persist Stripe's returned `current_period_end` into both their product-specific period-end field and the generic compatibility field. This prevents the UI/product-specific record from retaining a fabricated 30-day estimate after a successful Stripe cancellation update.
+
+**Verification:** static source edit only; no tests/build/lint or Stripe test mode. The mock/no-Stripe fallback still uses the existing 30-day estimate and remains a known issue. No main/AI Studio/deployment changes.
