@@ -1279,3 +1279,32 @@ These require per-product idempotency markers and atomicity for Firestore-only w
 ### Verification
 
 Static inspection only. No test, lint, build, Firestore emulator or Stripe test-mode run was performed. Add webhook regression tests that simulate a failure after each side effect and then replay the same event before deploying.
+
+
+## 39. Milestone-funding webhook retry safety (2026-11-09)
+
+Implemented a focused improvement to the `milestone_funding` Stripe webhook branch.
+
+### Changes
+
+- Rejects a payment fulfillment event if the referenced milestone does not exist on the referenced quote.
+- Uses a deterministic fulfillment marker keyed by Checkout Session ID.
+- Transactionally reads the latest quote and marker, validates the current milestone state, updates the milestone to funded, and creates the marker together.
+- If a milestone is already funded by a different PaymentIntent, stops and requires manual reconciliation rather than silently overwriting its payment binding.
+- Replayed events for the same Checkout Session do not repeat the quote state transition.
+- Replaces auto-ID notification creation with a deterministic notification document keyed by Checkout Session ID, preventing duplicate trader notifications.
+- Existing ledger recording and domain-event dispatch remain in the flow and must retain their own idempotency guarantees.
+
+### Commit
+
+- `4382d0bdf38307d31938ace25fba2b77d8921c54` — make milestone funding webhook state and notifications idempotent.
+
+### Limitations / verification required
+
+- The fulfillment marker, quote update and deterministic notification are separate operations: notification creation occurs after the transaction. If notification creation fails, replay currently attempts it again, which is desirable; the duplicate is suppressed by deterministic document ID.
+- The ledger and domain event are still separate side effects. Confirm `PaymentLedgerEngine.recordEscrowFunding` deduplicates by its supplied idempotency key and confirm `domainEvents.dispatch` persists/deduplicates the supplied `webhook_<eventId>` key.
+- Validate the actual pricing resolver amount for milestone funding. Current guard rejects underpayment when expected milestone value is known, but does not reject overpayment and may not account for any separately-authorized platform fee. Do not change this until the checkout contract is confirmed.
+- Confirm quote ownership/trader binding is consistent with the authoritative payment intent metadata and quote record; current outer webhook gate binds the intent user to Stripe `client_reference_id`, while this branch uses quote `tradespersonId`.
+- No tests, TypeScript, lint, build, Firestore emulator or Stripe test-mode verification have been run.
+
+**Status:** implementation committed on integration only; do not deploy or merge until the payment amount contract and ledger/domain-event replay semantics are tested.
