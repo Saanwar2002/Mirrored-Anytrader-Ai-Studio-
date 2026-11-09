@@ -1747,10 +1747,12 @@ async function startServer() {
         const userId = session.client_reference_id;
           
           let meta = session.metadata || {};
+          let checkoutIntentRecord: any = null;
           if (session.metadata?.intentId && db) {
             const intentDoc = await db.collection("payment_intents").doc(session.metadata.intentId).get();
             if (intentDoc.exists) {
-               meta = intentDoc.data()?.metadata || {};
+               checkoutIntentRecord = intentDoc.data() || null;
+               meta = checkoutIntentRecord?.metadata || {};
                // Mark intent as fulfilled
                await intentDoc.ref.update({ status: 'completed', completedAt: admin.firestore.FieldValue.serverTimestamp(), paymentIntentId: session.payment_intent });
             } else {
@@ -1865,21 +1867,54 @@ async function startServer() {
               }
 
               if (isIM) {
-                 // A Stripe delivery can be retried after partial processing. Use the
-                 // Checkout Session ID as a stable match key and atomically create the
-                 // match plus job pointer so retries cannot create duplicate matches.
+                 // Persist the paid Instant Match and its refundable original ledger
+                 // entry atomically. The amount must match the server-created checkout
+                 // intent; never infer it from a client payload or a display default.
+                 const paymentIntentId = typeof session.payment_intent === "string"
+                   ? session.payment_intent
+                   : (session.payment_intent as any)?.id || null;
+                 const amountPence = Number(session.amount_total);
+                 const expectedAmountPence = Number(checkoutIntentRecord?.amount);
+                 if (!paymentIntentId || !userId || !checkoutIntentRecord ||
+                     checkoutIntentRecord.userId !== userId ||
+                     checkoutIntentRecord.mode !== "payment" ||
+                     !Number.isSafeInteger(amountPence) || amountPence <= 0 ||
+                     !Number.isSafeInteger(expectedAmountPence) || amountPence !== expectedAmountPence ||
+                     String(session.currency || "").toLowerCase() !== "gbp" ||
+                     checkoutIntentRecord.metadata?.type !== "boost" ||
+                     checkoutIntentRecord.metadata?.tier !== "instant_match" ||
+                     checkoutIntentRecord.metadata?.jobId !== meta.jobId) {
+                   throw new Error("Instant Match payment failed authoritative checkout intent, amount, currency, or PaymentIntent validation");
+                 }
+
+                 // Checkout Session ID is the stable aggregate key across webhook retries.
                  const matchRef = db.collection("instant_matches").doc(session.id);
                  const jobRef = db.collection("jobs").doc(meta.jobId);
+                 const ledgerEntryId = `ledg_instant_match_${session.id}`;
+                 const ledgerRef = db.collection("payment_ledger").doc(ledgerEntryId);
                  const createdOrAlreadyLinked = await db.runTransaction(async (tx: any) => {
-                   const [matchSnap, jobSnap] = await Promise.all([tx.get(matchRef), tx.get(jobRef)]);
+                   const [matchSnap, jobSnap, ledgerSnap] = await Promise.all([
+                     tx.get(matchRef), tx.get(jobRef), tx.get(ledgerRef)
+                   ]);
                    const linkedMatchId = jobSnap.data()?.instantMatchId;
                    if (linkedMatchId && linkedMatchId !== matchRef.id) return false;
-                   if (!matchSnap.exists) {
+
+                   if (matchSnap.exists) {
+                     const existingMatch = matchSnap.data() || {};
+                     if (existingMatch.stripePaymentIntentId !== paymentIntentId ||
+                         existingMatch.chargeAmountPence !== amountPence ||
+                         existingMatch.customerId !== userId ||
+                         existingMatch.jobId !== meta.jobId) {
+                       throw new Error("Instant Match session conflicts with its existing payment record");
+                     }
+                   } else {
                      tx.create(matchRef, {
                        id: matchRef.id,
                        jobId: meta.jobId,
-                       customerId: userId || "",
-                       chargeAmountPence: session.amount_total || 299,
+                       customerId: userId,
+                       stripePaymentIntentId: paymentIntentId,
+                       chargeAmountPence: amountPence,
+                       currency: "gbp",
                        chargeTier: "instant_match",
                        feeWaived: false,
                        status: "searching",
@@ -1888,6 +1923,35 @@ async function startServer() {
                        searchingAt: admin.firestore.FieldValue.serverTimestamp()
                      });
                    }
+
+                   if (ledgerSnap.exists) {
+                     const existingLedger = ledgerSnap.data() || {};
+                     if (existingLedger.transactionId !== paymentIntentId ||
+                         existingLedger.amount !== amountPence ||
+                         existingLedger.payerId !== userId ||
+                         existingLedger.type !== "PLATFORM_COMMISSION" ||
+                         existingLedger.currency !== "gbp") {
+                       throw new Error("Instant Match original payment ledger entry conflicts with its Checkout Session");
+                     }
+                   } else {
+                     tx.create(ledgerRef, {
+                       entryId: ledgerEntryId,
+                       transactionId: paymentIntentId,
+                       idempotencyKey: `instant_match_checkout_${session.id}`,
+                       payerId: userId,
+                       payeeId: "platform",
+                       amount: amountPence,
+                       platformFee: amountPence,
+                       netPayout: 0,
+                       currency: "gbp",
+                       type: "PLATFORM_COMMISSION",
+                       status: "completed",
+                       createdAt: new Date().toISOString(),
+                       source: "instant_match",
+                       checkoutSessionId: session.id
+                     });
+                   }
+
                    tx.set(jobRef, {
                      instantMatchId: matchRef.id,
                      matchedViaInstantMatch: true
@@ -1896,6 +1960,17 @@ async function startServer() {
                  });
                  if (!createdOrAlreadyLinked) {
                    console.error(`[Security Alert] Instant-match checkout ${session.id} did not replace existing job match ${meta.jobId}.`);
+                   await db.collection("refund_review").doc(`instant_match_${session.id}`).set({
+                     checkoutSessionId: session.id,
+                     paymentIntentId,
+                     jobId: meta.jobId,
+                     customerId: userId,
+                     amountPence,
+                     currency: "gbp",
+                     reason: "instant_match_job_already_linked_to_another_match",
+                     status: "requires_review",
+                     updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                   }, { merge: true });
                  }
               }
             } else if (meta?.type === 'milestone_funding' && meta?.jobId && meta?.quoteId && meta?.milestoneId && db) {
