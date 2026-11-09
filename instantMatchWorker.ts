@@ -1,5 +1,6 @@
 import admin from 'firebase-admin';
 import Stripe from 'stripe';
+import { reserveRefundOperation } from "./src/server/refundReconciliation.ts";
 
 let stripeClient: Stripe | null = null;
 function getStripeClient(): Stripe | null {
@@ -96,20 +97,8 @@ export function startInstantMatchEngine(db: admin.firestore.Firestore) {
                     status: "expired",
                     expiredAt: now.toISOString()
                   });
-                  // Refund customer
-                  if (match?.stripePaymentIntentId) {
-                     try {
-                         const stripe = getStripeClient();
-                         if (stripe) {
-                           await stripe.refunds.create({
-                             payment_intent: match.stripePaymentIntentId,
-                             reason: 'requested_by_customer'
-                           });
-                         }
-                     } catch (err) {
-                         console.error("Failed to refund instant match:", err);
-                     }
-                  }
+                  // Both timeout mechanisms use one stable refund operation and Stripe key.
+                  await refundExpiredInstantMatch(db, matchDoc.ref, match);
                 } else {
                   await initiateNextAttempt(db, matchDoc.ref, match, nextAttemptNum);
                 }
@@ -164,19 +153,8 @@ export function startInstantMatchEngine(db: admin.firestore.Firestore) {
                 status: "expired",
                 expiredAt: new Date().toISOString()
              });
-             if (matchDoc.data()?.stripePaymentIntentId) {
-                try {
-                    const stripe = getStripeClient();
-                    if (stripe) {
-                      await stripe.refunds.create({
-                        payment_intent: matchDoc.data()?.stripePaymentIntentId,
-                        reason: 'requested_by_customer'
-                      });
-                    }
-                } catch (err) {
-                    console.error("Failed to refund instant match:", err);
-                }
-             }
+             // Both timeout mechanisms use one stable refund operation and Stripe key.
+             await refundExpiredInstantMatch(db, matchDoc.ref, matchDoc.data());
           } else {
              await initiateNextAttempt(db, matchDoc.ref, matchDoc.data(), nextAttemptNum);
           }
@@ -194,6 +172,87 @@ export function startInstantMatchEngine(db: admin.firestore.Firestore) {
     matchesUnsubscribe();
     clearInterval(timeoutCheckInterval);
   };
+}
+
+
+/**
+ * Initiates the one full refund for an expired Instant Match.
+ * A deterministic operation ID and Stripe idempotency key make both timeout
+ * mechanisms and worker restarts converge on the same Stripe refund.
+ */
+async function refundExpiredInstantMatch(
+  db: admin.firestore.Firestore,
+  matchRef: admin.firestore.DocumentReference,
+  match: any
+): Promise<void> {
+  const paymentIntentId = match?.stripePaymentIntentId;
+  const amountPence = Number(match?.chargeAmountPence);
+  const currency = String(match?.currency || "gbp").toLowerCase();
+
+  if (typeof paymentIntentId !== "string" || !paymentIntentId ||
+      !Number.isSafeInteger(amountPence) || amountPence <= 0 || currency !== "gbp") {
+    await db.collection("refund_review").doc(`instant_match_${matchRef.id}`).set({
+      instantMatchId: matchRef.id,
+      paymentIntentId: paymentIntentId || null,
+      amountPence: Number.isSafeInteger(amountPence) ? amountPence : null,
+      currency,
+      reason: "instant_match_missing_valid_payment_intent_amount_or_currency",
+      status: "requires_review",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return;
+  }
+
+  const stripe = getStripeClient();
+  if (!stripe) {
+    throw new Error("Stripe client is unavailable; Instant Match refund will be retried.");
+  }
+
+  const operationId = `instant_match_${matchRef.id}`;
+  const reservation = await reserveRefundOperation(db, {
+    operationId,
+    paymentIntentId,
+    requestedAmountPence: amountPence,
+    currency
+  });
+
+  if (reservation.operation.status === "succeeded") return;
+
+  try {
+    const refund = await stripe.refunds.create({
+      payment_intent: paymentIntentId,
+      amount: amountPence,
+      reason: "requested_by_customer",
+      metadata: {
+        instantMatchId: matchRef.id,
+        refundOperationId: operationId
+      }
+    }, {
+      idempotencyKey: reservation.operation.idempotencyKey
+    });
+
+    await db.collection("refund_operations").doc(operationId).set({
+      status: "submitted",
+      stripeRefundId: refund.id,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    await matchRef.set({
+      refundOperationId: operationId,
+      stripeRefundId: refund.id,
+      refundStatus: refund.status || "pending",
+      refundSubmittedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  } catch (error: any) {
+    // Keep the reservation and deterministic key. A retry after an ambiguous
+    // network failure will ask Stripe for the same operation, not a new refund.
+    await db.collection("refund_operations").doc(operationId).set({
+      status: "failed",
+      lastError: error?.message || String(error),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    throw error;
+  }
 }
 
 async function initiateNextAttempt(db: admin.firestore.Firestore, matchRef: admin.firestore.DocumentReference, match: any, attemptNumber: number) {
