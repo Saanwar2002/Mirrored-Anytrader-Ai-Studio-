@@ -178,4 +178,24 @@ describe("mediation stake transaction commands", () => {
     expect(db._store["jobs/job-1"].dispute.paymentIntentId).toBe("pi-canonical");
   });
 
+  it("accepts a verified success webhook that arrives before route attachment", async () => {
+    const db = createTransactionalDb({
+      "jobs/job-1": {
+        ...seedJob,
+        dispute: { ...seedJob.dispute, raisedBy: "owner-1", stakePaymentAttemptId: "attempt-a", stakePaymentStatus: "creating" }
+      }
+    });
+    await confirmMediationStakePayment(db, {
+      jobId: "job-1", userId: "owner-1", attemptId: "attempt-a",
+      paymentIntentId: "pi-early-success", serverTimestamp: timestamp
+    });
+    await attachMediationStakePaymentIntent(db, {
+      jobId: "job-1", attemptId: "attempt-a", paymentIntentId: "pi-early-success", paymentIntentStatus: "succeeded"
+    });
+    const dispute = db._store["jobs/job-1"].dispute;
+    expect(dispute.paymentIntentId).toBe("pi-early-success");
+    expect(dispute.stakePaymentStatus).toBe("succeeded");
+    expect(dispute.mediationStakePaid).toBe(true);
+  });
+
 });
