@@ -2881,6 +2881,11 @@ async function startServer() {
         }
         const job = snap.data() || {};
         const dispute = job.dispute || {};
+        if (job.status !== "disputed") {
+          const error: any = new Error("Mediation stake can only be paid for a disputed job");
+          error.httpStatus = 409;
+          throw error;
+        }
         const ownerId = job.homeownerId || job.userId || job.ownerId || job.customerId;
         const traderId = job.tradespersonId || job.acceptedTradespersonId || job.assignedTradespersonId || job.traderId;
         if (authUid !== ownerId && authUid !== traderId) {
@@ -2896,6 +2901,11 @@ async function startServer() {
         }
 
         if (dispute.stakePaymentAttemptId) {
+          if (dispute.raisedBy !== authUid) {
+            const error: any = new Error("Only the participant who initiated this mediation payment can retry it");
+            error.httpStatus = 403;
+            throw error;
+          }
           attemptId = String(dispute.stakePaymentAttemptId);
           existingPaymentIntentId = String(dispute.paymentIntentId || "");
         } else {
