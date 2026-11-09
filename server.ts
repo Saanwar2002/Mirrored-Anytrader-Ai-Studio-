@@ -1951,20 +1951,45 @@ async function startServer() {
                 throw new Error("Stripe PaymentIntent ID is required in production webhook event");
               }
 
-              const updatedMilestones = milestones.map((m: any) => {
-                if (m.id === milestoneId) {
-                  try {
-                    validateMilestoneTransition(m.status || 'pending', 'funded');
-                  } catch (stateErr) {
-                    console.warn(`Milestone transition warning on ${m.id}:`, stateErr);
-                  }
-                  fundedAmount = Number(m.amount || m.verifiedAmount || (session.amount_total ? session.amount_total / 100 : 0));
-                  return { ...m, status: 'funded', fundedAt: new Date().toISOString(), stripePaymentIntentId: paymentIntentId };
+              if (!targetMilestone) {
+                throw new Error(`Milestone ${milestoneId} does not exist on quote ${quoteId}; refusing to record payment.`);
+              }
+              fundedAmount = Number(targetMilestone.amount || targetMilestone.verifiedAmount || (session.amount_total ? session.amount_total / 100 : 0));
+              const milestoneFulfillmentRef = db.collection("stripe_fulfillments").doc(`milestone_funding_${session.id}`);
+              await db.runTransaction(async (tx: any) => {
+                const [freshQuote, existingFulfillment] = await Promise.all([
+                  tx.get(quoteRef),
+                  tx.get(milestoneFulfillmentRef)
+                ]);
+                if (!freshQuote.exists) throw new Error("Milestone quote disappeared during payment fulfillment.");
+                if (existingFulfillment.exists) return;
+                const freshData = freshQuote.data() || {};
+                const freshMilestones = freshData.milestones || [];
+                const freshTarget = freshMilestones.find((m: any) => m.id === milestoneId);
+                if (!freshTarget) throw new Error("Target milestone no longer exists.");
+                if (freshTarget.status === "funded" && freshTarget.stripePaymentIntentId && freshTarget.stripePaymentIntentId !== paymentIntentId) {
+                  throw new Error("Milestone is already funded by a different payment; manual reconciliation required.");
                 }
-                return m;
+                if (freshTarget.status !== "funded") {
+                  validateMilestoneTransition(freshTarget.status || "pending", "funded");
+                }
+                const nextMilestones = freshMilestones.map((m: any) => m.id === milestoneId
+                  ? { ...m, status: "funded", fundedAt: m.fundedAt || new Date().toISOString(), stripePaymentIntentId: paymentIntentId }
+                  : m);
+                tx.update(quoteRef, { milestones: nextMilestones });
+                tx.create(milestoneFulfillmentRef, {
+                  eventId: event.id,
+                  sessionId: session.id,
+                  intentId: session.metadata?.intentId || null,
+                  paymentIntentId: paymentIntentId || null,
+                  userId,
+                  jobId,
+                  quoteId,
+                  milestoneId,
+                  type: "milestone_funding",
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
               });
-              
-              await quoteRef.update({ milestones: updatedMilestones });
 
               // Record to immutable payment ledger
               // Enforce robust consistency: do not swallow ledger operations errors!
@@ -1986,14 +2011,16 @@ async function startServer() {
               }, `webhook_${event.id}`, db);
               
               // Notify trader
-              await db.collection("notifications").add({
+              await db.collection("notifications").doc(`milestone_funded_${session.id}`).create({
                 userId: quoteData?.tradespersonId,
                 title: "Milestone Funded! 💰",
-                message: `Homeowner funded "${milestones.find((m: any) => m.id === milestoneId)?.title || 'Milestone'}". You can now start work!`,
+                message: `Homeowner funded "${targetMilestone.title || 'Milestone'}". You can now start work!`,
                 type: "status",
                 link: `/job/${jobId}`,
                 read: false,
                 createdAt: admin.firestore.FieldValue.serverTimestamp()
+              }).catch(async (notificationError: any) => {
+                if (notificationError?.code !== 6 && notificationError?.code !== "already-exists") throw notificationError;
               });
             }
             } else if (meta?.type === 'fee_settlement' && meta?.driverId && db) {
