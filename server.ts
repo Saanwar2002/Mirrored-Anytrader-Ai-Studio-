@@ -1733,19 +1733,43 @@ async function startServer() {
           return res.status(200).json({ received: true, status: 'skipped_unpaid' });
         }
 
-        const userId = session.client_reference_id;
-          
-          let meta = session.metadata || {};
-          if (session.metadata?.intentId && db) {
-            const intentDoc = await db.collection("payment_intents").doc(session.metadata.intentId).get();
-            if (intentDoc.exists) {
-               meta = intentDoc.data()?.metadata || {};
-               // Mark intent as fulfilled
-               await intentDoc.ref.update({ status: 'completed', completedAt: admin.firestore.FieldValue.serverTimestamp(), paymentIntentId: session.payment_intent });
-            } else {
-               console.error("Payment intent not found for intentId:", session.metadata.intentId);
-            }
-          }
+        // Checkout fulfillment must be backed by the exact server-created intent.
+        // Never fall back to Stripe session metadata when the authoritative record is absent.
+        if (!db || !session.metadata?.intentId || !session.client_reference_id) {
+          throw new Error("Checkout fulfillment rejected: authoritative intent or database binding is missing.");
+        }
+        const intentRef = db.collection("payment_intents").doc(session.metadata.intentId);
+        const intentDoc = await intentRef.get();
+        if (!intentDoc.exists) {
+          throw new Error("Checkout fulfillment rejected: payment intent record was not found.");
+        }
+        const intent = intentDoc.data() || {};
+        const sessionCurrency = String(session.currency || "").toLowerCase();
+        const expectedAmount = Number(intent.amount);
+        if (
+          intent.userId !== session.client_reference_id ||
+          intent.checkoutSessionId !== session.id ||
+          intent.mode !== session.mode ||
+          !Number.isSafeInteger(expectedAmount) ||
+          expectedAmount !== Number(session.amount_total) ||
+          String(intent.currency || "").toLowerCase() !== sessionCurrency ||
+          (intent.paymentIntentId && intent.paymentIntentId !== session.payment_intent) ||
+          !["session_created", "processing"].includes(String(intent.status))
+        ) {
+          await intentRef.update({
+            status: "review_required",
+            reviewReason: "checkout_session_intent_binding_mismatch",
+            reviewSessionId: session.id,
+            reviewAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          throw new Error("Checkout fulfillment rejected: Stripe session does not match its authoritative payment intent.");
+        }
+        await intentRef.update({
+          status: "processing",
+          processingStartedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        const userId = intent.userId;
+        const meta = intent.metadata || {};
           
           if ((meta?.isVideoPro === 'true' || meta?.type === 'video_pro_subscription') && userId && db) {
             await db.collection("users").doc(userId).update({
@@ -2121,7 +2145,19 @@ async function startServer() {
          }
       }
       
-      // Mark as completed idempotently
+      // The event is complete only after all fulfillment side effects above have succeeded.
+      if (event.type === 'checkout.session.completed') {
+        const completedSession = event.data.object as Stripe.Checkout.Session;
+        const completedIntentId = completedSession.metadata?.intentId;
+        if (db && completedIntentId) {
+          await db.collection("payment_intents").doc(completedIntentId).update({
+            status: "completed",
+            completedAt: admin.firestore.FieldValue.serverTimestamp(),
+            paymentIntentId: completedSession.payment_intent || null
+          });
+        }
+      }
+      // Mark as completed idempotently only after fulfillment and intent finalization.
       await eventRef.update({ status: 'completed' });
       res.status(200).json({ received: true });
     } catch (err: any) {
