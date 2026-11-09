@@ -2333,6 +2333,9 @@ async function startServer() {
                  originalLedgerEntryId: originalDoc.id,
                  amountPence: refund.amount,
                  currency: refund.currency,
+                 operationId: typeof refund.metadata?.refundOperationId === "string" && refund.metadata.refundOperationId
+                   ? refund.metadata.refundOperationId
+                   : undefined,
                  reason: refund.reason || null
                });
                console.log(`[Webhook] Refund ${refund.id} reconciled to ledger entry ${result.entry.entryId}`);
