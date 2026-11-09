@@ -616,3 +616,42 @@ Integration `DEVELOPMENT.md` contains newer operational fixes and CI claims (inc
 ### Current gate status
 
 This was a source/configuration review only. No npm install, emulator, Vitest, TypeScript, build, or release audit was executed in this session. Continue next by comparing ZIP `package.json`, workflow and development guide, then reconcile PR #2/#5 source and tests.
+
+
+## 21. PR #5 refund/domain-event and PR #2 pricing patch review (2026-11-09)
+
+Reviewed individual changed-file patches (source review only; no code port or tests executed).
+
+### Refund reconciliation module (PR #5)
+
+- PR #5 introduces `src/server/refundReconciliation.ts`; this module is absent from integration at this path, so this is a new capability, not a direct replacement.
+- It reserves `refund_operations/{operationId}` before Stripe I/O, binds payment intent/amount/currency/idempotency key, and records confirmed refunds under Stripe refund ID plus immutable `payment_ledger` outflow entries.
+- It maintains a transactionally updated `payment_refund_totals` aggregate to bound cumulative refunds and can mark a reserved operation succeeded on confirmation.
+- **Replay integrity gap to fix before adoption:** when `refund_records/{refundId}` already exists, its replay comparison must bind all immutable identity fields, especially Stripe charge ID, currency, original ledger entry, and operation ID (where supplied). Refund ID alone is not sufficient proof that a repeated webhook is identical. Add mismatch tests for each field.
+- **Operation lifecycle concern:** worker errors mark a reservation failed even when Stripe's response may be ambiguous. The stable idempotency key is retained (good), but recovery must retry/reconcile the same operation rather than mint a new operation or assume failure means no refund.
+- Review Firestore transaction read-before-write ordering and ensure the operation/refund/aggregate writes remain atomic in production adapters.
+
+### PR #5 Instant Match worker / webhook coupling
+
+- Worker adds durable refund reservation and a common refund path for timeout and no-more-traders expiration. Port only together with webhook reconciliation and its tests; isolated worker changes would create unmatched states.
+- Worker protects a webhook-confirmed `succeeded` operation from being downgraded to `submitted`; preserve this race protection.
+- Confirm webhook refund object amount is the individual refund amount, not cumulative `charge.amount_refunded`; account for charge refund pagination (`has_more`) and send incomplete cases to durable review/recovery.
+- Validate unique completed original ledger entry by payment intent, expected currency and refundable type before writing a reversal. Existing consumers must understand `REFUND` outflows and avoid double-counting original plus reversal.
+- Add/confirm tests for duplicate refund webhook, two partial refunds, over-refund race, ambiguous Stripe timeout/retry, mismatched charge/currency/original, and `has_more` pagination.
+
+### PR #5 domain event idempotency
+
+- Correlated event IDs become deterministic from event type + aggregate + correlation ID; transactionally stored once, and correlated persistence errors propagate.
+- **Critical delivery caveat:** the patch returns early when a correlated event already exists, preventing handler re-execution. If the first handler failed after event persistence, retries can permanently skip the handler. Do not adopt this as end-to-end exactly-once delivery. Prefer an outbox/handler status (pending/processing/completed with retry/lease) or prove handlers are transactionally coupled and idempotent. Event persistence and downstream effects need explicit recovery semantics.
+
+### PR #2 pricing/membership safeguards
+
+- Explicit `priceId` membership selection takes precedence over conflicting client tier metadata; legacy metadata tier selection is removed from landlord/driver-gold branch selection.
+- Membership Stripe metadata is generated server-side only (tierName/tier/subscriptionType/userId); caller metadata is no longer spread into entitlement metadata. Preserve this security boundary and add assertions for spoofed `tier`, `subscriptionType`, and `userId`.
+- Video Pro resolution is constrained so explicit membership selection does not get overridden by metadata flags.
+- PR #2 also changes Stripe webhook unavailable dependencies from 2xx acknowledgement to retryable 503. This is important to avoid silently dropping payment fulfillment; reconcile with PR #5's webhook retry/claim logic rather than cherry-picking the hunk.
+- PR #2 adds task-queue singleton reset in Task 25 emulator `beforeEach`; verify `clear()` and `setFirestoreDb()` are valid and do not mask production state behavior.
+
+### Port status and acceptance gate
+
+No PR #2/#5 financial implementation has been ported to integration in this review. Before adoption, produce a file-level merge matrix and then implement focused changes with regression tests. Minimum acceptance: replay identity mismatch tests; concurrent cumulative refund limit; refund event replay and pagination/review; Instant Match refund retry/recovery; authoritative membership metadata spoof tests; task-queue emulator isolation; domain-event handler failure recovery; and full CI/Actions validation. Main remains unchanged until those gates pass.
