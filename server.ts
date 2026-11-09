@@ -1842,6 +1842,10 @@ async function startServer() {
                 driverSubscriptionId: subscriptionId,
                 driverSubscriptionStatus: "active",
                 commissionRate: 0.10,
+                destinationFilters: 4,
+                advanceBookingDays: 14,
+                priorityDispatch: 50,
+                driverCancelAtPeriodEnd: false,
                 driverSubscribedAt: current.driverSubscribedAt || new Date().toISOString(),
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
               });
@@ -1868,11 +1872,15 @@ async function startServer() {
               }
               tx.update(userRef, {
                 isGothamSubscriber: true,
+                subscriptionType: "gotham_saas",
+                tier: "gotham",
+                tierId: gothamTierName,
                 gothamSubscriptionId: subscriptionId,
                 gothamSubscriptionStatus: "active",
                 gothamDoorsCount: doorsCount,
                 gothamTierName,
                 gothamBillingCycle: billingCycle,
+                gothamCancelAtPeriodEnd: false,
                 gothamSubscribedAt: current.gothamSubscribedAt || new Date().toISOString(),
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
               });
