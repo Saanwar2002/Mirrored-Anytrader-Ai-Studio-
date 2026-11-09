@@ -582,3 +582,37 @@ The ZIP security test file is present (103,911 characters); integration's versio
 - **Keep integration `firestore.rules`**; do not restore ZIP's permissive invitation block.
 - Preserve the ZIP as evidence of AI Studio-era state and continue reconciling its non-rules source files by targeted path/content diffs.
 - The rules review is now sufficient to move to package/CI inventory, while emulator execution remains a separate validation gate.
+
+
+## 20. Integration package scripts and CI release gate inventory (2026-11-09)
+
+Reviewed integration `package.json`, `.github/workflows/ci.yml`, and `DEVELOPMENT.md`.
+
+### CI workflow sequence
+
+The integration CI gate is configured to:
+1. install via `npm ci --legacy-peer-deps` (Node 22, Java 21);
+2. run `npm run test:security-rules` (Firestore/Storage emulator-backed rules and concurrency suites);
+3. run `npm test` (Vitest suite with emulator-only suites excluded);
+4. run `npm run lint` (`tsc --noEmit`);
+5. run production `npm run build`;
+6. run `npm run audit:release`.
+
+Push triggers include main/master/integration branches; PR triggers include main/master/integration. This is a sensible release gate, but its actual pass/fail must be read from the relevant Actions run, not inferred from workflow configuration.
+
+### Package script observations
+
+- The ordinary `test` script intentionally excludes emulator-dependent tests; CI separately invokes `test:security-rules`.
+- `test:security-rules` includes the comprehensive security suite and many task-specific emulator suites, with `--no-file-parallelism`.
+- `test:emulator-concurrency` is a narrower concurrency gate.
+- The script lists many test paths explicitly. New emulator test files can silently remain outside the gate unless the script is updated; validate the list against the test directory during CI review.
+- `recover` is a developer convenience that checks out three UI files; it is not a reconciliation/sync mechanism and must not be run as part of this branch merge.
+- No package or workflow edits were made in this pass.
+
+### Documentation reconciliation warning
+
+Integration `DEVELOPMENT.md` contains newer operational fixes and CI claims (including invitation/security remediation) than the ZIP snapshot. Preserve these integration entries; merge ZIP-only AI Studio task/PL records additively rather than replacing the guide with the backup copy. Documentation claims of test counts should be cross-checked against Actions logs before being promoted as current validation.
+
+### Current gate status
+
+This was a source/configuration review only. No npm install, emulator, Vitest, TypeScript, build, or release audit was executed in this session. Continue next by comparing ZIP `package.json`, workflow and development guide, then reconcile PR #2/#5 source and tests.
