@@ -1414,3 +1414,39 @@ Reworked the paid `boost` webhook branch.
 - No TypeScript, lint, build, emulator or Stripe test-mode tests run.
 
 **Status:** committed to integration only; not production verified.
+
+
+## 43. Subscription checkout entitlement idempotency (2026-11-09)
+
+Reworked the three subscription entitlement branches in `checkout.session.completed`.
+
+### Video Pro
+- Uses deterministic marker `video_pro_<sessionId>`.
+- Transactionally checks user and marker before granting entitlement.
+- Requires the user record to exist.
+- Refuses to overwrite a different existing Video Pro subscription ID.
+
+### Exclusive Leads
+- Uses deterministic marker `exclusive_leads_<sessionId>`.
+- Transactionally grants the add-on and records the marker.
+- Requires the user record to exist.
+- Refuses to overwrite a different existing Exclusive Leads subscription ID.
+
+### Standard membership tier
+- Requires an actual Stripe Subscription ID for subscription-mode checkout.
+- Uses deterministic marker `membership_<sessionId>`.
+- Transactionally updates membership tier and marker.
+- Refuses to overwrite a different currently active membership subscription.
+- Preserves existing tier classification logic.
+
+### Commit
+- `89ed43c586223b650b0014d172067d64a41f61b1` — make subscription checkout entitlements idempotent.
+
+### Important limitations / next checks
+- This protects Checkout Session fulfilment retries, not the lifecycle webhook events (`customer.subscription.updated`, `deleted`, invoice payment success/failure). Those handlers need event/subscription ordering safeguards and must not let stale events overwrite newer state.
+- Video Pro / Exclusive Leads metadata can currently route before the general `session.mode === 'subscription'` branch. Confirm these products are actually configured as Stripe subscriptions; if they are payment-mode one-offs, storing `session.id` as a subscription ID is a schema/semantic defect and must be corrected with product configuration evidence.
+- A second legitimate subscription for the same user is deliberately rejected when an existing subscription is active; product rules for upgrades, replacements and parallel add-ons must be confirmed.
+- Marker and user write are atomic, but downstream side effects are not included.
+- No TypeScript, lint, build, unit, emulator or Stripe test-mode tests were run.
+
+**Status:** committed on integration only; not production verified.
