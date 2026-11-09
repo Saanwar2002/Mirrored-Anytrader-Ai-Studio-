@@ -1927,20 +1927,28 @@ async function startServer() {
                 throw new Error("Stripe PaymentIntent ID is required in production webhook event");
               }
 
-              const updatedMilestones = milestones.map((m: any) => {
-                if (m.id === milestoneId) {
-                  try {
-                    validateMilestoneTransition(m.status || 'pending', 'funded');
-                  } catch (stateErr) {
-                    console.warn(`Milestone transition warning on ${m.id}:`, stateErr);
+              await db.runTransaction(async (tx: any) => {
+                const currentQuoteSnap = await tx.get(quoteRef);
+                if (!currentQuoteSnap.exists) throw new Error("Milestone quote no longer exists");
+                const currentQuote = currentQuoteSnap.data();
+                const currentMilestones = currentQuote?.milestones || [];
+                const currentMilestone = currentMilestones.find((m: any) => m.id === milestoneId);
+                if (!currentMilestone) throw new Error("Milestone no longer exists on quote");
+                fundedAmount = Number(currentMilestone.amount || currentMilestone.verifiedAmount || (session.amount_total ? session.amount_total / 100 : 0));
+
+                if (currentMilestone.status === "funded") {
+                  if (currentMilestone.stripePaymentIntentId !== paymentIntentId) {
+                    throw new Error("Milestone is already funded by a different PaymentIntent");
                   }
-                  fundedAmount = Number(m.amount || m.verifiedAmount || (session.amount_total ? session.amount_total / 100 : 0));
-                  return { ...m, status: 'funded', fundedAt: new Date().toISOString(), stripePaymentIntentId: paymentIntentId };
+                  return;
                 }
-                return m;
+
+                validateMilestoneTransition(currentMilestone.status || "pending", "funded");
+                const updatedMilestones = currentMilestones.map((m: any) => m.id === milestoneId
+                  ? { ...m, status: "funded", fundedAt: new Date().toISOString(), stripePaymentIntentId: paymentIntentId }
+                  : m);
+                tx.update(quoteRef, { milestones: updatedMilestones });
               });
-              
-              await quoteRef.update({ milestones: updatedMilestones });
 
               // Record to immutable payment ledger
               // Enforce robust consistency: do not swallow ledger operations errors!
@@ -1955,14 +1963,15 @@ async function startServer() {
                 currency: session.currency || "gbp"
               });
 
-              await domainEvents.dispatch("MILESTONE_FUNDED", milestoneId, session.client_reference_id || "homeowner", {
-                jobId,
-                quoteId,
-                amount: fundedAmount
-              }, `webhook_${event.id}`, db);
-              
-              // Notify trader
-              await db.collection("notifications").add({
+              // PaymentLedgerEngine.recordEscrowFunding already dispatches the
+              // correlated MILESTONE_FUNDED event; do not dispatch it a second time.
+
+              // Create one durable trader notification per Checkout Session.
+              const notificationRef = db.collection("notifications").doc(`milestone_funded_${session.id}`);
+              await db.runTransaction(async (tx: any) => {
+                const notificationSnap = await tx.get(notificationRef);
+                if (notificationSnap.exists) return;
+                tx.create(notificationRef, {
                 userId: quoteData?.tradespersonId,
                 title: "Milestone Funded! 💰",
                 message: `Homeowner funded "${milestones.find((m: any) => m.id === milestoneId)?.title || 'Milestone'}". You can now start work!`,
@@ -1970,6 +1979,7 @@ async function startServer() {
                 link: `/job/${jobId}`,
                 read: false,
                 createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
               });
             }
             } else if (meta?.type === 'fee_settlement' && meta?.driverId && db) {
