@@ -152,9 +152,8 @@ export function TraderVideoVerificationCard({ profile, onUpdateProfile, isReadOn
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token,
-            "Idempotency-Key": crypto.randomUUID()
-          }` } : {})
+          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+          "Idempotency-Key": crypto.randomUUID()
         },
         body: JSON.stringify({
           userId: profile.uid,
