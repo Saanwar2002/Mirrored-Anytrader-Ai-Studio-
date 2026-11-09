@@ -2,9 +2,9 @@ name: CI & Security Rules Release Gate
 
 on:
   push:
-    branches: [ main, master, 'integration/**' ]
+    branches: [ main, master, 'integration/**', 'fix/**' ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, 'integration/**' ]
   workflow_dispatch:
 
 jobs:
