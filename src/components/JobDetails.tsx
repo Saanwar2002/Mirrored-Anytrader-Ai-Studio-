@@ -1278,7 +1278,9 @@ const libraries: any[] = ['places', 'geometry'];
       const milestoneAmount = Math.max(1, Math.round(Number(milestone.amount) || 0));
       const response = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json" ,
+            "Idempotency-Key": crypto.randomUUID()
+          },
         body: JSON.stringify({
           userId: user.uid,
           price_data: {
@@ -1456,7 +1458,9 @@ const libraries: any[] = ['places', 'geometry'];
       // 2. Redirect to Stripe
       const res = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json" ,
+            "Idempotency-Key": crypto.randomUUID()
+          },
         body: JSON.stringify({
           price_data: {
             currency: 'gbp',
@@ -3331,7 +3335,9 @@ const libraries: any[] = ['places', 'geometry'];
                     try {
                       const response = await fetch("/api/create-checkout-session", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { "Content-Type": "application/json" ,
+            "Idempotency-Key": crypto.randomUUID()
+          },
                         body: JSON.stringify({
                           userId: user?.uid,
                           price_data: {
