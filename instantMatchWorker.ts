@@ -307,11 +307,17 @@ async function refundExpiredInstantMatch(
   } catch (error: any) {
     // Keep the reservation and deterministic key. A retry after an ambiguous
     // network failure will ask Stripe for the same operation, not a new refund.
-    await db.collection("refund_operations").doc(operationId).set({
-      status: "failed",
-      lastError: error?.message || String(error),
-      updatedAt: new Date().toISOString()
-    }, { merge: true });
+    await db.runTransaction(async (tx: any) => {
+      const operationRef = db.collection("refund_operations").doc(operationId);
+      const operationSnap = await tx.get(operationRef);
+      if (operationSnap.exists && operationSnap.data()?.status !== "succeeded") {
+        tx.set(operationRef, {
+          status: "failed",
+          lastError: error?.message || String(error),
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      }
+    });
     throw error;
   }
 }
