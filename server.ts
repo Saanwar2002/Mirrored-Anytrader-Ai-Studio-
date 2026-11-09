@@ -2086,6 +2086,42 @@ async function startServer() {
              createdAt: admin.firestore.FieldValue.serverTimestamp()
            }, { merge: true });
          }
+      } else if (event.type === 'payment_intent.succeeded') {
+         const pi = event.data.object as Stripe.PaymentIntent;
+         const meta = pi.metadata || {};
+         if (db && meta.type === "mediation_stake" && meta.jobId && meta.paymentAttemptId && meta.userId) {
+           if (pi.currency !== "gbp" || pi.amount !== 2500) {
+             console.error("[Security Alert] Mediation stake PaymentIntent amount/currency mismatch:", pi.id);
+             return res.status(400).send("Invalid mediation stake amount");
+           }
+           const jobRef = db.collection("jobs").doc(meta.jobId);
+           await db.runTransaction(async (tx: any) => {
+             const snap = await tx.get(jobRef);
+             if (!snap.exists) throw new Error("Mediation stake job not found");
+             const job = snap.data() || {};
+             const dispute = job.dispute || {};
+             if (dispute.raisedBy !== meta.userId ||
+                 dispute.stakePaymentAttemptId !== meta.paymentAttemptId ||
+                 dispute.paymentIntentId !== pi.id) {
+               console.error("[Security Alert] Mediation stake webhook does not match active reservation:", pi.id);
+               throw new Error("Mediation stake reservation mismatch");
+             }
+             if (dispute.mediationStakePaid === true && dispute.stakePaymentId === pi.id) return;
+             tx.update(jobRef, {
+               status: "disputed",
+               dispute: {
+                 ...dispute,
+                 mediationStakePaid: true,
+                 mediationStakeAmount: 25.00,
+                 stakePaymentId: pi.id,
+                 stakePaymentStatus: "succeeded",
+                 status: "pending_arbitration",
+                 paidAt: admin.firestore.FieldValue.serverTimestamp()
+               },
+               disputedAt: admin.firestore.FieldValue.serverTimestamp()
+             });
+           });
+         }
       } else if (event.type === 'payment_intent.payment_failed') {
          const pi = event.data.object as Stripe.PaymentIntent;
          if (db && pi.id) {
