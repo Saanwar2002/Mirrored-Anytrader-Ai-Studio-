@@ -1772,7 +1772,10 @@ async function startServer() {
         const meta = intent.metadata || {};
           
           if ((meta?.isVideoPro === 'true' || meta?.type === 'video_pro_subscription') && userId && db) {
-            const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.id;
+            if (session.mode !== "subscription" || typeof session.subscription !== "string" || !session.subscription) {
+              throw new Error("Subscription fulfilment requires a valid Stripe Subscription ID.");
+            }
+            const subscriptionId = session.subscription;
             const userRef = db.collection("users").doc(userId);
             const markerRef = db.collection("stripe_fulfillments").doc(`video_pro_${session.id}`);
             await db.runTransaction(async (tx: any) => {
@@ -1794,7 +1797,10 @@ async function startServer() {
             });
           }
           else if ((meta?.isExclusiveAddon === 'true' || meta?.type === 'exclusive_leads') && userId && db) {
-            const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.id;
+            if (session.mode !== "subscription" || typeof session.subscription !== "string" || !session.subscription) {
+              throw new Error("Subscription fulfilment requires a valid Stripe Subscription ID.");
+            }
+            const subscriptionId = session.subscription;
             const userRef = db.collection("users").doc(userId);
             const markerRef = db.collection("stripe_fulfillments").doc(`exclusive_leads_${session.id}`);
             await db.runTransaction(async (tx: any) => {
