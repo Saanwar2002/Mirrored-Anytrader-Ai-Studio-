@@ -856,3 +856,36 @@ On an existing refund record, if `payment_refund_totals` is absent, the code rep
 ### Current decision
 
 The refund module is a useful candidate foundation but **not safe to port unchanged**. Fix R1–R3 and add tests before wiring it into the Instant Match worker/webhook. Do not merge PR #5 wholesale; its current PR metadata describes mediation-stake hardening, while the refund code is a distinct financial scope that still requires independent review. Main and AI Studio remain untouched.
+
+
+## 27. Refund unit-test coverage audit (2026-11-09)
+
+Reviewed PR #5's complete new `tests/unit/refundReconciliation.test.ts` patch (183 lines).
+
+### Existing tests cover
+
+- stable reservation replay and operation-ID reuse with conflicting PaymentIntent;
+- one refund ledger entry and replay by Stripe refund ID;
+- reserved operation marked succeeded after confirmation;
+- cumulative partial refund bound in a sequential scenario;
+- rejection of taxi ride/direct payout ledger types;
+- invalid non-integer minor-unit amount.
+
+### Missing tests corresponding to Section 26 blockers
+
+1. Same refund ID replay with different `chargeId` must conflict.
+2. Same refund ID replay with different currency must conflict.
+3. Same refund ID replay with different/missing operation ID must conflict.
+4. Same operation ID bound to a second refund ID must conflict.
+5. A `failed` or `requires_review` operation must not silently become succeeded unless explicit recovery rules allow it.
+6. Missing aggregate on duplicate replay must fail closed or reconstruct a verified total.
+7. Concurrent partial refunds must be tested using Firestore emulator (the memory DB's runTransaction is not concurrent/atomic).
+8. Confirm full refund boundary, duplicate event IDs with distinct Stripe refund IDs, and charge-to-PaymentIntent relationship validation.
+
+### Scope isolation
+
+The refund test deliberately rejects `RIDE_PAYMENT` and `DIRECT_PAYOUT` entries. PR #5's own planning notes explicitly defer taxi/AnyRoller refund and webhook changes to a separate authorised workstream. Preserve that boundary: do not bring taxi payment, payout, driver-metrics, or ride-ledger behavior into the AnyTrader unified candidate.
+
+### Decision
+
+Current refund tests are a useful sequential unit baseline, but they do not cover the critical replay identity and concurrency defects. Add the missing tests before implementation acceptance; do not mark refund reconciliation complete based on this suite.
