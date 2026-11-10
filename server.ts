@@ -2605,7 +2605,7 @@ async function startServer() {
       }
 
       const userData = userDoc.data() || {};
-      if (!["tier", "exclusive_leads", "video_pro", "gotham_saas", "driver_gold"].includes(subscriptionType)) {
+      if (!["tier", "landlord", "exclusive_leads", "video_pro", "gotham_saas", "driver_gold"].includes(subscriptionType)) {
         return res.status(400).json({ error: "Unsupported subscription type." });
       }
       let subId: string | undefined;
@@ -2613,7 +2613,11 @@ async function startServer() {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
 
-      if (subscriptionType === "exclusive_leads") {
+      if (subscriptionType === "landlord") {
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
+        fieldUpdates.homeownerCancelAtPeriodEnd = true;
+        if (userData.homeownerCurrentPeriodEnd) fieldUpdates.homeownerCurrentPeriodEnd = userData.homeownerCurrentPeriodEnd;
+      } else if (subscriptionType === "exclusive_leads") {
         subId = getSubscriptionIdForProduct(userData, subscriptionType);
         const currentEnd = userData.exclusiveCurrentPeriodEnd;
         fieldUpdates.exclusiveCancelAtPeriodEnd = true;
@@ -2684,7 +2688,10 @@ async function startServer() {
         });
 
         const periodEndIso = new Date(updatedSub.current_period_end * 1000).toISOString();
-        if (subscriptionType === "exclusive_leads") {
+        if (subscriptionType === "landlord") {
+          fieldUpdates.homeownerCancelAtPeriodEnd = true;
+          fieldUpdates.homeownerCurrentPeriodEnd = periodEndIso;
+        } else if (subscriptionType === "exclusive_leads") {
           fieldUpdates.exclusiveCancelAtPeriodEnd = true;
           fieldUpdates.exclusiveCurrentPeriodEnd = periodEndIso;
         } else if (subscriptionType === "video_pro") {
@@ -2740,7 +2747,10 @@ async function startServer() {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
 
-      if (subscriptionType === "exclusive_leads") {
+      if (subscriptionType === "landlord") {
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
+        fieldUpdates.homeownerCancelAtPeriodEnd = false;
+      } else if (subscriptionType === "exclusive_leads") {
         subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.exclusiveCancelAtPeriodEnd = false;
       } else if (subscriptionType === "video_pro") {
