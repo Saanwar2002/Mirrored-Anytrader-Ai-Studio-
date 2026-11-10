@@ -2242,3 +2242,10 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - All discovered checkout callers now provide an Authorization bearer header; the server continues deriving the user identity from the verified token, not the request body.
 - Latest observed branch comparison before this documentation update: 290 ahead / 0 behind `main`, at `272ed836922dc39ff0d69505c307b0656ed6bc5a`. No production or main-branch changes.
 - GitHub Actions still fails before steps start due runner provisioning (runner ID 0); tests remain unexecuted.
+
+
+## Section 82 — Canonical homeowner tier identifier in landlord fulfillment (2026-11-10)
+
+- Verified the Profile plan selector compares `homeownerTierId` to the configured tier key (for example, `landlord`), not to the marketing label used in some checkout entry points (for example, `Premium Landlord`).
+- Normalised landlord checkout fulfillment to persist the canonical `homeownerTierId: landlord` regardless of which UI label initiated checkout. This keeps the selected plan highlighted consistently after checkout.
+- Updated the pure fulfillment helper, its regression test and both live/mock checkout call sites.
