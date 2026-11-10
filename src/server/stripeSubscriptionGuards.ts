@@ -15,6 +15,11 @@ export function isExplicitMockSubscriptionAllowed(
 
 export function getSubscriptionIdForProduct(userData: Record<string, any>, subscriptionType: string): string | undefined {
   if (subscriptionType === "tier") return typeof userData.subscriptionId === "string" ? userData.subscriptionId : undefined;
+  if (subscriptionType === "landlord") {
+    return userData.subscriptionType === "landlord" && typeof userData.subscriptionId === "string"
+      ? userData.subscriptionId
+      : undefined;
+  }
   if (subscriptionType === "exclusive_leads") return typeof userData.exclusiveSubscriptionId === "string" ? userData.exclusiveSubscriptionId : undefined;
   if (subscriptionType === "video_pro") return typeof userData.videoProSubscriptionId === "string" ? userData.videoProSubscriptionId : undefined;
   if (subscriptionType === "gotham_saas") {
