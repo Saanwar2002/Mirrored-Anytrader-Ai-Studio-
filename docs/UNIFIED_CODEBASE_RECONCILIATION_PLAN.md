@@ -2075,3 +2075,13 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 
 - Continue auditing subscription lifecycle mapping and the remaining reconciliation items while Actions capacity is unavailable.
 - Once GitHub billing/runner provisioning is restored, rerun and inspect the complete release gate; do not infer correctness from the authored tests or runner failures.
+
+
+## Section 68 — Mock subscription ID fail-closed guard (2026-11-10)
+
+- Reviewed both subscription cancellation and reactivation routes. Previously, a `mock_` subscription ID with mock mode disabled could fall through to a real Stripe API call if Stripe happened to be configured.
+- Added shared helpers in `src/server/stripeSubscriptionGuards.ts` to identify mock IDs and permit them only when `NODE_ENV !== "production"` and `ALLOW_MOCK_PAYMENTS === "true"`.
+- Both cancellation and reactivation now reject a mock ID with HTTP 409 before calling Stripe or mutating Firestore unless the explicit non-production opt-in is active.
+- Added focused tests for mock ID recognition, explicit opt-in, production rejection, missing/false opt-in, and real Stripe IDs.
+- Refetched `server.ts` after the second route edit: both routes use the shared guard (2 occurrences), there are no remaining inline `startsWith("mock_")` gates, and both reject invalid mock IDs before Stripe interaction.
+- Tests remain authored but unexecuted because Actions runner provisioning is still failing. Do not treat the guard or the wider branch as CI-validated.
