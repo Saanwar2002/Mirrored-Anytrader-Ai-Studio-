@@ -2915,3 +2915,34 @@ The coordinated taxi checkout/webhook repair must choose one explicit tip author
 **Decision:** no implementation should write a RIDE_PAYMENT receipt or mark a taxi ride paid until this tip source-of-truth contract is explicit. A ledger receipt with the correct gross charge but a payout calculated from a different ride tip would make the downstream payment evidence internally inconsistent.
 
 **Verification boundary:** exact integration-branch source fetch and static comparison only. No source code or tests were changed or executed. No Stripe API, Firestore production data, customer payment or payout was accessed. Main remains untouched; GitHub billing approval remains pending.
+
+
+## Section 123 — Taxi tip cap mismatch and payout collection tolerance (2026-11-10)
+
+A further comparison of the exact checkout and payout arithmetic found two concrete reconciliation defects relevant to the taxi-flow repair.
+
+### 1. Checkout and payout enforce different maximum tips
+
+- src/server/tripPaymentAuthorization.ts converts body.tipAmount with Number(...) || 0, then clamps it to a maximum of £500.
+- src/server/driverPayoutOrchestration.ts rejects a ride when ride.tipAmount exceeds £200.
+- Consequently, the checkout command can create a Stripe charge containing a tip between £200.01 and £500, while the payout worker later rejects the same ride as amount_out_of_bounds. This is a deterministic cross-service contract mismatch, independent of webhook fulfillment.
+- The checkout conversion also does not explicitly reject non-finite input: positive Infinity is clamped to £500, while NaN and other falsy numeric conversions become zero. The desired behavior should be explicit validation, not silent normalization of malformed client input.
+
+### 2. Stripe collection verification accepts over-collection
+
+- The payout worker computes expected gross collection in integer pence as rounded finalFare plus rounded ride.tipAmount.
+- Its Stripe PaymentIntent path currently accepts amount_received when it is greater than or equal to expectedTotalCollectedPence; it rejects underpayment but does not reject overpayment.
+- The ride payout itself is calculated from finalFare and tipAmount, not from the excess amount collected. This leaves an over-collection unexplained by the ride's canonical fare/tip contract and means a PaymentIntent can be treated as proof for a different gross amount.
+- The ledger fallback likewise accepts a RIDE_PAYMENT amount greater than or equal to the expected gross amount. The fallback's explicit type/status/currency checks are useful, but the amount comparison is not an exact match.
+
+### Required cross-service contract
+
+1. Define one maximum tip and apply it consistently at checkout, webhook verification, ride persistence, payout validation and tests. Do not silently change the existing £200 payout cap or £500 checkout cap without an explicit product/business decision; until resolved, fail closed for any tip that violates the chosen shared limit.
+2. Validate the submitted tip as a finite numeric amount, convert once to integer pence, enforce non-negative and shared maximum pence, and persist that exact integer-pence value in the server intent. Do not round the same decimal independently at multiple trust boundaries.
+3. The webhook must require Stripe's exact gross amount to equal the immutable intent amount and current authoritative ride fare plus the verified tip. It must not accept greater-than-or-equal as a substitute for equality.
+4. The payout worker should require exact equality between Stripe amount_received and the canonical expected gross pence for a single-charge taxi payment, and exact equality for a RIDE_PAYMENT fallback receipt. If legitimate overpayment, partial capture or adjustments are supported, model them explicitly as separate, auditable financial events rather than silently accepting a different amount.
+5. Add boundary tests at £200.00, £200.01, £500.00, and malformed values (NaN, Infinity, negative, numeric strings, missing), plus exact/under/over Stripe amount and ledger amount cases. Include payout eligibility after a verified tip is persisted.
+
+**Decision:** the taxi repair is not complete merely when a webhook can set paymentStatus=paid. The checkout cap, canonical tip value, paid gross amount, ledger gross amount and payout verifier must share one exact integer-pence contract. The existing payout worker's fail-closed cap must not be bypassed to accommodate the looser checkout input.
+
+**Verification boundary:** exact integration-branch source fetch and static arithmetic/control-flow inspection only. No source code or tests were changed or executed. No Stripe API, Firestore production data, customer payment or payout was accessed. Main remains untouched; GitHub billing approval remains pending.
