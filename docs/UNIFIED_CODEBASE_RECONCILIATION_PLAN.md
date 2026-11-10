@@ -1965,3 +1965,28 @@ Build and test the product-aware Stripe lifecycle synchronizer using the establi
 - Gotham: retain its dedicated subscription status, entitlement and purchased door allowance fields.
 
 For every product, retrieve current Stripe state for non-deleted events, verify the stored subscription ID still matches before applying changes, and never let an old event for a replaced subscription revoke or restore a newer subscription. Define payment-failure grace semantics before changing entitlement flags. Keep all release safeguards from Section 61.
+
+
+## Section 63 — Product-aware Stripe subscription lifecycle synchronisation (2026-11-10)
+
+### Implementation committed
+
+- Scope: replace the Gotham-only lifecycle lookup with a product-aware resolver for membership, Gold Driver, Exclusive Leads, Video Pro and Gotham SaaS.
+- Each subscription is resolved using its existing product-specific stored ID field. Duplicate user links and cross-product reuse of the same Stripe subscription ID fail closed and require manual reconciliation.
+- Non-deleted subscription and invoice events retrieve the current Stripe subscription; invoice events remain triggers only and cannot grant access independently. Deleted events are treated as terminal.
+- Updates run in a Firestore transaction and re-check that the stored product subscription ID still matches, preventing events for replaced subscriptions from mutating a newer subscription.
+- Event-created ordering markers are stored per product, so an older delivery cannot overwrite a newer lifecycle decision.
+- Established entitlement fields are synchronised for active/trialing and terminal states. Period-end and cancel-at-period-end fields are product-specific; Gotham's purchased door count is never overwritten by Stripe's aggregate line quantity.
+- `past_due`, `incomplete` and `paused` update subscription metadata only; entitlement is deliberately preserved pending an approved product-specific grace policy. No grace duration or paid-through rule is invented.
+
+### Verification and limitations
+
+- This change is source-reviewed only at commit time; no test suite or CI result is claimed in this checkpoint.
+- Required regression tests: all five product mappings; duplicate and cross-product ID collision; replaced subscription ID; duplicate and out-of-order events; active/trialing restoration; terminal deletion; scheduled cancellation retaining entitlement; invoice failure/recovery; unknown/intermediate statuses preserving entitlement; period-end persistence; Gotham door-count preservation.
+- Existing webhook event-level processing marker remains in place. The per-product event timestamp guards are additional state ordering, not a substitute for a tested end-to-end webhook idempotency suite.
+- Review Video Pro's terminal `videoVerificationStatus = "unverified"` value against every consumer before release; if consumers expect a different state, align the mapping and tests.
+- CI must run against the resulting integration head and every relevant job must be inspected. Empty status arrays or empty PR-only workflow-run lookups are not passes.
+
+### Next action
+
+Add focused webhook tests using the existing Stripe webhook test harness, inspect entitlement consumers for Video Pro and membership, then run the complete CI gate. Continue to preserve all main/production/AI Studio safeguards from the prior sections.
