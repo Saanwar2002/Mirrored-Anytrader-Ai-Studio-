@@ -54,7 +54,8 @@ export interface DriverPayoutOrchestrationResult {
 }
 
 export const PLATFORM_COMMISSION_RATE = 0.12;
-export const DRIVER_BASE_SHARE_RATE = 0.88;
+export const GOLD_DRIVER_COMMISSION_RATE = 0.10;
+export const DRIVER_BASE_SHARE_RATE = 1 - PLATFORM_COMMISSION_RATE;
 export const MAX_ALLOWED_RIDE_PAYOUT_GBP = 1000.00;
 export const PAYOUT_LEASE_DURATION_MS = 300000; // 5 minutes
 
@@ -287,13 +288,24 @@ export async function executeDriverPayoutOrchestrationCommand(
         continue;
       }
 
+      // Gold pricing is activated only by server-written Stripe entitlement fields.
+      // Firestore rules prohibit clients from modifying isGoldDriver/subscription IDs/status.
+      const isActiveGoldDriver = driverData?.isGoldDriver === true &&
+        typeof driverData?.driverSubscriptionId === "string" &&
+        driverData.driverSubscriptionId.trim().length > 0 &&
+        driverData.driverSubscriptionStatus === "active";
+      const effectiveCommissionRate = isActiveGoldDriver
+        ? GOLD_DRIVER_COMMISSION_RATE
+        : PLATFORM_COMMISSION_RATE;
+      const effectiveDriverShareRate = 1 - effectiveCommissionRate;
+
       // Minor units (pence) integer calculations to eliminate rounding drift
       const expectedBaseFarePence = Math.round(rawFinalFare * 100);
       const expectedTipPence = Math.round(rawTip * 100);
       const expectedTotalCollectedPence = expectedBaseFarePence + expectedTipPence;
 
-      // 88% driver share of base fare in integer pence + 100% of tip in integer pence
-      const driverBaseEarningsPence = Math.round(expectedBaseFarePence * DRIVER_BASE_SHARE_RATE);
+      // Driver receives tier-specific share of base fare plus 100% of tip.
+      const driverBaseEarningsPence = Math.round(expectedBaseFarePence * effectiveDriverShareRate);
       const transferAmountPence = driverBaseEarningsPence + expectedTipPence;
       const platformCommissionPence = expectedBaseFarePence - driverBaseEarningsPence;
 
@@ -519,6 +531,8 @@ export async function executeDriverPayoutOrchestrationCommand(
                 rideId,
                 driverId: assignedDriverId,
                 platformCommission: platformCommissionGbp.toString(),
+                commissionRate: effectiveCommissionRate.toString(),
+                driverTier: isActiveGoldDriver ? "gold" : "standard",
                 type: "orchestrated_driver_payout",
               },
             },
@@ -554,6 +568,8 @@ export async function executeDriverPayoutOrchestrationCommand(
             calculatedDriverEarnings: driverEarningsGbp,
             platformFee: platformCommissionGbp,
             calculatedPlatformFee: platformCommissionGbp,
+            appliedCommissionRate: effectiveCommissionRate,
+            appliedDriverTier: isActiveGoldDriver ? "gold" : "standard",
             payoutError: admin.firestore.FieldValue.delete(),
             payoutLastError: admin.firestore.FieldValue.delete(),
           });
