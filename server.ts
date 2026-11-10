@@ -2,6 +2,7 @@ import express from "express";
 import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
+import { shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import crypto from "crypto";
@@ -1699,18 +1700,9 @@ async function startServer() {
       try {
         const claimSuccess = await db.runTransaction(async (t: admin.firestore.Transaction) => {
           const existing = await t.get(eventRef);
-          if (existing.exists) {
-            const data = existing.data();
-            if (data?.status === 'completed') {
-               return false; // Already processed
-            }
-            if (data?.status === 'processing') {
-               // Check if it's a stale processing claim (e.g., > 5 minutes old)
-               const ageMs = Date.now() - (data.claimedAt?.toMillis ? data.claimedAt.toMillis() : Date.now());
-               if (ageMs < 5 * 60 * 1000) {
-                 return false; // Still processing by another worker
-               }
-            }
+          const existingData = existing.exists ? existing.data() : undefined;
+          if (!shouldClaimStripeWebhookEvent(existingData, Date.now())) {
+            return false;
           }
           t.set(eventRef, {
             status: 'processing',
