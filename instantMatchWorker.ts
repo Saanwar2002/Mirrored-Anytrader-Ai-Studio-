@@ -21,14 +21,16 @@ let globalConfig: any = {
   imRequireTagMatch: false
 };
 
-async function expireAndRefundInstantMatch(db: admin.firestore.Firestore, matchRef: admin.firestore.DocumentReference, stripe: Stripe | null, reason: string): Promise<void> {
+export async function expireAndRefundInstantMatch(db: admin.firestore.Firestore, matchRef: admin.firestore.DocumentReference, stripe: Stripe | null, reason: string): Promise<void> {
   const refundRef = db.collection("instant_match_refunds").doc(matchRef.id);
   const operation = await db.runTransaction(async (tx: any) => {
     const [matchSnap, refundSnap] = await Promise.all([tx.get(matchRef), tx.get(refundRef)]);
     if (!matchSnap.exists) return { action: "stop" as const };
     const match = matchSnap.data() || {};
     const existing = refundSnap.exists ? refundSnap.data() || {} : null;
-    if (existing?.status === "succeeded" || existing?.status === "manual_review") return { action: "stop" as const };
+    // Never replay an existing operation automatically. Stripe idempotency keys
+    // have a finite retention window; reconciliation must resolve uncertain outcomes.
+    if (existing) return { action: "stop" as const };
     const paymentIntentId = match.stripePaymentIntentId;
     if (typeof paymentIntentId !== "string" || !/^pi_[A-Za-z0-9]+$/.test(paymentIntentId)) {
       tx.set(matchRef, { status: "expired", expiredAt: match.expiredAt || new Date().toISOString(), refundStatus: "manual_review", refundReviewReason: "missing_or_invalid_payment_intent" }, { merge: true });
@@ -43,8 +45,12 @@ async function expireAndRefundInstantMatch(db: admin.firestore.Firestore, matchR
   });
   if (operation.action !== "refund") return;
   if (!stripe) {
-    await refundRef.set({ status: "reconciliation_required", error: "stripe_client_unavailable", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await matchRef.set({ refundStatus: "reconciliation_required" }, { merge: true });
+    await db.runTransaction(async (tx: any) => {
+      const [latestMatch, latestRefund] = await Promise.all([tx.get(matchRef), tx.get(refundRef)]);
+      if (!latestMatch.exists || !latestRefund.exists || latestRefund.data()?.status === "succeeded") return;
+      tx.set(refundRef, { status: "reconciliation_required", error: "stripe_client_unavailable", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(matchRef, { refundStatus: "reconciliation_required" }, { merge: true });
+    });
     return;
   }
   try {
