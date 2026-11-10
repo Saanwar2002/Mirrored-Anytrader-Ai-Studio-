@@ -2485,3 +2485,10 @@ Added a random claim token to each successful `processed_stripe_events/{eventId}
 Commits: `7c8cdd50a94cc0822075b0be07bf850ecc519fad` (claim token implementation), `d557bd480f45cbfa5db5335732936e80dac1cfd7` (scope correction).
 
 **Important boundary:** this fences event-record transitions, not every intermediate Firestore mutation in the webhook. Some fulfillment paths update intent/user documents before final event completion; a worker that loses its lease during those operations could still race on those records. This is not yet end-to-end webhook side-effect fencing. No Stripe/Firebase live operations were run; tests/CI remain unverified.
+
+
+## Section 97 — Webhook fencing boundary review (2026-11-10)
+
+Follow-up inspection of checkout fulfillment confirms that claim-token checks currently protect the event document's terminal transitions, but do **not** protect all side effects. In particular, the intent is read and updated outside a transaction tied to the event claim; subscription fulfillment transactions use per-session markers and user records but do not yet read/validate the event claim in the same transaction. The mismatch review write is also not claim-fenced.
+
+Do not treat FIN-01 as closed. Before marking it complete, refactor checkout processing so each Firestore mutation that changes intent/user entitlement state validates the current event claim token in the same transaction (read claim + target docs before writes), and add emulator/unit coverage that simulates lease takeover between claim and fulfillment. Stripe API reads are non-mutating; external side effects require separate idempotency/reconciliation handling. This review intentionally makes no speculative broad rewrite of the large webhook handler.
