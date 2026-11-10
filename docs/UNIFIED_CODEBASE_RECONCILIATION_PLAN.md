@@ -2189,3 +2189,15 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Tightened the owner-update protected-key list to include ownership identity, homeowner identity, transfer target/status/code/expiry/email/history/claim timestamps, previous-owner count, and verification state. Admin update permissions and ordinary owner-editable property fields remain unchanged.
 - Added emulator security-rule regression coverage for attempts to forge each important transfer field and a positive assertion that an owner can still update a normal property name.
 - The existing security workflow includes `firebaseEmulatorSecurityRules.test.ts`; this regression is part of that existing suite. It is still unexecuted because the GitHub Actions runner is not provisioning.
+
+
+## Section 77 — Server-authoritative property transfer initiation and revocation (2026-11-10)
+
+- Review of the Firestore transfer-metadata restriction found that `TransferOwnershipModal` still wrote transfer initiation and revocation fields directly with client-side `updateDoc`. The restriction correctly blocked this, but it also meant the user-facing transfer workflow would fail.
+- Added authenticated server commands `POST /api/properties/:id/transfer` and `POST /api/properties/:id/transfer/revoke`. Both use Firestore transactions, require the canonical current owner, and fail closed for missing properties, non-owners, invalid validity windows, malformed buyer emails, and revocation without a pending transfer.
+- Transfer codes are now generated server-side using cryptographic randomness; expiry is calculated server-side and limited to the existing 14/30/60-day choices. The server checks for an active code collision before committing the transfer metadata.
+- Updated `TransferOwnershipModal` to use the authenticated command service rather than writing protected fields directly. The claim/verification flow remains on the existing public verification and authenticated claim endpoints.
+- Extended the protected Firestore metadata set to include recipient name, initiation timestamp, and initiating UID, and added emulator assertions that owners cannot forge these values.
+- Added service-level tests for authenticated initiation, server-side authorization error propagation, and revocation.
+- Source refetch confirms the modal no longer imports Firestore `updateDoc`; transfer initiation/revocation now use the API command service. Tests remain unexecuted pending Actions runner restoration.
+- Before the documentation update, the branch was 261 ahead / 0 behind `main`, at `51004ab7c264c1e66ee1cfe08a707e2b9e0d022a`. `main` remains unchanged.
