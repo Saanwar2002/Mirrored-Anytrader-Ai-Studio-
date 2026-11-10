@@ -3296,3 +3296,34 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 134 is documentation only; no route, authorization helper, config, or audit collection changed.
 - No tests, emulator, typecheck, build, CI, or production operation was run.
 - Next: inspect the repository's Firestore transaction and command test conventions, then design the implementation/test split for the pricing admin command and cash completion command.
+
+
+## Section 135 — Existing command and test conventions support a dedicated versioned pricing command, with emulator coverage still required
+
+### Exact integration-branch evidence
+- `src/server/quoteCommands.ts` blob `e1f45e46f16a47f5cc46ea7b951200ad6eee0bc4`:
+  - Uses Zod schemas with `.strict()` for command payloads, explicit protected-field rejection, and server-side identity rather than trusting caller-supplied ownership fields.
+  - Its command executor uses `db.runTransaction(...)` and reads authoritative documents before making writes. This is a useful structural precedent for a pricing command, although its domain-specific quote logic and idempotency behavior should not be copied wholesale.
+- `src/server/accountBootstrap.ts` blob `bdb625fdea1bbf4e52c73fbcd718b78566415518`:
+  - Uses a strict Zod input schema and a server command function with explicit database and authenticated-caller parameters. This is another suitable pattern for separating validation/command logic from Express route wiring.
+- `src/server/driverAuthorization.ts` blob `35c44e8d788e8a24c98af5fde11196749c5c7038`:
+  - Demonstrates a small command input interface, explicit caller UID validation, authoritative reads inside a Firestore transaction, and server-authored timestamps. It imports Firebase Admin for server timestamps.
+- `tests/unit/task4AcceptQuote.test.ts` blob `dc345fde2c21e92b74dcd89288df2ffcb705a110`:
+  - Uses Vitest and a hand-built Firestore mock with collection/document references and a `runTransaction` callback. This is a useful unit-test pattern for validation, conflict handling, and asserting config/audit writes.
+  - The mock executes a transaction callback against an in-memory object; it does not model Firestore's production transaction retries, isolation, or concurrent optimistic-conflict behavior. Passing these tests alone cannot establish race safety.
+- `package.json` blob `973603b055a65607106d2afac29b248d0b915b27`:
+  - The repository provides `vitest run` through `npm test`, `tsc --noEmit` through `npm run lint`, and separate Firebase emulator scripts. A substantial set of emulator-dependent suites is deliberately excluded from the ordinary unit-test command.
+- GitHub code search did not return a reliable integration-branch test for `executeAcceptRideCommand`; search results can target the default branch. No conclusion about absence of every possible test file should be drawn from that search alone.
+
+### Implementation implications
+1. Keep the pricing command in a focused server module, separate from `server.ts` route wiring. Export a strict Zod schema and a command executor that receives the Firestore dependency and authenticated admin UID.
+2. The command should accept only the complete pricing proposal and `expectedConfigVersion`. Derive actor UID, timestamps, and next version on the server. Reject unknown fields, fractional/unsafe version values, invalid ranges, ambiguous currency/units, and missing required fields.
+3. In the transaction, read the canonical config first, enforce the expected version, then write the complete next config and a new audit event together. Do not perform transaction writes before all required reads are complete.
+4. Keep unit tests for schema boundaries, missing config policy, stale versions, exact before/after audit content, and atomic write intent. Add a real Firestore emulator concurrency test for two admin updates racing on the same expected version; exactly one must commit and the other must conflict.
+5. Before route/UI integration, inspect the exact Firestore Admin SDK timestamp and transaction APIs used in this repository, route error mapping for `ConflictError`, test-runner TypeScript configuration, and current admin UI payload shapes. Then implement the command, route, UI migration, and cash completion integration as separately reviewable changes.
+6. Do not treat the existing in-memory mocks as evidence of concurrent correctness. Do not connect the new config to live cash completion until the versioned command and the fee snapshot lifecycle are both covered by tests.
+
+### Status
+- Section 135 records implementation/test conventions only. No source code, tests, route, UI, Firestore rules, pricing document, or live configuration changed.
+- No unit tests, emulator tests, typecheck, build, or CI were run in this step.
+- Next: inspect exact admin route error handling, timestamp conventions, and existing test configuration, then implement the isolated pricing schema/command with unit tests before any client migration.
