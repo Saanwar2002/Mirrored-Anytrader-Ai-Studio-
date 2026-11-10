@@ -38,7 +38,7 @@ export interface PayoutDetail {
   driverId: string;
   stripeAccountId: string;
   amount: number;
-  status: "transferred" | "failed" | "skipped" | "unverified";
+  status: "transferred" | "failed" | "skipped" | "unverified" | "reconciliation_required";
   transferId?: string;
   reason?: string;
 }
@@ -621,10 +621,15 @@ export async function executeDriverPayoutOrchestrationCommand(
           failureStateWritten = true;
         });
         if (!failureStateWritten) {
+          const transferWasCreated = transferErr.message === "LEASE_TOKEN_LOST";
           details.push({
             rideId, driverId: assignedDriverId, stripeAccountId,
-            amount: driverEarningsGbp, status: "unverified",
-            reason: "Claim lost; payout state left untouched pending reconciliation",
+            amount: driverEarningsGbp,
+            status: transferWasCreated ? "reconciliation_required" : "unverified",
+            ...(transferWasCreated ? { transferId: stripeTransferId } : {}),
+            reason: transferWasCreated
+              ? "Stripe transfer " + stripeTransferId + " succeeded but this worker lost its lease; successor state was preserved. Reconcile this transfer before retrying."
+              : "Claim lost; payout state left untouched pending reconciliation",
           });
           failedCount++;
           continue;
