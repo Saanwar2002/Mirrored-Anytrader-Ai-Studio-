@@ -2021,3 +2021,5 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - The webhook resolver now classifies those generic IDs using that established discriminator, while preferring a dedicated product-specific ID when both are present.
 - It deduplicates matches for the same user and fails closed for multiple users or multiple dedicated product links.
 - Regression tests cover legacy Gold Driver/Gotham fallback, membership default, dedicated-ID precedence, duplicate-user/product collisions and no-match behavior.
+
+- Added stale-legacy-ID protection: when a legacy generic Gold Driver/Gotham ID remains on a user record but a different dedicated product ID is present, events for the old generic ID are ignored instead of revoking or restoring the newer subscription's entitlement.
