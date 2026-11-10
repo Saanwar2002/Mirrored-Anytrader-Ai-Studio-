@@ -58,8 +58,12 @@ async function expireAndRefundInstantMatch(db: admin.firestore.Firestore, matchR
     });
   } catch (err: any) {
     const message = err?.message || String(err);
-    await refundRef.set({ status: "reconciliation_required", error: message.slice(0, 500), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await matchRef.set({ refundStatus: "reconciliation_required" }, { merge: true });
+    await db.runTransaction(async (tx: any) => {
+      const [latestMatch, latestRefund] = await Promise.all([tx.get(matchRef), tx.get(refundRef)]);
+      if (!latestMatch.exists || !latestRefund.exists || latestRefund.data()?.status === "succeeded") return;
+      tx.set(refundRef, { status: "reconciliation_required", error: message.slice(0, 500), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(matchRef, { refundStatus: "reconciliation_required" }, { merge: true });
+    });
     console.error("Instant Match refund outcome requires reconciliation:", err);
   }
 }
