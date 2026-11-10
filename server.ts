@@ -2640,12 +2640,14 @@ async function startServer() {
         fieldUpdates.videoProCancelAtPeriodEnd = true;
         fieldUpdates.videoProCurrentPeriodEnd = currentEnd;
       } else if (subscriptionType === "gotham_saas") {
-        subId = userData.gothamSubscriptionId || userData.subscriptionId;
-        const currentEnd = userData.gothamCurrentPeriodEnd || userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        subId = userData.gothamSubscriptionId;
         fieldUpdates.gothamCancelAtPeriodEnd = true;
         fieldUpdates.cancelAtPeriodEnd = true;
-        fieldUpdates.gothamCurrentPeriodEnd = currentEnd;
-        fieldUpdates.currentPeriodEnd = currentEnd;
+        const currentEnd = userData.gothamCurrentPeriodEnd || userData.currentPeriodEnd;
+        if (currentEnd) {
+          fieldUpdates.gothamCurrentPeriodEnd = currentEnd;
+          fieldUpdates.currentPeriodEnd = currentEnd;
+        }
       } else if (subscriptionType === "driver_gold") {
         subId = userData.driverSubscriptionId || userData.subscriptionId;
         const currentEnd = userData.driverCurrentPeriodEnd || userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -2661,10 +2663,18 @@ async function startServer() {
         fieldUpdates.currentPeriodEnd = currentEnd;
       }
 
+      if (subscriptionType === "gotham_saas" && !subId) {
+        return res.status(409).json({ error: "No verified Gotham Stripe subscription is linked to this account." });
+      }
+
       let stripe;
       try {
         stripe = getStripe();
       } catch (e) {
+        // Only explicit mock subscriptions may use the development fallback.
+        if (subscriptionType === "gotham_saas" && !String(subId || "").startsWith("mock_")) {
+          return res.status(503).json({ error: "Stripe is unavailable; Gotham cancellation was not changed." });
+        }
         // Fallback for mock/development environment
         await db.collection("users").doc(authUid).update(fieldUpdates);
         return res.json({
@@ -2747,7 +2757,7 @@ async function startServer() {
         subId = userData.videoProSubscriptionId;
         fieldUpdates.videoProCancelAtPeriodEnd = false;
       } else if (subscriptionType === "gotham_saas") {
-        subId = userData.gothamSubscriptionId || userData.subscriptionId;
+        subId = userData.gothamSubscriptionId;
         fieldUpdates.gothamCancelAtPeriodEnd = false;
         fieldUpdates.cancelAtPeriodEnd = false;
       } else if (subscriptionType === "driver_gold") {
@@ -2759,10 +2769,18 @@ async function startServer() {
         fieldUpdates.cancelAtPeriodEnd = false;
       }
 
+      if (subscriptionType === "gotham_saas" && !subId) {
+        return res.status(409).json({ error: "No verified Gotham Stripe subscription is linked to this account." });
+      }
+
       let stripe;
       try {
         stripe = getStripe();
       } catch (e) {
+        // Only explicit mock subscriptions may use the development fallback.
+        if (subscriptionType === "gotham_saas" && !String(subId || "").startsWith("mock_")) {
+          return res.status(503).json({ error: "Stripe is unavailable; Gotham reactivation was not changed." });
+        }
         // Fallback for mock/development environment
         await db.collection("users").doc(authUid).update(fieldUpdates);
         return res.json({
