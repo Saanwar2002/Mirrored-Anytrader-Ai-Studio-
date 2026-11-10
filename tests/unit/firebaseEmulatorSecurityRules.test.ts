@@ -419,6 +419,23 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       }));
     });
 
+    it("15D. Property owners cannot forge or modify server-managed transfer metadata", async () => {
+      await seedPrivateProperty("prop_transfer_metadata_guard", "user_transfer_owner");
+      const ownerDb = testEnv.authenticatedContext("user_transfer_owner").firestore();
+      const propertyRef = doc(ownerDb, "properties", "prop_transfer_metadata_guard");
+
+      await assertFails(updateDoc(propertyRef, { transferStatus: "pending" }));
+      await assertFails(updateDoc(propertyRef, { transferCode: "TRF-ABC234" }));
+      await assertFails(updateDoc(propertyRef, { pendingTransferToUid: "attacker_uid" }));
+      await assertFails(updateDoc(propertyRef, { transferExpiresAt: new Date(Date.now() + 86400000).toISOString() }));
+      await assertFails(updateDoc(propertyRef, { transferTargetEmail: "attacker@example.com" }));
+      await assertFails(updateDoc(propertyRef, { transferHistory: [{ fromOwnerUid: "user_transfer_owner", toOwnerUid: "attacker_uid" }] }));
+      await assertFails(updateDoc(propertyRef, { homeownerId: "attacker_uid" }));
+      await assertFails(updateDoc(propertyRef, { previousOwnersCount: 999 }));
+
+      await assertSucceeds(updateDoc(propertyRef, { name: "Owner-editable property name" }));
+    });
+
     it("16. Property private access works only for authorized users", async () => {
       await seedPrivateProperty("prop_auth_1", "user_alice");
       const ownerDb = testEnv.authenticatedContext("user_alice").firestore();
