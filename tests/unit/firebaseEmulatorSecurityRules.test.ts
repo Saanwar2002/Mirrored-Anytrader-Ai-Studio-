@@ -402,6 +402,23 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       await assertFails(deleteDoc(doc(ownerDb, "properties", "prop_delete_via_command")));
     });
 
+    it("15C. A transfer recipient cannot change property ownership directly", async () => {
+      await seedPrivateProperty("prop_transfer_via_command", "user_previous_owner");
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await updateDoc(doc(context.firestore(), "properties", "prop_transfer_via_command"), {
+          transferStatus: "pending",
+          pendingTransferToUid: "user_transfer_recipient",
+        });
+      });
+      const recipientDb = testEnv.authenticatedContext("user_transfer_recipient").firestore();
+      await assertFails(updateDoc(doc(recipientDb, "properties", "prop_transfer_via_command"), {
+        ownerId: "user_transfer_recipient",
+        userId: "user_transfer_recipient",
+        transferStatus: "completed",
+        transferClaimedByUid: "user_transfer_recipient",
+      }));
+    });
+
     it("16. Property private access works only for authorized users", async () => {
       await seedPrivateProperty("prop_auth_1", "user_alice");
       const ownerDb = testEnv.authenticatedContext("user_alice").firestore();
