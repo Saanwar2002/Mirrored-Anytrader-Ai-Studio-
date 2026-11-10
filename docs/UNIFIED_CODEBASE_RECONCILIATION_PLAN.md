@@ -2516,3 +2516,12 @@ The ownership predicate introduced with Section 98 is now used by the webhook im
 Commits: `152b17ec1593578c79c0b918d8ec4306d1eb2313` (production wiring), with predicate and tests in `a407a5494a307bf60edbc9e42a5cc0bc37cc72b4` and `35cfba743bc16bf9c272129f2d78dc50b314d734`.
 
 **Verification:** source fetch-back confirms the import and predicate use. Unit tests are present but not yet executed. The pure predicate test proves stale-token rejection; it does not simulate Firestore transaction retries or lease takeover during an in-flight callback. Emulator/integration coverage remains required. FIN-01 remains open.
+
+
+## Section 100 — CI runner availability observation (2026-11-10)
+
+GitHub Actions was triggered by pushes to the integration branch. The latest observed run for commit `f53b33d157b7af895812460435b30b3eee221fd5` (run `42830150821`) concluded `failure` before execution. Its job record reports `runner_id: 0`, an empty `steps` array, and no runner name; the immediately preceding run for `152b17ec1593578c79c0b918d8ec4306d1eb2313` has the same pre-step failure shape. The job-log endpoint returned no log blob. This indicates the workflow did not reach dependency installation or any test/build step; it is not a code-level failing test result. The exact account/billing cause is not exposed in the returned job metadata, so do not assert one as proven.
+
+The integration branch's source, helper, tests, and plan were fetched back successfully. No test, emulator, lint, or build result can be claimed. Once GitHub runner availability is restored, rerun the existing CI workflow and inspect its actual step results before proceeding to close FIN-01.
+
+Observed latest run: `42830150821`; previous run: `42830065952`.
