@@ -2000,3 +2000,14 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Tests are authored but have not been executed in this GitHub-only workflow. Full CI remains a required release gate.
 
 - Additional explicit regression coverage confirms that `cancel_at_period_end=true` retains active entitlement for every product until Stripe reports a terminal state.
+
+
+## Section 65 — CI runner failure investigation (2026-11-10)
+
+- The branch workflow `.github/workflows/ci.yml` is configured for both `push` and `pull_request` events on `integration/**`; CI is therefore expected to run on integration branch pushes.
+- Latest head at this checkpoint: `4251a8508dcfb44d9bea54f24d131061a70e9be3`.
+- GitHub Actions run: `42804116338` (run 616), event `push`, conclusion `failure`.
+- Its only job, `security-and-build-gate` (job `129788795251`), completed with failure but reports `runner_id=0`, no steps, and no runner name. The job-steps endpoint is empty and the job-log download returns BlobNotFound.
+- This is a runner/provisioning failure before checkout or dependency installation. It is not a test failure and does not validate any source change.
+- Combined commit status remains empty; this is not a pass. The prior historical green run remains tied to its older commit only.
+- Next operational action: obtain a functioning GitHub Actions runner / inspect repository Actions runner availability, then rerun the workflow. Do not change tests, weaken gates, or label the branch validated to work around this infrastructure failure.
