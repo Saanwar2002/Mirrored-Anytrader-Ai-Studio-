@@ -2623,3 +2623,12 @@ A deeper trace from the Stripe checkout webhook into the worker shows that the S
 No source code was changed in this section. No Stripe API or Firebase production data was accessed, and no worker was started. Tests remain unexecuted.
 
 Next: inspect the Checkout Session creation mode and its PaymentIntent availability contract, then implement a trusted payment-identity handoff and a single terminal-expiry/refund operation covering attempt exhaustion and zero-eligible-trader expiry. Add tests for absent PaymentIntent, delayed/missing session PaymentIntent, no eligible traders, concurrent terminal triggers, and ambiguous Stripe responses before considering a live rollout.
+
+
+### Section 108 addendum — checkout payment identity already exists in the intent registry
+
+The Checkout Session creation route was inspected after Section 108 was drafted. It persists a trusted `payment_intents/{intentId}` record with `checkoutSessionId`, normalized currency and `paymentIntentId` (extracted from the Stripe-created Checkout Session) immediately after `stripe.checkout.sessions.create`. The session metadata carries the server-generated `intentId`, and the production webhook's Instant Match fulfillment marker also records that `intentId`.
+
+This refines, but does not remove, the gap: a durable payment identity is already available in the payment-intent registry, but the Instant Match fulfillment transaction does not read that registry or copy `session.payment_intent` onto the match. The correct remediation should use the trusted registry record keyed by the webhook's server-issued `session.metadata.intentId` (and validate its `checkoutSessionId` matches the event session), or a validated PaymentIntent on the Stripe Checkout Session, before persisting the match's payment identity. If the registry entry is absent, mismatched or has no PaymentIntent ID, do not guess or issue a refund; leave a visible retryable/manual-review state. This is preferable to relying only on the webhook payload or trusting a client-supplied identifier.
+
+The no-eligible-traders branch in `initiateNextAttempt` still independently expires a match without routing through a shared refund operation. The target remediation remains one terminal-expiry function that uses the verified payment-intent identity for every terminal path and a durable per-match refund operation. This addendum corrects the proposed source of the identity; no code or live financial operation was performed.
