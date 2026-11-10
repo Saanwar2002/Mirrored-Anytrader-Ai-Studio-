@@ -3667,6 +3667,52 @@ async function startServer() {
     }
   });
 
+  // Property deletion also flows through the server so Gotham usage counters stay exact.
+  app.delete("/api/properties/:id", requireAuth, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const authUid = String((req as any).user?.uid || "");
+      if (!authUid) throw new ForbiddenError("Authenticated user is required.");
+      const user = (req as any).user;
+      const isAdmin = await checkIsAdmin(user);
+      const propertyRef = db.collection("properties").doc(req.params.id);
+      const callerRef = db.collection("users").doc(authUid);
+      const result = await db.runTransaction(async (tx: any) => {
+        const [propertySnap, callerSnap] = await Promise.all([tx.get(propertyRef), tx.get(callerRef)]);
+        if (!propertySnap.exists) throw new NotFoundError("Property not found.");
+        const property = propertySnap.data() || {};
+        const isOwner = property.ownerId === authUid || property.userId === authUid || property.landlordId === authUid;
+        if (!isOwner && !isAdmin) throw new ForbiddenError("You are not authorized to delete this property.");
+        const quotaOwnerId = String(property.ownerId || property.userId || property.landlordId || "");
+        const quotaOwnerRef = quotaOwnerId ? db.collection("users").doc(quotaOwnerId) : null;
+        const usageRef = quotaOwnerId ? db.collection("gotham_property_usage").doc(quotaOwnerId) : null;
+        const [quotaOwnerSnap, usageSnap] = quotaOwnerRef && usageRef
+          ? await Promise.all([tx.get(quotaOwnerRef), tx.get(usageRef)])
+          : [null, null];
+        if (quotaOwnerSnap?.exists && usageSnap?.exists) {
+          const ownerProfile = quotaOwnerSnap.data() || {};
+          const isGothamAccount = ownerProfile.subscriptionType === "gotham_saas" || ownerProfile.isGothamSubscriber === true;
+          if (isGothamAccount) {
+            const currentUsage = Number(usageSnap.data()?.propertyCount);
+            if (!Number.isSafeInteger(currentUsage) || currentUsage < 0) {
+              throw new ForbiddenError("Gotham property usage is invalid; deletion requires reconciliation.");
+            }
+            tx.set(usageRef, {
+              propertyCount: Math.max(0, currentUsage - 1),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          }
+        }
+        tx.delete(propertyRef);
+        return { id: propertyRef.id };
+      });
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error("Delete Property Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
   app.post("/api/properties/:id/sync-public-passport", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
