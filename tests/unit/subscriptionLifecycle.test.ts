@@ -5,6 +5,7 @@ const active = { id: "sub_test", status: "active", cancel_at_period_end: false, 
 
 describe("Stripe subscription lifecycle patch mapping", () => {
   it.each([
+    ["landlord", { homeownerSubscriptionStatus: "active" }],
     ["membership", { isPro: true, isProInvoiceSubscriber: true, subscriptionStatus: "active" }],
     ["gold_driver", { isGoldDriver: true, driverSubscriptionStatus: "active" }],
     ["exclusive_leads", { hasExclusiveAddon: true, isExclusiveActive: true }],
@@ -98,6 +99,18 @@ describe("Stripe subscription product resolution", () => {
   const gold = { key: "gold_driver" as const, idField: "driverSubscriptionId", lastCreated: "driverSubscriptionLastEventCreated", lastId: "driverSubscriptionLastEventId" };
   const gotham = { key: "gotham_saas" as const, idField: "gothamSubscriptionId", lastCreated: "gothamSubscriptionLastEventCreated", lastId: "gothamSubscriptionLastEventId" };
   const user = (id: string, data: Record<string, unknown>) => ({ id, data: () => data });
+
+  it("resolves legacy generic landlord IDs to homeowner lifecycle fields", () => {
+    const result = resolveSubscriptionProductMatch([{
+      product: membership,
+      userDoc: user("u1", { subscriptionType: "landlord" })
+    }]);
+    expect(result?.product).toMatchObject({
+      key: "landlord",
+      idField: "subscriptionId",
+      lastCreated: "homeownerSubscriptionLastEventCreated"
+    });
+  });
 
   it("resolves legacy generic Gold Driver subscription IDs by subscriptionType", () => {
     const result = resolveSubscriptionProductMatch([{ product: membership, userDoc: user("u1", { subscriptionType: "driver_gold" }) }]);
