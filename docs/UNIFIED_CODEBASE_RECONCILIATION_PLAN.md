@@ -1706,3 +1706,22 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
 - Added tests 16–17 to `tests/unit/driverPayoutOrchestration.test.ts`: active Gold entitlement must transfer 90% of base fare plus 100% of tip, and write Gold/rate audit fields; stale/incomplete Gold markers must retain the 12% standard rate.
 - These tests assert £50 fare + £5 tip → £50 driver transfer / £5 platform fee for active Gold, versus £44 driver share / £6 platform fee for standard (no tip).
 - Test source committed; execution still pending because no local checkout/test runner has been established in this GitHub-only session.
+
+
+## Section 55 — CI blocker: checkout/webhook route boundary regression (2026-11-10)
+
+### Evidence
+- Integration head `d5029ac25621da29395e45feb95b74e41796d204`, CI run [42782297725](https://github.com/Saanwar2002/AnyTrader/actions/runs/42782297725), failed at the Firestore emulator/security test stage.
+- Job log reports esbuild parse error at `server.ts:2066`: `Expected "finally" but found "let"`.
+- The failed import caused six suites to fail loading; the security/unit suites, TypeScript/lint, production build and final release audit were skipped.
+- Source inspection confirms integration currently has no `app.post("/api/create-checkout-session"...)` declaration, while the original `main` source has a distinct checkout route after the webhook. Integration's webhook/checkout logic appears structurally interleaved: webhook starts at line 1662, checkout's `let customerId` appears at 2066 while the parser still expects a try continuation. This is a route-boundary/brace regression, not evidence that the Gold commission tests themselves failed.
+
+### Required repair
+- Restore a clean separation: webhook route must close its processing `try/catch` and handler before express JSON middleware/ordinary API routes; checkout session creation must be its own authenticated `/api/create-checkout-session` route.
+- Preserve integration's newer Stripe webhook security, intent binding, idempotent fulfilments, and Gold/Gotham branches while restoring the original checkout route logic from main as a structural reference (do not blindly replace server.ts with main).
+- Verify route registration and parse/typecheck first, then rerun emulator/security, unit/pen-test, lint/typecheck, production build, and release audit.
+- Do not merge to main, pull/push AI Studio, or deploy until the full gate passes and reconciliation is approved.
+
+### Verification / status
+- CI failure confirmed from job summaries and raw logs; root cause localized to server.ts route/try boundary.
+- No repair committed in this section; this is explicitly a blocking defect.
