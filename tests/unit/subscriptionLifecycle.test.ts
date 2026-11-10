@@ -56,7 +56,7 @@ describe("Stripe subscription lifecycle patch mapping", () => {
     expect(buildSubscriptionLifecyclePatch("gold_driver", scheduled)).toMatchObject({ driverCancelAtPeriodEnd: true, driverCurrentPeriodEnd: new Date(1_800_000_000_000).toISOString() });
     expect(buildSubscriptionLifecyclePatch("exclusive_leads", scheduled)).toMatchObject({ exclusiveCancelAtPeriodEnd: true });
     expect(buildSubscriptionLifecyclePatch("video_pro", scheduled)).toMatchObject({ videoProCancelAtPeriodEnd: true });
-    expect(buildSubscriptionLifecyclePatch("gotham_saas", scheduled)).toMatchObject({ gothamCancelAtPeriodEnd: true, currentPeriodEnd: new Date(1_800_000_000_000).toISOString() });
+    expect(buildSubscriptionLifecyclePatch("gotham_saas", scheduled)).toMatchObject({ gothamCancelAtPeriodEnd: true, gothamCurrentPeriodEnd: new Date(1_800_000_000_000).toISOString() });
   });
 
   it("retains active entitlement when cancellation is scheduled for period end", () => {
@@ -83,5 +83,6 @@ describe("Stripe subscription lifecycle patch mapping", () => {
     expect(patch).not.toHaveProperty("purchasedDoors");
     expect(patch).not.toHaveProperty("doorAllowance");
     expect(patch).not.toHaveProperty("quantity");
+    expect(patch).not.toHaveProperty("currentPeriodEnd");
   });
 });
