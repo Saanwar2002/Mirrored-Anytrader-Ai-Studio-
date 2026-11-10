@@ -2151,3 +2151,14 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Refetched source confirms both delete and transfer paths call the helper.
 - Latest branch head: `f1bbdcec72c515878b52fc8f96a3f94d86b2faef`; comparison: 239 ahead / 0 behind `main`.
 - Latest push run `42807065937` (run 667) failed before test steps because the Actions runner is unavailable (runner ID 0). No test execution is claimed.
+
+
+## Section 75 — Shared quota decision on ownership transfer
+
+- The property-claim transfer transaction now calls the same `evaluateGothamPropertyQuota` decision as property creation when calculating the new owner's next usage count.
+- This removes the transfer path's separate allowance/counter validation logic and ensures invalid usage, invalid allowance, exact-limit and limit-reached outcomes match property creation.
+- The transfer transaction stores the helper's `nextUsage` directly, alongside ownership changes, previous-owner decrement, and the transfer-claim idempotency record.
+- Existing previous-owner decrement remains guarded by `decrementGothamPropertyUsage`.
+- Source refetch confirms the old independent `newCount >= allowance` branch is gone and the shared decision is used before ownership is committed.
+- Latest branch head: `c096bdec76f2e1ac6dc2b219d966c61dc0f445d0`; comparison: 241 ahead / 0 behind `main`.
+- Latest push run `42807188031` (run 669) failed before steps with the same runner provisioning failure. No tests are claimed to have executed.
