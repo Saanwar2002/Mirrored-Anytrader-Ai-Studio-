@@ -2210,3 +2210,14 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - A matching legacy Gold Driver/Gotham alias plus its dedicated product field remains accepted; multiple dedicated product links and cross-user links remain rejected.
 - Added regression tests for conflicting membership/dedicated mapping and valid matching legacy alias.
 - Tests are authored but unexecuted while Actions runner provisioning remains unavailable.
+
+
+## Section 79 — Profile billing commands and homeowner subscription lifecycle (2026-11-10)
+
+- Found that the Profile paid-checkout request omitted the Firebase bearer token required by `requireAuth`; it now obtains an ID token and sends the Authorization header.
+- Profile cancellation previously wrote `cancelAtPeriodEnd` / `homeownerCancelAtPeriodEnd` directly to Firestore, which the user rules correctly reject. It now calls the authenticated `/api/cancel-subscription` command and reports server errors.
+- Profile free-tier selection also wrote protected entitlement fields directly. Added `POST /api/select-free-tier`: only the free Standard Homeowner or Free Explorer/PAYG selection is accepted for the corresponding account role, dynamic homeowner pricing must confirm £0, and an existing non-terminal paid subscription must be cancelled before downgrade. Entitlement writes happen server-side in a transaction.
+- Added explicit landlord subscription lifecycle mapping. The existing checkout resolver identifies the paid homeowner plan as `subscriptionType: landlord`; webhook updates now write `homeownerSubscriptionStatus`, `homeownerCancelAtPeriodEnd`, and `homeownerCurrentPeriodEnd` instead of incorrectly changing trader membership fields. Product-ID selection, cancellation and reactivation now support the landlord discriminator.
+- Added lifecycle and subscription-ID guard regression coverage for landlord mapping, terminal/grace states, and ID selection.
+- Latest observed branch head before this documentation update: `12e876e3b5c1b0a79665c86b198166e4bdc4bacf`; comparison: 279 ahead / 0 behind `main`. No merge or production changes.
+- Latest Actions runs continue to fail before any steps start because runner ID is 0 and no runner is assigned. All new tests remain unexecuted.
