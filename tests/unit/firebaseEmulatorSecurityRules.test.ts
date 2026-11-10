@@ -396,6 +396,12 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       }));
     });
 
+    it("15B. Property owners cannot bypass quota accounting by deleting directly", async () => {
+      await seedPrivateProperty("prop_delete_via_command", "user_property_creator");
+      const ownerDb = testEnv.authenticatedContext("user_property_creator", { role: "customer" }).firestore();
+      await assertFails(deleteDoc(doc(ownerDb, "properties", "prop_delete_via_command")));
+    });
+
     it("16. Property private access works only for authorized users", async () => {
       await seedPrivateProperty("prop_auth_1", "user_alice");
       const ownerDb = testEnv.authenticatedContext("user_alice").firestore();
