@@ -5,7 +5,6 @@ import { QRCodeSVG } from "qrcode.react";
 import { X, ArrowRight, ShieldCheck, Copy, Check, Share2, AlertTriangle, Clock, RefreshCw, KeyRound, UserCheck, Trash2, Mail, ExternalLink, Printer } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
-import { generateTransferCode } from "./propertyUtils";
 
 interface TransferOwnershipModalProps {
   property: any;
@@ -18,7 +17,7 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
   const [buyerName, setBuyerName] = useState(property.transferTargetName || "");
   const [buyerEmail, setBuyerEmail] = useState(property.transferTargetEmail || "");
   const [validityDays, setValidityDays] = useState<number>(30);
-  const [generatedCode, setGeneratedCode] = useState<string>(property.transferCode || generateTransferCode());
+  const [generatedCode, setGeneratedCode] = useState<string>(property.transferCode || "");
   const [submitting, setSubmitting] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -291,9 +290,9 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
                         />
                         <button
                           type="button"
-                          onClick={() => setGeneratedCode(generateTransferCode())}
+                          onClick={() => setGeneratedCode("")}
                           className="p-3 bg-slate-100 hover:bg-slate-200 border border-black rounded-xl text-slate-700 transition"
-                          title="Generate new code"
+                          title="Transfer code is generated securely when activated"
                         >
                           <RefreshCw className="w-4 h-4" />
                         </button>
