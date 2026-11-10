@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import { useAuth } from "./AuthProvider";
 import { 
   db, collection, query, where, onSnapshot, doc, 
-  setDoc, deleteDoc, updateDoc, addDoc, serverTimestamp, 
+  setDoc, deleteDoc, updateDoc, serverTimestamp, 
   handleFirestoreError, OperationType, sendNotification 
 } from "@/src/firebase";
 import { cn } from "@/src/lib/utils";
@@ -22,6 +22,7 @@ import BnplFinancingModal from "./BnplFinancingModal";
 import { PropertyPassportModal } from "./PropertyPassportModal";
 import { syncJobToGoogleCalendar, openGoogleCalendarUrl } from "../services/googleCalendarService";
 import { lookupPostcode } from "../services/postcodeService";
+import { createPropertyViaCommand } from "../services/propertyCommandService";
 
 interface HomeHealthWidgetProps {
   completedJobs?: any[];
@@ -322,15 +323,9 @@ export default function HomeHealthWidget({ completedJobs = [], userPostcode }: H
           await updateDoc(doc(db, "properties", activeProperty.id), propData);
           toast.success("Property specifications updated in Property Passport & Firestore!");
         } else {
-          const newDocRef = await addDoc(collection(db, "properties"), {
-            ...propData,
-            ownerId: user.uid,
-            userId: user.uid,
-            homeownerId: user.uid,
-            status: "active",
-            createdAt: new Date().toISOString()
-          });
-          setSelectedPropertyId(newDocRef.id);
+          const { updatedAt: _updatedAt, ...newPropertyData } = propData;
+          const createdProperty = await createPropertyViaCommand(user, newPropertyData);
+          setSelectedPropertyId(createdProperty.id);
           toast.success("New Property Passport created & address linked!");
         }
       } else {
