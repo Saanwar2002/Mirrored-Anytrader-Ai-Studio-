@@ -3082,3 +3082,25 @@ This is a source-audit finding only. No source code or tests were changed or run
 - No source code, Firestore rules, or tests were changed in this section.
 - No tests, typecheck, build, CI, Stripe calls, production operations, or production data changes were run.
 - Next: inspect the exact Firestore security rules and all other branch occurrences of the fee fields, then consolidate the trusted accrual/settlement design before editing financial code.
+
+
+## Section 128 — Firestore rules reject the current client-side cash-fee writes
+
+### Exact integration-branch evidence
+- `firestore.rules` blob `0d1139b17382491e47d7f0151fd41187978abedb`:
+  - `match /users/{userId}` lines 279–307 allows an owner to update only an explicit profile allowlist. `pendingPlatformFees` and `totalBusinessMileage` are not in that allowlist. Only an admin bypasses the owner allowlist.
+  - `match /ride_requests/{rideId}` lines 357–395 allows an assigned driver to update only `status`, `location`, and `updatedAt`; the cash completion write in `DriverTerminal.tsx` changes fields including `finalFare`, `platformFeeOwed`, `reportedCashCollected`, `reportedCashDiscrepancy`, and `completedAt`. Those fields are not allowed in the assigned-driver update branch.
+  - Passenger updates are also explicitly barred from changing `finalFare` and financial status fields. The driver-acceptance branch is limited to status/driver assignment fields.
+- Therefore the observed `DriverTerminal.tsx` cash-completion path attempts two direct Firestore writes that the checked-in rules reject for an ordinary authenticated driver: the ride financial completion update and the user fee-balance increment. The surrounding client catch logs a failure; the UI's “Cash Trip Recorded” confirmation is reached only if those writes succeed. This is a code/rules mismatch, not evidence that a production request was tested.
+- Exact branch-wide scan of `server.ts` found the fee-balance reads/zeroing in the two driver fee routes, but no server-side accrual writer for `pendingPlatformFees` and no other `fee_settlement` fulfillment writer. The one cash accrual attempt found remains in the client component.
+
+### Consequences and repair implications
+1. The prior Section 127 wording that the client “writes” the cash ride and increments the balance should be read as “attempts to write”; the checked-in Firestore rules deny both operations for a normal driver.
+2. Cash trip completion can fail at the first prohibited ride update, so the subsequent fee-balance increment may never execute. The route must not assume the pending balance reflects all completed cash rides.
+3. Do not fix this by broadening client Firestore permissions for financial fields. Route the entire cash completion operation through a trusted server command that authenticates the assigned driver, validates the ride lifecycle and cash evidence, calculates fees from server-owned configuration, and atomically/idempotently writes the completed ride plus fee accrual.
+4. Add emulator tests proving ordinary drivers cannot directly mutate these protected fields and proving the new server command performs the intended atomic operation. Verify the actual deployed rules separately before any live rollout.
+
+### Status
+- Section 128 is documentation only; no rules or application code changed.
+- No emulator tests, CI, build, or production checks were run.
+- Next: map the existing server-side ride completion/force-complete commands and their authentication/lifecycle guards so the repair can reuse the correct trusted boundary rather than introduce a parallel completion path.
