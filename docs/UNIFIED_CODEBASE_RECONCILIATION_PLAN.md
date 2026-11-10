@@ -2662,3 +2662,11 @@ Commits: worker operation `aa6817322f470e3616723ec3e64a4b46e14394b3`; checkout i
 **Verification boundary:** these changes have been written to the integration branch, but tests, TypeScript checking, build and CI have not been run. No live Stripe request, Firebase production read/write, worker startup or deployment was performed. Before rollout, add deterministic mocked tests for missing PaymentIntent, no eligible traders, attempt exhaustion, concurrent triggers, Stripe success, pending/failed refund statuses, thrown/ambiguous responses and late error-vs-success ordering. Review the interval/listener attempt-creation race separately; this change prevents duplicate refund operations but does not yet make attempt creation itself transactionally exclusive.
 
 Next: add mocked worker-level regression coverage and execute the local type/test/build gates when the GitHub runner/billing issue is resolved; then implement read-only reconciliation of stored refund operation IDs against Stripe.
+
+## Section 111 — Single-writer Instant Match attempt creation (2026-11-10)
+
+Follow-up race review found that the Firestore snapshot listener and 10-second timeout poll can both observe the same match/attempt state and concurrently create a next trader attempt. `initiateNextAttempt` now uses deterministic attempt document IDs (`{matchId}_{attemptNumber}`) and a Firestore transaction that reads both the current match and target attempt document before writing. It creates the attempt and advances `currentAttempt` atomically only when the match remains `searching`, the target attempt does not exist, and `currentAttempt === attemptNumber - 1`. Concurrent callers therefore converge on one attempt document rather than creating duplicate trader notifications.
+
+Commit: `749d830a61acdb53a169d85cd61ea13281e6f2c8`.
+
+**Verification boundary:** source-level fetch-back only. No Firestore emulator test or worker-level mocked regression test has yet been added or executed. Existing random-ID attempt records remain readable by the existing query; all new attempts use deterministic IDs. This does not retroactively deduplicate historical duplicate attempts.
