@@ -2181,3 +2181,11 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Kept non-terminal states unchanged (including `past_due`, `incomplete`, and `paused`) pending the product grace policy, and kept independent Video Pro entitlement as a separate route to invoice eligibility.
 - Added focused tests for all three terminal statuses, non-terminal preservation, independent Video Pro access, and legacy tier-only profiles.
 - The new tests are authored but unexecuted because the current GitHub Actions runs fail before runner steps start.
+
+
+## Section 75 — Firestore property-transfer metadata boundary (2026-11-10)
+
+- The property owner update rule blocked direct ownership changes but left transfer workflow metadata writable by the owner. A client could set fields such as `transferStatus`, `transferCode`, or `pendingTransferToUid` without using the server's transfer-code generation and validation route.
+- Tightened the owner-update protected-key list to include ownership identity, homeowner identity, transfer target/status/code/expiry/email/history/claim timestamps, previous-owner count, and verification state. Admin update permissions and ordinary owner-editable property fields remain unchanged.
+- Added emulator security-rule regression coverage for attempts to forge each important transfer field and a positive assertion that an owner can still update a normal property name.
+- The existing security workflow includes `firebaseEmulatorSecurityRules.test.ts`; this regression is part of that existing suite. It is still unexecuted because the GitHub Actions runner is not provisioning.
