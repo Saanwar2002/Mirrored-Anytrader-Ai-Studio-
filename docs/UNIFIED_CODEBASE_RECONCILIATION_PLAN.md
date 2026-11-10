@@ -2507,3 +2507,12 @@ Commit: `79421cc2c5951efbbdbdb69479b651ebdd606980`.
 
 
 Ownership predicate/test commits: `a407a5494a307bf60edbc9e42a5cc0bc37cc72b4` and `35cfba743bc16bf9c272129f2d78dc50b314d734`.
+
+
+## Section 99 — Production wiring for webhook claim ownership tests (2026-11-10)
+
+The ownership predicate introduced with Section 98 is now used by the webhook implementation rather than existing only as a testable utility. Replaced the duplicated status/token comparisons in all 12 checkout transaction callbacks and in the final event completion and failure paths with `ownsStripeWebhookClaim`. The existing unpaid-checkout transaction retains its explicit equivalent guard. This aligns the production guard with the unit-tested predicate and makes stale-worker/successor-token rejection directly testable at the shared decision boundary.
+
+Commits: `152b17ec1593578c79c0b918d8ec4306d1eb2313` (production wiring), with predicate and tests in `a407a5494a307bf60edbc9e42a5cc0bc37cc72b4` and `35cfba743bc16bf9c272129f2d78dc50b314d734`.
+
+**Verification:** source fetch-back confirms the import and predicate use. Unit tests are present but not yet executed. The pure predicate test proves stale-token rejection; it does not simulate Firestore transaction retries or lease takeover during an in-flight callback. Emulator/integration coverage remains required. FIN-01 remains open.
