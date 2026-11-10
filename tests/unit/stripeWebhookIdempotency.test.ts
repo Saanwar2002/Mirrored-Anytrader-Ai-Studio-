@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldClaimStripeWebhookEvent } from "../../src/server/stripeWebhookIdempotency.ts";
+import { ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "../../src/server/stripeWebhookIdempotency.ts";
 
 describe("Stripe webhook event claim decision", () => {
   const now = 1_800_000_000_000;
