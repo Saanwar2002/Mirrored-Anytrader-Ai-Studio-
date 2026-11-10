@@ -3137,3 +3137,30 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 129 is documentation only; no application code or rules changed.
 - No tests, emulator, typecheck, build, CI, or production operation was run.
 - Next: inspect `executeAcceptRideCommand` and ride lifecycle helpers, then design the server-owned cash completion command around the existing trusted patterns.
+
+
+## Section 130 — Existing trusted ride acceptance is reusable, but the formal ride state machine does not model cash-confirmation states
+
+### Exact integration-branch evidence
+- `src/server/driverAuthorization.ts` blob `35c44e8d788e8a24c98af5fde11196749c5b7038`:
+  - `executeAcceptRideCommand` is a server-authoritative pattern: derives the effective driver from authenticated `caller.uid`, rejects a conflicting body `driverId`, checks driver eligibility, reads the ride in a Firestore transaction, verifies the ride is available and unassigned, and atomically assigns the driver plus marks the driver busy.
+  - This is an acceptance command only. It does not implement arrival, in-progress, cash collection, completion, commission accrual, or fee settlement.
+- `src/server/stateMachine.ts` blob `85f6e4ecbf757c7907870cfff8754a34af1f6dff`:
+  - `RideStatus` and `VALID_RIDE_TRANSITIONS` model `draft/requested/searching/offered/accepted/arriving/arrived/in_progress/completed/cancelled`.
+  - The formal transitions allow `in_progress -> completed`, but do not include the UI statuses `awaiting_cash_confirm` or `cash_confirmed`.
+  - `validateRideTransition` would therefore reject these UI-only intermediate states if applied directly; the new command must explicitly reconcile or replace these statuses rather than bypass the state machine.
+- `server.ts` imports and mounts the acceptance command at `POST /api/rides/accept`, but the route inventory in Section 129 found no corresponding server-side ride completion command.
+- `DriverTerminal.tsx` loads `remoteConfig.platformCommissionRate` into local `fareConfig`; the cash fee calculation is performed in the client component, not in a trusted command. The server must resolve the authoritative commission/fixed-fee configuration independently.
+
+### Design constraints for the replacement
+1. Preserve the trusted command shape from ride acceptance: authenticated caller identity, resource ownership/assignment checks, server transaction, and explicit conflict handling.
+2. Use the formal ride state machine as the lifecycle authority. Decide whether partial-cash confirmation is a first-class ride/payment substate or a separate payment-collection record; do not silently add ad hoc ride statuses.
+3. Separate the ride lifecycle transition from the financial ledger event while committing both atomically where they share the same Firestore transaction.
+4. Derive fare, waiting time, commission, and fixed fee from persisted authoritative ride data and server-owned configuration. Reject client-provided commission or fee amounts.
+5. Use a stable ride-scoped idempotency key and immutable cash-collection evidence so repeated calls or snapshots cannot duplicate commission accrual, passenger debt, or driver metrics.
+6. Add transition tests for full cash, partial cash, passenger confirmation, timeout/force completion, already-completed rides, reassignment, and concurrent duplicate requests.
+
+### Status
+- Section 130 is documentation only; no code or tests changed.
+- No tests, emulator, typecheck, build, CI, or production operations were run.
+- Next: inspect the remote-config/server pricing authority and the exact cash confirmation/timeout callbacks to specify the command input contract before implementation.
