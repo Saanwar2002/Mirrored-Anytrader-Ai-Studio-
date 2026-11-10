@@ -1900,7 +1900,6 @@ async function startServer() {
             const landlordPatch = isLandlord
               ? buildLandlordCheckoutFulfillmentPatch(
                   subscriptionId,
-                  rawTier,
                   await stripeClient.subscriptions.retrieve(subscriptionId) as any
                 )
               : null;
@@ -2335,7 +2334,6 @@ async function startServer() {
             await db.collection("users").doc(userId).set({
               ...buildLandlordCheckoutFulfillmentPatch(
                 mockLandlordSubscriptionId,
-                meta.tierName || "landlord",
                 { status: "active", cancel_at_period_end: false, current_period_end: Math.floor(mockLandlordPeriodEnd.getTime() / 1000) }
               ),
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
