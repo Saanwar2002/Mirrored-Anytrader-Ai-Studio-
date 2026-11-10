@@ -103,10 +103,9 @@ describe("Firestore Property Security Remediation & Privacy Invariants Test Suit
       if (!evaluateIsSignedIn(ctx)) return false;
       const uid = ctx.auth!.uid;
       const isOwner = propData.ownerId === uid || propData.userId === uid;
-      const isPendingRecipient = propData.transferStatus === "pending" && propData.pendingTransferToUid === uid;
       const isAdminUser = evaluateIsAdmin(ctx);
 
-      return Boolean(isOwner || isPendingRecipient || isAdminUser);
+      return Boolean(isOwner || isAdminUser);
     };
 
     const privateProperty = {
@@ -183,6 +182,13 @@ describe("Firestore Property Security Remediation & Privacy Invariants Test Suit
       expect(() => {
         assertCanModifyProperty({ uid: "attacker_user_999" } as any, privateProperty);
       }).toThrow();
+    });
+
+    it("DENIES pending transfer recipients from mutating property ownership directly", () => {
+      const buyerCtx: SecurityContext = { auth: { uid: "user_buyer" } };
+      expect(evaluateCanReadPrivateProperty(buyerCtx, privateProperty)).toBe(true);
+      expect(evaluateCanModifyPrivateProperty(buyerCtx, privateProperty)).toBe(false);
+      expect(() => assertCanModifyProperty({ uid: "user_buyer" } as any, privateProperty)).toThrow();
     });
 
     it("STRIPS client-injected property ownership and privilege keys via sanitizeClientPayload", () => {
