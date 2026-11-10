@@ -60,3 +60,8 @@ describe("product-specific subscription ID selection", () => {
     expect(getSubscriptionIdForProduct({ subscriptionId: "sub_member" }, "tier")).toBe("sub_member");
   });
 });
+
+it("only uses the generic subscription ID for an explicitly landlord subscription", () => {
+  expect(getSubscriptionIdForProduct({ subscriptionType: "landlord", subscriptionId: "sub_landlord" }, "landlord")).toBe("sub_landlord");
+  expect(getSubscriptionIdForProduct({ subscriptionType: "tier", subscriptionId: "sub_membership" }, "landlord")).toBeUndefined();
+});
