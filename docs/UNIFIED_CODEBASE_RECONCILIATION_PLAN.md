@@ -2413,3 +2413,17 @@ Read-only inspection of `PaymentLedgerEngine.executeIdempotentOperation` confirm
 - FIN-05 cross-operation reconciliation: remains read-only design; no automatic transfers/refunds or ledger repairs.
 
 No source implementation changed. Next safe work is bounded diff review of ZIP-vs-integration server and payout files, then a read-only full archive manifest and required AI Studio/Firebase pre-change gate.
+
+
+## Section 91 — ZIP refund webhook and financial-source divergence (2026-11-10)
+
+A bounded source comparison of the latest Library ZIP against `integration/pr-consolidation-20261109` establishes:
+
+- The ZIP's `server.ts` contains a `charge.refunded` webhook branch. It writes one `refund_events/ref_{event.id}` document with charge ID, PaymentIntent ID, aggregate `charge.amount_refunded`, currency and status. It does **not** enumerate `charge.refunds.data`, follow Stripe refund pagination (`has_more`), or persist individual refund IDs. Therefore it is not a complete refund-level ingestion/reconciliation record. The event branch is absent from the integration `server.ts` inspected at this checkpoint; the ZIP is not evidence that this code is currently authoritative or deployed.
+- The ZIP and integration match exactly (Git blob SHA) for `src/server/paymentLedger.ts`, `src/services/stripeIntegrationService.ts`, `src/server/paymentVerification.ts`, `src/server/tripPaymentAuthorization.ts`, `tests/unit/paymentLedger.test.ts`, and `tests/unit/escrowReleaseIntegrity.test.ts`.
+- The ZIP differs from integration in `src/server/driverPayoutOrchestration.ts`, its unit test, and `server.ts`. The payout source must be line-reviewed before treating either version as superior; integration's existing claim-token fencing is to be preserved. The server difference is substantial (ZIP 271,157 bytes vs integration 317,000 bytes) and must not be wholesale copied.
+- Archive integrity check passed (705 entries; no corrupt ZIP members). This confirms readability only, not completeness or correspondence to the live AI Studio workspace.
+
+**FIN-02 refined:** the archived webhook only records aggregate refunded amount and cannot establish refund-level completeness. The integration branch currently lacks this event branch in the inspected server entry point. Locate any alternate integration refund ingestion path and establish the intended source of truth before designing a paginated Stripe refunds fetch; avoid duplicate event ingestion and never call Stripe/live financial APIs in tests.
+
+No application code or live financial data changed. Next: review the exact payout/server financial diffs, inventory archive paths against integration, then execute the AI Studio/Firebase pre-change gate before any remediation.
