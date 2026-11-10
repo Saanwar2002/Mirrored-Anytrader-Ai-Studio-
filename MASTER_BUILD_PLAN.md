@@ -158,4 +158,16 @@ For AnyTrader roles/portals only (homeowner, tradesperson, business/consultancy,
 | 2026-11-08 | PR #3 docs head `73deaf6278969c56842c90eed024e80e72279984` · CI #284 | Documentation-only branch passed all CI gates; this does not validate PR #1 or PR #2. | [PR #3](https://github.com/Saanwar2002/AnyTrader/pull/3) · [Actions run #284](https://github.com/Saanwar2002/AnyTrader/actions/runs/42478433490) |
 
 ## 10. Immediate next task
-**Immediate next task (AnyTrader scope):** isolate the Firestore evaluation error in the PR #1 invitation update predicate at `firestore.rules:637:24` without weakening tests; then run the full gate. Keep PRs draft/unmerged until CI is green and the AI Studio/Firebase pre-change gates are verified. Connect the Firebase integration and verify live project/database/rules/indexes/IAM/secrets; reconcile the actual AI Studio workspace SHA with GitHub before merge/deploy. Separately define the intended business-team invitation onboarding flow. Preserve AnyRoller behavior.
+
+**Active reconciliation task (2026-11-10):** continue the financial/security reconciliation on `integration/pr-consolidation-20261109`. The previously recorded invitation-predicate task is historical and is superseded by the current reconciliation sequence; do not infer that it remains the active blocker.
+
+1. Complete authoritative Stripe Gotham subscription lifecycle handling (renewal, payment failure, cancellation at period end, expiry/deletion and reactivation).
+2. Reconcile existing Gotham-owned property records into a server-maintained door-usage counter.
+3. Replace all direct client property-creation paths with one authenticated, validated, idempotent, transactionally quota-reserving server command. Preserve ordinary non-Gotham homeowner workflows.
+4. Deny direct client creation in `/properties` while preserving authorized read/update/delete/transfer behavior.
+5. Add boundary, forged-field, retry/idempotency, concurrency and Firestore emulator bypass tests.
+6. Run and inspect the complete CI gate; keep PR #5 draft/unmerged until all reconciliation and parity gates are satisfied.
+
+**Current call-graph evidence and implementation requirements:** see [Gotham Property Door-Quota Reconciliation Audit](GOTHAM_PROPERTY_QUOTA_AUDIT.md). Three direct creation paths were identified: `PropertyManager.tsx`, `Portfolio.tsx`, and `HomeHealthWidget.tsx`. The Gotham portal currently handles checkout, not direct property creation. Do not apply Gotham limits to ordinary homeowners.
+
+**Safeguards:** keep `main`, AI Studio, and production untouched; do not modify AnyRoller/taxi behavior; do not weaken security tests/rules; do not merge or deploy without complete green CI and owner approval.
