@@ -1990,3 +1990,11 @@ For every product, retrieve current Stripe state for non-deleted events, verify 
 ### Next action
 
 Add focused webhook tests using the existing Stripe webhook test harness, inspect entitlement consumers for Video Pro and membership, then run the complete CI gate. Continue to preserve all main/production/AI Studio safeguards from the prior sections.
+
+
+### Section 64 — Extracted subscription lifecycle mapping and regression tests
+
+- The production webhook now calls a pure mapping function in `src/server/subscriptionLifecycle.ts`.
+- Focused tests cover all five products, active and terminal entitlement changes, non-terminal status preservation, deleted events, cancellation scheduling, period-end persistence, Video Pro credential separation, and Gotham door-count non-mutation.
+- Event ordering markers and Firestore server timestamps remain owned by the webhook transaction.
+- Tests are authored but have not been executed in this GitHub-only workflow. Full CI remains a required release gate.
