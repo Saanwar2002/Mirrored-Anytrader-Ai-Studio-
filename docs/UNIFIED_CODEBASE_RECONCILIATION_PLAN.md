@@ -2683,3 +2683,17 @@ Regression tests added in `tests/unit/instantMatchRefundOperation.test.ts` for s
 Commits: worker safety change `ad27277cf0f4add0c7dcdc96a862571a51758d8b`; refund tests `9847d1694ee137738b793d09775e7143be9afb48`.
 
 **Verification boundary:** files were fetched back from the integration branch; tests have not been executed. The mocked tests validate intended state transitions but do not prove Stripe API behavior, Firestore transaction contention semantics, or recovery of an operation left `processing` by a process crash. The latter requires the planned read-only Stripe refund reconciliation before an operator may resolve it.
+
+## Section 113 — Read-only Instant Match refund reconciliation evidence (2026-11-10)
+
+Added `src/server/instantMatchRefundReconciliation.ts`, a side-effect-free lookup primitive that lists Stripe refunds filtered by the exact PaymentIntent and follows every `starting_after` page. A refund is considered a match only when its `instantMatchId` and `ANYTRADER_INSTANT_MATCH_EXPIRY` metadata, PaymentIntent ID, amount and currency all agree with local evidence. Multiple matching records or an identity/amount/currency mismatch produce `conflict`; a complete scan with no operation metadata match produces `not_found`; malformed or non-advancing pagination throws rather than presenting an incomplete scan as a negative result.
+
+New Instant Match records now persist checkout currency alongside `chargeAmountPence`, and the durable refund operation records the expected amount and currency. Historical operations without this evidence are deliberately not eligible for an exact automated match and require manual investigation.
+
+Regression coverage added in `tests/unit/instantMatchRefundReconciliation.test.ts`: multi-page exact match, complete-list absence, amount mismatch, malformed/non-advancing pagination and invalid local evidence. The helper performs no Firestore writes and exposes no refund creation/update/cancel path. Importantly, `not_found` is evidence only; it does not authorize automatic retry or a replacement refund.
+
+Stripe API reference: refund listing supports filtering by `payment_intent` and cursor pagination with `starting_after` (Stripe API reference mirror: https://www.postman.com/stripedev/stripe-developers/request/jp7b6s6/list-all-refunds).
+
+Commits: lookup helper `b13a85ab595777716f4e8b4644219b61321025f1`; operation evidence `a2c9474723ebbf45af645173d89f7246955bac16`; checkout currency `62ef0430c9a56961b6a20230e594b0acff530e9b`; regression tests `621b44a7255c7f98d2ad771a37ba1318f1464dfd`.
+
+**Verification boundary:** source fetch-back and static review only; no tests, typecheck or build executed. No Stripe API request or Firestore operation was made. This primitive is not yet wired to an operator/admin workflow and does not automatically change operation status. A `not_found` result must remain unresolved until the operator verifies the payment/charge context and any pending external activity.
