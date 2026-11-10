@@ -2106,6 +2106,7 @@ async function startServer() {
                     tx.create(matchRef, {
                       id: matchId, jobId: meta.jobId, customerId: userId || "",
                       chargeAmountPence: Number(session.amount_total || 0),
+                      currency: String(session.currency || "gbp").toLowerCase(),
                       chargeTier: "instant_match", feeWaived: false,
                       status: paymentIntentId ? "searching" : "refund_review_required",
                       refundStatus: paymentIntentId ? "not_started" : "manual_review",
