@@ -1698,8 +1698,9 @@ async function startServer() {
 
       // Idempotency: Use a transaction to atomically claim 'processing' state
       const eventRef = db.collection("processed_stripe_events").doc(event.id);
+      let claimToken: string | null = null;
       try {
-        const claimToken = await db.runTransaction(async (t: admin.firestore.Transaction) => {
+        claimToken = await db.runTransaction(async (t: admin.firestore.Transaction) => {
           const existing = await t.get(eventRef);
           const existingData = existing.exists ? existing.data() : undefined;
           if (!shouldClaimStripeWebhookEvent(existingData, Date.now())) {
@@ -1713,7 +1714,6 @@ async function startServer() {
             claimToken
           });
           return claimToken;
-          return true;
         });
 
         if (!claimToken) {
