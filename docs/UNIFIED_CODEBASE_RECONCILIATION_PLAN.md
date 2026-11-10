@@ -3709,3 +3709,25 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 150 is documentation only; no payout, Stripe, ledger, or ride changes.
 - No tests, emulator, typecheck, build, or CI run.
 - Next: inspect PaymentLedgerEngine's idempotency/entry model and Stripe Checkout Connect configuration to establish the proper distinct ledger entry types and transaction boundary.
+
+
+## Section 151 — PaymentLedgerEngine schema has no driver fee receivable or settlement allocation
+
+### `src/server/paymentLedger.ts` review
+- `LedgerEntry` is a single row shape: transaction/idempotency IDs, payer/payee, `amount`, `platformFee`, `netPayout`, currency, status and createdAt.
+- Allowed types are `ESCROW_DEPOSIT`, `ESCROW_RELEASE`, `PLATFORM_COMMISSION`, `REFUND`, and `RIDE_PAYMENT`. There is no explicit `DRIVER_FEE_RECEIVABLE`, `DRIVER_FEE_SETTLEMENT`, `STRIPE_TRANSFER`, `CASH_RIDE_COLLECTION`, or adjustment/allocation type.
+- The generic idempotency helper claims in a transaction, executes the supplied callback outside that transaction, and then marks the claim completed in a separate transaction. It can fence claim completion, but it does not make callback financial writes atomic with the claim; prior Section 142 covers lease takeover/concurrency implications.
+- Existing escrow funding writes milestone and ledger separately (previous section 142), reinforcing that the engine is not a general atomic journal yet.
+- A `PLATFORM_COMMISSION` label alone cannot distinguish fee earned/accrued from fee actually settled/received; `RIDE_PAYMENT` represents collection proof, not the driver debt balance.
+
+### Accounting model required for taxi
+- Immutable per-ride fee accrual row: rideId, completionOperationId, driverId, feePence, currency GBP, policyVersion, fee basis and status `receivable`; unique key on ride + completion operation.
+- Settlement allocation row(s): settlementAttemptId, receivable entry IDs/amounts, verified Stripe PaymentIntent/Checkout Session or cash evidence, settledPence, remainingPence, status. Partial settlement must not clear whole aggregate.
+- Separate external transfer/collection evidence from internal receivable and settlement allocation. A Stripe success webhook or verified PI is evidence; client success page is not.
+- Keep user `pendingPlatformFees` as derived/cache projection only. Reconcile it to sum of open receivable balances; never use aggregate as source of truth.
+- For settlement, atomically reserve/allocate receivables and persist an attempt before Stripe call; fulfill only from verified webhook/Stripe retrieval; release/reconcile failures without dropping debt. Cash settlement is a different evidence route but must allocate the same receivables.
+
+### Status
+- Section 151 is documentation only; PaymentLedgerEngine and financial records unchanged.
+- No tests, emulator, typecheck, build, or CI run.
+- Next: inspect existing `/api/driver/settle-fees` and webhook event handlers together to map current settlement attempt records, evidence and failure recovery, then define migration-safe settlement state transitions.
