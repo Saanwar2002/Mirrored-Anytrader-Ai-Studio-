@@ -159,7 +159,7 @@ export default function GothamHousingPortal() {
   const [isProcessing, setIsProcessing] = useState(false);
 
   const isGothamActive = Boolean(profile?.isGothamSubscriber || profile?.subscriptionType === "gotham_saas");
-  const isGothamCanceling = Boolean(profile?.gothamCancelAtPeriodEnd || profile?.cancelAtPeriodEnd);
+  const isGothamCanceling = Boolean(profile?.gothamCancelAtPeriodEnd);
 
   const handleSyncStripeB2BInvoice = async () => {
     if (!user) {
