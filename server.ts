@@ -1,4 +1,5 @@
 import express from "express";
+import { resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { buildSubscriptionLifecyclePatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -2090,11 +2091,9 @@ async function startServer() {
             return snap.empty ? null : { product, userDoc: snap.docs[0] };
           }));
           const linked = matches.filter((entry: any) => entry !== null) as Array<{ product: any; userDoc: any }>;
-          if (linked.length > 1) {
-            throw new Error("Stripe subscription ID is linked across multiple products; manual reconciliation required.");
-          }
-          if (linked.length === 1) {
-            const { product, userDoc } = linked[0];
+          const resolved = resolveSubscriptionProductMatch(linked);
+          if (resolved) {
+            const { product, userDoc } = resolved;
             const eventCreated = Number(event.created || 0);
             await db.runTransaction(async (tx: any) => {
               const latest = await tx.get(userDoc.ref);
