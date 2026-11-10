@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "./AuthProvider";
-import { db, handleFirestoreError, OperationType, collection, query, where, onSnapshot, addDoc, doc, deleteDoc, updateDoc } from "@/src/firebase";
+import { db, handleFirestoreError, OperationType, collection, query, where, onSnapshot, doc, deleteDoc, updateDoc } from "@/src/firebase";
 import { Plus, Building2, Wrench, Home, Briefcase, MapPin, Search, Edit, Trash2, Clock, Camera, ArrowLeft, CheckCircle2, Store, FileText, Share2 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { cn } from "@/src/lib/utils";
@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { PropertyPassportModal } from "./PropertyPassportModal";
 import { lookupPostcode } from "@/src/services/postcodeService";
 import { toast } from "sonner";
+import { createPropertyViaCommand } from "../services/propertyCommandService";
 
 export function PropertyManager() {
   const { user } = useAuth();
@@ -82,21 +83,12 @@ export function PropertyManager() {
           updatedAt: new Date().toISOString()
         });
       } else {
-        await addDoc(collection(db, "properties"), {
-          ownerId: user.uid,
+        await createPropertyViaCommand(user, {
           name: propertyName,
-          address: {
-            line1: addressLine1,
-            city: finalCity,
-            postcode: finalPostcode,
-            country: "UK"
-          },
+          address: { line1: addressLine1, city: finalCity, postcode: finalPostcode, country: "UK" },
           postcode: finalPostcode,
           city: finalCity,
-          propertyType: propertyType,
-          status: "active",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
+          propertyType
         });
       }
       setIsAdding(false);
