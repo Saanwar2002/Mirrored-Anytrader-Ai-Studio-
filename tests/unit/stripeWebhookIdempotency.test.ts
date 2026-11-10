@@ -35,3 +35,21 @@ describe("Stripe webhook event claim decision", () => {
     expect(shouldClaimStripeWebhookEvent({ status: "unknown" }, now)).toBe(true);
   });
 });
+
+
+describe("Stripe webhook claim ownership", () => {
+  it("accepts the current processing claim token", () => {
+    expect(ownsStripeWebhookClaim({ status: "processing", claimToken: "worker-a" }, "worker-a")).toBe(true);
+  });
+
+  it("rejects a successor's token after lease takeover", () => {
+    expect(ownsStripeWebhookClaim({ status: "processing", claimToken: "worker-b" }, "worker-a")).toBe(false);
+  });
+
+  it("rejects completed, failed, missing, and empty-token claims", () => {
+    expect(ownsStripeWebhookClaim({ status: "completed", claimToken: "worker-a" }, "worker-a")).toBe(false);
+    expect(ownsStripeWebhookClaim({ status: "failed", claimToken: "worker-a" }, "worker-a")).toBe(false);
+    expect(ownsStripeWebhookClaim(undefined, "worker-a")).toBe(false);
+    expect(ownsStripeWebhookClaim({ status: "processing", claimToken: "worker-a" }, null)).toBe(false);
+  });
+});
