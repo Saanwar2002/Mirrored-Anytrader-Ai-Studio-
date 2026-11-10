@@ -377,7 +377,7 @@ describe("Stripe Connect Fail-Closed Security & Mock Payment Gating", () => {
                 get: async () => ({
                   empty: false,
                   docs: [{
-                    data: () => ({ status: "completed", captured: true, amount: 5000 })
+                    data: () => ({ type: "RIDE_PAYMENT", status: "completed", captured: true, currency: "gbp", amount: 5000 })
                   }]
                 })
               })
