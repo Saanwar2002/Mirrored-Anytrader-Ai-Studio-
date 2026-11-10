@@ -728,4 +728,47 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(mockStore["ride_requests/ride_gold_stale"].appliedDriverTier).toBe("standard");
   });
 
+  it("18. Dry run releases its own lease and does not leave the ride processing", async () => {
+    mockStore["ride_requests/ride_dry_run"] = {
+      status: "completed", paymentStatus: "paid", payoutTransferred: false,
+      finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({
+      db: mockDb, stripeClient: mockStripe, dryRun: true,
+    });
+
+    const ride = mockStore["ride_requests/ride_dry_run"];
+    expect(result.processedCount).toBe(1);
+    expect(createdTransfers).toHaveLength(0);
+    expect(ride.payoutStatus).toBe("pending");
+    expect(ride.payoutClaimToken).toBeUndefined();
+    expect(ride.payoutLockedAt).toBeUndefined();
+  });
+
+  it("19. Stale payout worker cannot overwrite successor claim on Stripe failure", async () => {
+    mockStore["ride_requests/ride_stale_failure"] = {
+      status: "completed", paymentStatus: "paid", payoutTransferred: false,
+      finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+    mockStripe.transfers.create.mockImplementationOnce(async () => {
+      mockStore["ride_requests/ride_stale_failure"].payoutClaimToken = "successor_claim";
+      mockStore["ride_requests/ride_stale_failure"].payoutStatus = "processing";
+      throw new Error("STRIPE_RATE_LIMIT");
+    });
+
+    const result = await executeDriverPayoutOrchestrationCommand({
+      db: mockDb, stripeClient: mockStripe,
+    });
+
+    const ride = mockStore["ride_requests/ride_stale_failure"];
+    expect(result.failedCount).toBe(1);
+    expect(ride.payoutClaimToken).toBe("successor_claim");
+    expect(ride.payoutStatus).toBe("processing");
+    expect(ride.payoutLastError).toBeUndefined();
+    expect(ride.payoutTransferred).toBe(false);
+  });
+
 });
