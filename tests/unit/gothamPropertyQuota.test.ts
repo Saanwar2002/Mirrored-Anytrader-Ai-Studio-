@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateGothamPropertyQuota } from "../../src/server/gothamPropertyQuota.ts";
+import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "../../src/server/gothamPropertyQuota.ts";
 
 describe("Gotham property quota decision", () => {
   it("allows creation below the purchased allowance", () => {
@@ -26,5 +26,21 @@ describe("Gotham property quota decision", () => {
 
   it("keeps counting existing usage without enforcing an inactive allowance", () => {
     expect(evaluateGothamPropertyQuota(7, 0, false)).toEqual({ allowed: true, nextUsage: 8 });
+  });
+});
+
+
+describe("Gotham property usage decrement", () => {
+  it("decrements a positive valid counter", () => {
+    expect(decrementGothamPropertyUsage(3)).toEqual({ allowed: true, nextUsage: 2 });
+  });
+
+  it("rejects zero to prevent underflow", () => {
+    expect(decrementGothamPropertyUsage(0)).toEqual({ allowed: false, reason: "underflow" });
+  });
+
+  it("rejects negative and non-integer counters", () => {
+    expect(decrementGothamPropertyUsage(-1)).toEqual({ allowed: false, reason: "invalid_usage" });
+    expect(decrementGothamPropertyUsage(1.5)).toEqual({ allowed: false, reason: "invalid_usage" });
   });
 });
