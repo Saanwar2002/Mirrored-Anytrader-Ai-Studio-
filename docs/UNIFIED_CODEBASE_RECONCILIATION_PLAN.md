@@ -2055,3 +2055,23 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Invoice subscription ID extraction now accepts both legacy string and expanded-object forms from `invoice.subscription` and the newer `parent.subscription_details.subscription` path. It no longer stringifies an expanded Stripe object to `[object Object]`. Five focused regression cases cover these forms and missing subscription data.
 
 - Hardened the pure mapper so an explicit `customer.subscription.deleted` event always wins over any inconsistent payload status: it records `canceled` and revokes entitlement even if the payload unexpectedly says `active`. A focused regression test protects this invariant.
+
+
+## Section 67 — Invoice reference and terminal-event hardening (2026-11-10)
+
+- Normalized Stripe invoice subscription references through `extractInvoiceSubscriptionId`, accepting:
+  - legacy `invoice.subscription` string IDs;
+  - expanded `invoice.subscription` objects with an `id`;
+  - current `invoice.parent.subscription_details.subscription` string or expanded-object forms.
+- This avoids coercing an expanded Stripe object into the invalid identifier `[object Object]`. Missing subscription references safely produce an empty string and skip product synchronisation.
+- Explicit subscription-deleted events now override any inconsistent payload status: the mapper records `canceled` and revokes the product entitlement even if the payload status were unexpectedly `active`.
+- Added five invoice-reference tests and one explicit deleted-event precedence test. The lifecycle suite now contains 23 test cases/parameterized cases as authored; none have run successfully yet.
+- Source refetch confirms the webhook uses the invoice normalizer, uses both pure lifecycle helpers, and has exactly one closing transaction callback in the lifecycle block.
+- Latest branch head: `7733f1e0fbf909afe0712b3ac868c8abb0c0a9b3`; comparison: 209 ahead / 0 behind `main`.
+- Latest push workflow run `42805244370` (run 637) failed with runner ID 0, blank runner name and no steps. This continues the Actions runner/billing provisioning failure; no source-level CI result is available.
+- `main` remains untouched. No production changes, deployment, or AI Studio synchronisation.
+
+### Next
+
+- Continue auditing subscription lifecycle mapping and the remaining reconciliation items while Actions capacity is unavailable.
+- Once GitHub billing/runner provisioning is restored, rerun and inspect the complete release gate; do not infer correctness from the authored tests or runner failures.
