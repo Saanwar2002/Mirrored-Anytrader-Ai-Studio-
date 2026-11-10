@@ -1666,6 +1666,7 @@ async function startServer() {
   // Stripe Webhook MUST come before express.json()
   app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     let event: Stripe.Event | undefined;
+    let claimToken: string | null = null;
     try {
       let stripeClient;
       try {
@@ -1698,7 +1699,6 @@ async function startServer() {
 
       // Idempotency: Use a transaction to atomically claim 'processing' state
       const eventRef = db.collection("processed_stripe_events").doc(event.id);
-      let claimToken: string | null = null;
       try {
         claimToken = await db.runTransaction(async (t: admin.firestore.Transaction) => {
           const existing = await t.get(eventRef);
@@ -3925,10 +3925,10 @@ async function startServer() {
           }
           const quotaDecision = evaluateGothamPropertyQuota(currentUsage, doorsAllowed, isGothamEntitled);
           if (!quotaDecision.allowed) {
-            if (quotaDecision.reason === "invalid_usage") {
+            if ("reason" in quotaDecision && quotaDecision.reason === "invalid_usage") {
               throw new ForbiddenError("Gotham property usage is invalid. Please contact support.");
             }
-            if (quotaDecision.reason === "invalid_allowance") {
+            if ("reason" in quotaDecision && quotaDecision.reason === "invalid_allowance") {
               throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
             }
             throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
@@ -4076,7 +4076,7 @@ async function startServer() {
             if (usageSnap?.exists) {
               const decrement = decrementGothamPropertyUsage(Number(usageSnap.data()?.propertyCount));
               if (!decrement.allowed) {
-                if (decrement.reason === "invalid_usage") {
+                if ("reason" in decrement && decrement.reason === "invalid_usage") {
                   throw new ForbiddenError("Gotham property usage is invalid; deletion requires reconciliation.");
                 }
                 throw new ForbiddenError("Gotham property usage is inconsistent; deletion requires reconciliation.");
@@ -4268,7 +4268,7 @@ async function startServer() {
           if (previousUsageSnap.exists) {
             const decrement = decrementGothamPropertyUsage(Number(previousUsageSnap.data()?.propertyCount));
             if (!decrement.allowed) {
-              if (decrement.reason === "invalid_usage") {
+              if ("reason" in decrement && decrement.reason === "invalid_usage") {
                 throw new ForbiddenError("Previous owner's Gotham usage requires reconciliation.");
               }
               throw new ForbiddenError("Previous owner's Gotham usage is inconsistent; transfer requires reconciliation.");
@@ -4304,10 +4304,10 @@ async function startServer() {
           }
           const quotaDecision = evaluateGothamPropertyQuota(currentNewCount, allowance, currentNewIsGotham);
           if (!quotaDecision.allowed) {
-            if (quotaDecision.reason === "invalid_usage") {
+            if ("reason" in quotaDecision && quotaDecision.reason === "invalid_usage") {
               throw new ForbiddenError("New owner's Gotham usage requires reconciliation.");
             }
-            if (quotaDecision.reason === "invalid_allowance") {
+            if ("reason" in quotaDecision && quotaDecision.reason === "invalid_allowance") {
               throw new ForbiddenError("New owner's Gotham door allowance is invalid.");
             }
             throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");

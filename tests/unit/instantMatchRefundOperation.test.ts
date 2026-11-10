@@ -22,7 +22,7 @@ describe("Instant Match expiry refund operation", () => {
   it("records a successful refund and its Stripe identity", async () => {
     const { db, store, matchRef } = memoryDb({ status: "searching", stripePaymentIntentId: "pi_123" });
     const create = vi.fn().mockResolvedValue({ id: "re_123", status: "succeeded" });
-    await expireAndRefundInstantMatch(db, matchRef, { refunds: { create } } as any, "attempts_exhausted");
+    await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "attempts_exhausted");
     expect(create).toHaveBeenCalledTimes(1);
     expect(create.mock.calls[0][0].payment_intent).toBe("pi_123");
     expect(create.mock.calls[0][1].idempotencyKey).toBe("instant-match-expiry:match-1");
@@ -32,23 +32,23 @@ describe("Instant Match expiry refund operation", () => {
   it("places missing PaymentIntent identity into manual review without calling Stripe", async () => {
     const { db, store, matchRef } = memoryDb({ status: "searching" });
     const create = vi.fn();
-    await expireAndRefundInstantMatch(db, matchRef, { refunds: { create } } as any, "no_eligible_traders");
+    await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "no_eligible_traders");
     expect(create).not.toHaveBeenCalled();
     expect(store.get("instant_match_refunds/match-1").status).toBe("manual_review");
   });
   it("records an ambiguous Stripe exception and never automatically replays it", async () => {
     const { db, store, matchRef } = memoryDb({ status: "searching", stripePaymentIntentId: "pi_123" });
     const create = vi.fn().mockRejectedValue(new Error("network timeout"));
-    await expireAndRefundInstantMatch(db, matchRef, { refunds: { create } } as any, "attempts_exhausted");
+    await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "attempts_exhausted");
     expect(store.get("instant_match_refunds/match-1")).toMatchObject({ status: "reconciliation_required" });
-    await expireAndRefundInstantMatch(db, matchRef, { refunds: { create } } as any, "attempts_exhausted");
+    await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "attempts_exhausted");
     expect(create).toHaveBeenCalledTimes(1);
   });
   it("does not replay a completed operation", async () => {
     const { db, store, matchRef } = memoryDb({ status: "expired", stripePaymentIntentId: "pi_123" });
     store.set("instant_match_refunds/match-1", { status: "succeeded", stripeRefundId: "re_existing" });
     const create = vi.fn();
-    await expireAndRefundInstantMatch(db, matchRef, { refunds: { create } } as any, "attempts_exhausted");
+    await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "attempts_exhausted");
     expect(create).not.toHaveBeenCalled();
   });
 });
