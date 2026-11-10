@@ -111,3 +111,14 @@ export function extractInvoiceSubscriptionId(invoice: any): string {
   if (subscription && typeof subscription.id === "string") return subscription.id;
   return "";
 }
+
+export function isStripeSubscriptionLifecycleEventType(eventType: string): boolean {
+  return [
+    "customer.subscription.created",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
+    "invoice.payment_failed",
+    "invoice.payment_succeeded",
+    "invoice.paid"
+  ].includes(eventType);
+}
