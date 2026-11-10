@@ -2011,3 +2011,5 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - This is a runner/provisioning failure before checkout or dependency installation. It is not a test failure and does not validate any source change.
 - Combined commit status remains empty; this is not a pass. The prior historical green run remains tied to its older commit only.
 - Next operational action: obtain a functioning GitHub Actions runner / inspect repository Actions runner availability, then rerun the workflow. Do not change tests, weaken gates, or label the branch validated to work around this infrastructure failure.
+
+- Consumer/checkout-path review removed the generic `currentPeriodEnd` write from Gotham lifecycle updates. Gotham now writes only `gothamCurrentPeriodEnd`, avoiding accidental overwrites of membership or other product billing dates; a regression assertion protects this boundary.
