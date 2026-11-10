@@ -2580,3 +2580,16 @@ FIN-03 recovery preparation:
 - Commits: metadata implementation `061475123b34bcda9f06940f5c35a293f8aef953`; metadata regression assertion `e6448fcd96f1b81971c4edd78a3bd0aad8abdb0d`.
 
 **Remaining FIN-03 work:** implement a bounded, read-only Stripe transfer lookup/pagination path and compare metadata, destination account, amount and currency against the durable Firestore operation/ledger record. Any zero, multiple or mismatched candidates must remain manual-review cases; never automatically issue a replacement transfer. Also cover legacy transfers without operation metadata. Tests and CI remain unexecuted because GitHub Actions continues to fail before runner assignment. No live Stripe/Firebase calls were made.
+
+
+## Section 106 — FIN-02 current integration-branch source-of-truth correction (2026-11-10)
+
+A fresh review at integration HEAD `b430e240d0d0a8fdb3c6372d7176a036d8db08f8` resolves the earlier uncertainty about the webhook entry point:
+
+- The current `server.ts` contains the `POST /api/webhook` route and its Stripe event dispatch. The inspected dispatch handles `checkout.session.completed` and subscription lifecycle events; it contains no `charge.refunded` branch, no `refunds.data` iteration, and no `stripe.refunds.list` pagination call.
+- The complete Git tree for this exact commit contains 715 entries and is not truncated. Its paths include the payment ledger, Stripe integration, verification, subscription guards and webhook idempotency modules/tests, but no separately named refund or webhook handler module.
+- Therefore, the older FIN-02 statement describing embedded-refund pagination and a `requiresPaginationReview` marker must be scoped to the historical PR #5/ZIP source examined in the earlier audit. It is not an accurate description of the current integration branch. The archived `charge.refunded` branch was not copied forward and must not be restored blindly.
+- The current branch's Stripe webhook is not evidence of refund ingestion. FIN-02 remains open: identify the authoritative refund event/recording path, establish whether refunds are intentionally handled by a separate trusted process, and then design complete, retry-safe refund-level ingestion. If webhook ingestion is required, it must paginate all Stripe refunds, validate charge/payment-intent/currency identity, deduplicate individual refund IDs, preserve cumulative refund limits, and leave incomplete page retrieval retryable. No automatic financial correction is authorised.
+- Static source review only. No Stripe API, Firebase production data, or live refund operations were called. No tests were run as part of this source-location check.
+
+Next: inspect all current-branch references to refund persistence and the payment ledger's refund recording contract before proposing a new event handler. Keep the ZIP/PR #5 implementation as historical evidence, not as a source to transplant.
