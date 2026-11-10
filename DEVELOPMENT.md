@@ -1,5 +1,20 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+
+## 🏘️ Gotham Subscription Lifecycle & Server-Authoritative Property Creation (November 10, 2026)
+
+- **Stripe lifecycle reconciliation:** `server.ts` now refreshes Gotham subscription status from Stripe for `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`, `invoice.payment_succeeded`, and `invoice.paid`. Invoice events trigger a live subscription retrieval; invoice payment alone does not grant access. The handler maps by the stored `gothamSubscriptionId`, rejects ambiguous user mappings, guards against older event timestamps, and synchronizes entitlement/cancellation/period-end fields.
+- **Gotham cancellation/reactivation:** `/api/cancel-subscription` and `/api/reactivate-subscription` now require the explicit `gothamSubscriptionId`; they no longer fall back to a generic membership subscription ID. Missing Stripe configuration cannot silently record a successful live Gotham cancellation/reactivation. The fabricated 30-day period-end fallback was removed for Gotham.
+- **Purchased door allowance:** Gotham pricing uses a single aggregate Stripe subscription item with quantity 1; the purchased door allowance is stored separately in `users/{uid}.gothamDoorsCount`. Lifecycle refresh must not replace this value with Stripe's item quantity.
+- **Property create command:** authenticated `POST /api/properties` in `server.ts` derives owner identity from the verified Firebase token, validates a strict property-business-field allowlist, rejects client ownership/billing/usage/verification fields, and creates the record with server-owned owner/user IDs.
+- **Gotham quota transaction:** the command identifies Gotham accounts from server-owned profile fields and permits creation only while `isGothamSubscriber` is true, the stored lifecycle status is `active` or `trialing`, a Gotham subscription ID exists, and the purchased door allowance is valid. It counts existing records across `ownerId`, `userId`, and `landlordId`, then serializes reservation on `gotham_property_usage/{uid}` while creating the property. Non-Gotham users do not enter the Gotham quota path.
+- **Idempotency:** clients send an `Idempotency-Key`; the server stores a user-scoped request marker in `property_creation_requests` and returns the original property ID for a replay.
+- **Client migration:** `src/services/propertyCommandService.ts` is used by `PropertyManager.tsx`, `Portfolio.tsx`, and `HomeHealthWidget.tsx`. Existing-property updates remain on their prior authorized update paths.
+- **Firestore rules:** direct client `create` on `/properties/{propertyId}` is denied. Existing property read/update/delete/transfer rules are retained; trusted server Admin SDK writes bypass client rules as designed.
+- **Regression coverage:** added a Firestore emulator rules test proving an authenticated homeowner cannot directly create a property document.
+
+**Verification caveat:** this is an implementation record, not a release sign-off. The new API entitlement/quota tests (ordinary homeowner, active Gotham boundary, inactive/expired, cancellation-at-period-end, forged payload, idempotency replay, concurrent boundary) have not yet been added/run. No new emulator/unit/typecheck/build/release-audit/CI result has been observed. Live AI Studio/Firebase parity and deployment configuration remain unverified. Keep the integration branch isolated; do not merge or deploy until all gates pass.
+
 ## 🛠️ Notification API, Demand Zones & Live Tracking Permission Remediation (November 6, 2026)
 - **1. Neutralized Error 0 (`Error sending notification via server API: SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON`)**:
   - **Root Cause**: `src/firebase.ts` invoked `fetch("/api/notifications")` without resolving via `getApiUrl` or specifying an `Accept: application/json` header, and parsed `res.json()` directly without inspecting `content-type`. When gateway timeouts, proxy pages, or static fallbacks returned HTML (`<!doctype ...`), `res.json()` threw an unhandled `SyntaxError`.
