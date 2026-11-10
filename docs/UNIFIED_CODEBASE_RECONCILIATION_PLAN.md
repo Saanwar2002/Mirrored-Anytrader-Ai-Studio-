@@ -2362,3 +2362,24 @@ The 2026-11-09 ZIP integrity check passed (705 archive entries). Git blob SHA co
 **Interim decision:** ZIP and integration agree byte-for-byte on ledger engine, Stripe integration service, payment verification/authorization, and ledger/escrow integrity tests. Keep integration's payout orchestration and tests as baseline; do not copy ZIP versions. `server.ts` is also divergent (ZIP 271,222 bytes vs integration 317,000 bytes), so inspect only bounded webhook/refund/escrow route regions and preserve unrelated integration changes. No test suite was executed in this read-only pass; no CI run was associated with documentation commit `f5e99fe0e9e3bd346dc7b7a783d3c40f64008932`. No application or production state was changed.
 
 Next: complete bounded diff review for payout orchestration, its tests, and Stripe webhook/refund/escrow handlers; finish the 705-entry path manifest; then verify AI Studio/Firebase pre-change gates and run targeted tests before any implementation patch.
+
+
+## Section 88 — Focused server financial-path inspection (2026-11-10)
+
+### Stripe webhook claim/finalization
+
+- `server.ts` integration SHA `99512448b790c65a2cc1f64e26fa0d30a72cca7d` differs from ZIP SHA `0e935945b0cb7a3e6009030884aa620cc5dba175`. The integration webhook at `POST /api/webhook` verifies Stripe signatures and transactionally claims `processed_stripe_events/{event.id}` using `shouldClaimStripeWebhookEvent`; it writes `status: processing`, `claimedAt`, and a generated `workerId`. A duplicate/current processing event returns 200.
+- Inspection found no event-specific worker/claim token carried into fulfillment or guarded finalization in the reviewed handler region. Checkout fulfillment writes and final processed/failed status paths therefore need a stale-worker fencing review (FIN-01); do not treat lease claim alone as a fence.
+- The currently visible event branches are `checkout.session.completed` and `customer.subscription.deleted`; no `charge.refunded` event branch was found in integration `server.ts`. Refund reconciliation remains an explicit audit/remediation item and must locate the actual refund ingestion path before implementation.
+
+### Escrow release rollback
+
+- In the escrow release failure branch, the milestone is reverted to `funded`, `releaseStatus: failed`, and `lastTransferError` is stored; the branch also explicitly sets `releaseOperationId: null` (“Clear operation ID so it can be retried safely!”). The ledger row is marked failed afterward.
+- This destroys stable operation identity when Stripe's outcome is ambiguous. Keep FIN-03 open: persist/reuse a stable release operation/idempotency key and reconcile the Stripe transfer before retry. Do not patch by simply removing the reset without analyzing the command's retry and ledger semantics.
+
+### CI and safety status
+
+- No PR-triggered workflow run was returned for documentation commit `f5e99fe0e9e3bd346dc7b7a783d3c40f64008932`; this docs-only commit is not evidence of a green application test suite. No local emulator/test execution was performed in this pass.
+- Integration is now **305 commits ahead / 0 behind** main after the plan-only commits. Main remains untouched; no AI Studio, Firebase live rules, production records, or money movement was changed.
+
+Next: inspect `PaymentLedgerEngine.executeIdempotentOperation` binding semantics and escrow transfer Stripe idempotency/reconciliation; identify refund source and all webhook finalization writes; line-review ZIP payout/test deltas; finish whole-archive path manifest. Tests and AI Studio/Firebase pre-change gate remain required before implementation.
