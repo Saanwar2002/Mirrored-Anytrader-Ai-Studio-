@@ -3589,6 +3589,47 @@ async function startServer() {
       const propertyRef = db.collection("properties").doc();
       const userRef = db.collection("users").doc(userId);
       const usageRef = db.collection("gotham_property_usage").doc(userId);
+      const entitlementSnap = await userRef.get();
+      if (!entitlementSnap.exists) throw new NotFoundError("User profile not found.");
+      const entitlementProfile = entitlementSnap.data() || {};
+      const isGothamAccount = entitlementProfile.subscriptionType === "gotham_saas" || entitlementProfile.isGothamSubscriber === true;
+      let verifiedGothamSubscriptionId = "";
+      let verifiedGothamStatus = "";
+      if (isGothamAccount) {
+        verifiedGothamSubscriptionId = String(entitlementProfile.gothamSubscriptionId || "");
+        if (!verifiedGothamSubscriptionId) {
+          throw new ForbiddenError("No verified Gotham subscription is linked to this account.");
+        }
+        if (verifiedGothamSubscriptionId.startsWith("mock_")) {
+          if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCK_PAYMENTS !== "true") {
+            return res.status(503).json({ error: "Gotham subscription verification is unavailable." });
+          }
+          verifiedGothamStatus = String(entitlementProfile.gothamSubscriptionStatus || "");
+        } else {
+          let stripeClient;
+          try {
+            stripeClient = getStripe();
+          } catch (_) {
+            return res.status(503).json({ error: "Stripe is unavailable; Gotham entitlement could not be verified." });
+          }
+          let liveSubscription: Stripe.Subscription;
+          try {
+            liveSubscription = await stripeClient.subscriptions.retrieve(verifiedGothamSubscriptionId);
+          } catch (_) {
+            return res.status(503).json({ error: "Gotham subscription could not be verified with Stripe." });
+          }
+          verifiedGothamStatus = String(liveSubscription.status || "");
+          const paidThrough = Number((liveSubscription as any).current_period_end || 0);
+          const paidPeriodExpired = Boolean((liveSubscription as any).cancel_at_period_end) &&
+            paidThrough > 0 && Date.now() >= paidThrough * 1000;
+          if (!["active", "trialing"].includes(verifiedGothamStatus) || paidPeriodExpired) {
+            throw new ForbiddenError("Gotham subscription is not currently entitled to add properties.");
+          }
+        }
+        if (!["active", "trialing"].includes(verifiedGothamStatus)) {
+          throw new ForbiddenError("Gotham subscription is not currently entitled to add properties.");
+        }
+      }
       const requestRef = idempotencyKey
         ? db.collection("property_creation_requests").doc(userId + "_" + idempotencyKey)
         : null;
@@ -3607,10 +3648,9 @@ async function startServer() {
         const profile = userSnap.data() || {};
         const isGothamAccount = profile.subscriptionType === "gotham_saas" || profile.isGothamSubscriber === true;
         const isGothamEntitled = isGothamAccount &&
-          profile.isGothamSubscriber === true &&
-          ["active", "trialing"].includes(String(profile.gothamSubscriptionStatus || "").toLowerCase()) &&
-          typeof profile.gothamSubscriptionId === "string" &&
-          profile.gothamSubscriptionId.length > 0;
+          Boolean(verifiedGothamSubscriptionId) &&
+          profile.gothamSubscriptionId === verifiedGothamSubscriptionId &&
+          ["active", "trialing"].includes(verifiedGothamStatus.toLowerCase());
         if (isGothamAccount && !isGothamEntitled) {
           throw new ForbiddenError("Gotham subscription is not active. Property creation is unavailable until billing is restored.");
         }
