@@ -2162,3 +2162,13 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Source refetch confirms the old independent `newCount >= allowance` branch is gone and the shared decision is used before ownership is committed.
 - Latest branch head: `c096bdec76f2e1ac6dc2b219d966c61dc0f445d0`; comparison: 241 ahead / 0 behind `main`.
 - Latest push run `42807188031` (run 669) failed before steps with the same runner provisioning failure. No tests are claimed to have executed.
+
+
+## Section 76 — Stripe webhook claim/recovery decision coverage
+
+- Extracted the event-claim decision into `src/server/stripeWebhookIdempotency.ts`; the production webhook still performs the claim in its Firestore transaction and now delegates the completed/recent-processing/stale-processing/failed decision to the pure helper.
+- Existing behavior is preserved: completed events are not reclaimed; recent processing claims are not stolen; processing claims at least five minutes old can be recovered; failed/unknown records can retry; a processing record without a timestamp is treated as fresh.
+- Added six focused tests for those states. The helper does not replace the Firestore transaction or claim record.
+- Source refetch confirms the webhook invokes the helper inside the transaction before writing the processing claim.
+- Latest branch head: `0eceba1ca377c3b097f1c47d8895d60b4f6c52c3`; comparison: 246 ahead / 0 behind `main`.
+- Latest push run `42807383747` (run 674) failed before any steps with runner ID 0. No test result is available.
