@@ -2972,3 +2972,30 @@ Exact-branch inspection of `src/server/tripPaymentAuthorization.ts` found an add
 **Decision:** remove the non-production swallow-and-fallback behavior as part of the coordinated taxi checkout repair. Do not patch this command alone while the missing pre-checkout intent, webhook fulfillment, and tip source-of-truth issues remain unresolved.
 
 **Verification boundary:** source fetch and static control-flow inspection only. No code or tests changed or executed; no Stripe API, production Firestore data, customer payments or payouts accessed. Main remains untouched.
+
+## Section 125 — Checkout asynchronous-payment events and terminal unpaid-event handling
+
+### Exact source evidence
+
+The exact integration-branch webhook source was re-read in `server.ts` (blob SHA `d0d781571a2a1dd28478ca92930f4f9b919bf38a`), together with `src/server/stripeWebhookIdempotency.ts` (SHA `06f43eb8f727f4e85dceee294fcaaccc28d886c6`) and `tests/unit/stripeWebhookIdempotency.test.ts` (SHA `623a34d91591d37b85b3469ab064f827dadc7ea5`).
+
+Observed behavior:
+
+1. The `checkout.session.completed` branch treats any session whose `payment_status` is not `paid` as terminal: it writes the processed event as `completed` with `skippedReason: "payment_not_paid"`, removes the claim token, and returns HTTP 200.
+2. The inspected webhook source has no handler for `checkout.session.async_payment_succeeded` or `checkout.session.async_payment_failed`. Thus, if a Checkout Session is configured for an asynchronous payment method and its completed event arrives before settlement, this event is acknowledged as complete and there is no corresponding async-success fulfillment path in this webhook.
+3. The generic Checkout intent binding gate is only entered after the unpaid early-return. The event is therefore not held in a retryable pending state awaiting settlement.
+4. Taxi Checkout currently specifies `payment_method_types: ["card"]`, so this is not evidence of an active asynchronous taxi payment path today. It is a generic Checkout/webhook correctness gap and a future risk if accepted payment methods expand.
+5. The webhook claim helper considers a processing record with no readable `claimedAt` timestamp fresh indefinitely: `shouldClaimStripeWebhookEvent` substitutes `nowMs` when the timestamp is absent. The existing unit test explicitly codifies this behavior. This is fail-safe against stealing an un-timestamped active claim, but it also means a malformed/legacy processing record without `claimedAt` has no automatic stale-claim recovery path.
+
+### Required repair
+
+- Define event-state semantics for asynchronous Checkout methods. Do not mark an unpaid `checkout.session.completed` event as fulfilled/completed if the Session can still settle later.
+- Add explicit, intent-bound handling for `checkout.session.async_payment_succeeded` and `checkout.session.async_payment_failed`, or enforce and test a card-only configuration consistently at every generic Checkout entry point.
+- Async success must re-fetch or otherwise verify authoritative Stripe Session/PaymentIntent state, pass the same server-intent binding checks, and use the same idempotent product fulfillment path. Async failure must transition the intent/event to a retry-safe terminal failure/reconciliation state without granting entitlements.
+- Keep event delivery idempotency separate from payment settlement state: an event may be acknowledged as received without declaring the underlying intent fulfilled.
+- Define a bounded recovery policy for processing claims with missing or malformed `claimedAt`. Recovery must not let a worker steal a valid active claim; if safe age cannot be established, surface a reconciliation/alert state rather than silently leaving a permanent lock.
+- Add tests for unpaid completed followed by async success, async failure, duplicate async events, intent mismatch, and malformed/missing claim timestamps. Confirm the configured payment-method set for each Checkout route before deciding which event paths are mandatory.
+
+### Scope and safety
+
+This is a source-audit finding only. No source code or tests were changed or run in this section. No Stripe or Firestore production operations were performed. Taxi-specific binding, amount, destination, ride fulfillment, and ledger requirements in Sections 119–124 remain unresolved and must be repaired as a coordinated flow; this section does not authorize loosening any payment or payout gate.
