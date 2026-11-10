@@ -771,4 +771,24 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(ride.payoutTransferred).toBe(false);
   });
 
+  it("20. Successful Stripe transfer with lost lease reports transfer ID for reconciliation and preserves successor state", async () => {
+    mockStore["ride_requests/ride_success_lost_claim"] = { status: "completed", paymentStatus: "paid", payoutTransferred: false, finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit", stripePaymentIntentId: "pi_verified_5000" };
+    mockStripe.transfers.create.mockImplementationOnce(async (payload: any) => {
+      mockStore["ride_requests/ride_success_lost_claim"].payoutClaimToken = "successor_claim";
+      mockStore["ride_requests/ride_success_lost_claim"].payoutStatus = "processing";
+      return { id: "tr_ambiguous_456", amount: payload.amount, destination: payload.destination };
+    });
+    const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+    const ride = mockStore["ride_requests/ride_success_lost_claim"];
+    expect(result.processedCount).toBe(0);
+    expect(result.failedCount).toBe(1);
+    expect(result.details[0].status).toBe("reconciliation_required");
+    expect(result.details[0].transferId).toBe("tr_ambiguous_456");
+    expect(result.details[0].reason).toContain("Reconcile this transfer");
+    expect(ride.payoutClaimToken).toBe("successor_claim");
+    expect(ride.payoutStatus).toBe("processing");
+    expect(ride.payoutTransferred).toBe(false);
+    expect(ride.stripeTransferId).toBeUndefined();
+  });
+
 });
