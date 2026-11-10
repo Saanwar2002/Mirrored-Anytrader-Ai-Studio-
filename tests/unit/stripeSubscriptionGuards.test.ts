@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "../../src/server/stripeSubscriptionGuards.ts";
+import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "../../src/server/stripeSubscriptionGuards.ts";
 
 describe("explicit mock Stripe subscription guard", () => {
   it("recognizes mock subscription IDs", () => {
@@ -24,5 +24,31 @@ describe("explicit mock Stripe subscription guard", () => {
 
   it("does not classify real Stripe IDs as mock IDs", () => {
     expect(isExplicitMockSubscriptionAllowed("sub_real_123", "development", "true")).toBe(false);
+  });
+});
+
+
+describe("product-specific subscription ID selection", () => {
+  it("uses the dedicated Gold Driver ID before any legacy fallback", () => {
+    expect(getSubscriptionIdForProduct({ driverSubscriptionId: "sub_driver", subscriptionId: "sub_membership" }, "driver_gold")).toBe("sub_driver");
+  });
+
+  it("allows the legacy Gold Driver generic ID only with matching subscriptionType", () => {
+    expect(getSubscriptionIdForProduct({ subscriptionId: "sub_legacy", subscriptionType: "driver_gold" }, "driver_gold")).toBe("sub_legacy");
+    expect(getSubscriptionIdForProduct({ subscriptionId: "sub_membership", subscriptionType: "tier" }, "driver_gold")).toBeUndefined();
+  });
+
+  it("allows the legacy Gotham generic ID only with matching subscriptionType", () => {
+    expect(getSubscriptionIdForProduct({ subscriptionId: "sub_legacy", subscriptionType: "gotham_saas" }, "gotham_saas")).toBe("sub_legacy");
+    expect(getSubscriptionIdForProduct({ subscriptionId: "sub_membership", subscriptionType: "tier" }, "gotham_saas")).toBeUndefined();
+  });
+
+  it("uses dedicated IDs for Exclusive Leads and Video Pro", () => {
+    expect(getSubscriptionIdForProduct({ exclusiveSubscriptionId: "sub_excl" }, "exclusive_leads")).toBe("sub_excl");
+    expect(getSubscriptionIdForProduct({ videoProSubscriptionId: "sub_video" }, "video_pro")).toBe("sub_video");
+  });
+
+  it("uses the generic subscription ID for membership only", () => {
+    expect(getSubscriptionIdForProduct({ subscriptionId: "sub_member" }, "tier")).toBe("sub_member");
   });
 });
