@@ -1,5 +1,5 @@
 import express from "express";
-import { buildSubscriptionLifecyclePatch, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
+import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import crypto from "crypto";
@@ -2068,7 +2068,7 @@ async function startServer() {
         const isSubscriptionDeleted = event.type === "customer.subscription.deleted";
         const subscriptionId = event.type.startsWith("customer.subscription.")
           ? String(payload.id || "")
-          : String(payload.subscription || payload.parent?.subscription_details?.subscription || "");
+          : extractInvoiceSubscriptionId(payload);
         if (subscriptionId) {
           // Use Stripe's live state for update/invoice events; the deleted event itself
           // is terminal. A replaced subscription ID is never allowed to update the new one.
