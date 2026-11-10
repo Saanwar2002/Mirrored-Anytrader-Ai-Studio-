@@ -1,4 +1,4 @@
-export type SubscriptionProduct = "membership" | "gold_driver" | "exclusive_leads" | "video_pro" | "gotham_saas";
+export type SubscriptionProduct = "membership" | "landlord" | "gold_driver" | "exclusive_leads" | "video_pro" | "gotham_saas";
 
 export function buildSubscriptionLifecyclePatch(product: SubscriptionProduct, subscription: Record<string, any>, isDeleted = false): Record<string, any> {
   const status = isDeleted ? "canceled" : String(subscription.status || "unknown");
@@ -8,7 +8,11 @@ export function buildSubscriptionLifecyclePatch(product: SubscriptionProduct, su
   const periodEndIso = periodEnd > 0 ? new Date(periodEnd * 1000).toISOString() : undefined;
   const patch: Record<string, any> = {};
 
-  if (product === "membership") {
+  if (product === "landlord") {
+    patch.homeownerSubscriptionStatus = status;
+    patch.homeownerCancelAtPeriodEnd = Boolean(subscription.cancel_at_period_end);
+    if (periodEndIso) patch.homeownerCurrentPeriodEnd = periodEndIso;
+  } else if (product === "membership") {
     patch.subscriptionStatus = status;
     patch.cancelAtPeriodEnd = Boolean(subscription.cancel_at_period_end);
     if (entitled) { patch.isPro = true; patch.isProInvoiceSubscriber = true; }
@@ -75,7 +79,8 @@ export function resolveSubscriptionProductMatch(
       const legacyType = String(userData.subscriptionType || "");
       const legacyProduct: SubscriptionProduct =
         legacyType === "driver_gold" ? "gold_driver" :
-        legacyType === "gotham_saas" ? "gotham_saas" : "membership";
+        legacyType === "gotham_saas" ? "gotham_saas" :
+        legacyType === "landlord" ? "landlord" : "membership";
       if (legacyProduct !== dedicated[0].product.key) {
         throw new Error("Stripe subscription ID is linked to conflicting product fields; manual reconciliation required.");
       }
@@ -86,6 +91,18 @@ export function resolveSubscriptionProductMatch(
 
   const userData = generic.userDoc.data ? generic.userDoc.data() : {};
   const legacyType = String(userData.subscriptionType || "");
+  if (legacyType === "landlord") {
+    return {
+      ...generic,
+      product: {
+        ...generic.product,
+        key: "landlord",
+        idField: "subscriptionId",
+        lastCreated: "homeownerSubscriptionLastEventCreated",
+        lastId: "homeownerSubscriptionLastEventId"
+      }
+    };
+  }
   if (legacyType === "driver_gold") {
     // A newer dedicated subscription supersedes this legacy generic ID.
     if (userData.driverSubscriptionId && userData.driverSubscriptionId !== userData.subscriptionId) return null;
