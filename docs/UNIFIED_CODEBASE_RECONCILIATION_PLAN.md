@@ -3360,3 +3360,34 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 136 is documentation only; no route, UI, schema, test, Firestore rule, pricing record, or production configuration changed.
 - No tests, emulator, typecheck, build, or CI were run in this step.
 - Next: trace every server and client consumer of the proposed canonical pricing fields, decide the exact supported formula and legacy migration/rounding policy, then implement the strict server schema/command and its tests.
+
+
+## Section 137 — Fare formula is inconsistent across passenger quote, driver simulation, and cash completion; pricing schema cannot yet be finalized safely
+
+### Exact integration-branch evidence
+- `src/components/passenger/PassengerBooking.tsx` blob `ef0fc1e0c03d777cd460863241a86b2c54d318ec`:
+  - Initial passenger quote calculates `baseFare + distanceMiles * distanceRate + durationMinutes * timeRate`, then applies `minFare`.
+  - Vehicle category multiplier and surge are applied in a later `getComputedFare` path; fixed surge is added or multiplier surge applied.
+  - Config is read from `platform_config/rides` in multiple effects; one effect merges raw data, another maps selected fields with truthy defaults. Commission/fixed fee are not part of passenger's fare quote, but fee/wait values are used later in lifecycle handling.
+- `src/components/driver/DriverTerminal.tsx` blob `40db85db97f62c425787fd64b77ea241d3dd8eb8`:
+  - Ride simulation calculates `max(minFare, baseFare + simulatedDistance * distanceRate)` and omits `timeRate * simulatedTime`; surge and priority fee are applied afterward.
+  - Live cash completion logic previously documented calculates base fare from ride estimate and waiting, then derives platform fee from commission and fixed trip fee. This is a separate path, not a shared authoritative pricing function.
+  - Driver fare config can be overridden by Remote Config's `platformCommissionRate`, so simulator/Remote Config can diverge from Firestore commission.
+- `src/components/driver/DriverEarnings.tsx` blob `bfacf90c6bc81c5a84d4c71009622df3669f20fb` and `src/components/driver/DriverJobs.tsx` blob `173418417b339c4549b8bb75fa2531e17abbba71`:
+  - Driver earnings are independently reconstructed from final fare, tip, commission and fixed fee; some fallback paths hardcode 12% or use legacy `commission` percent field.
+  - Earnings screens also read `platform_config/global_tiers` and may override/retain tier commission, meaning the displayed net amount is not necessarily tied to the ride's original pricing/fee snapshot.
+- `src/components/RidesCommandCenter.tsx` blob `1078ff7c6dd0d9407cddfb5a0c1edeef8fc98915`:
+  - Its simulator computes base + distance + time, minimum, vehicle multiplier, surge and surcharge; its saved config includes dispatch/operational fields in the same document.
+  - The UI's `commission` percent is converted to decimal `commissionRate`, while `PricingFares` uses a percentage UI and writes the same decimal field.
+
+### Conclusions / blockers
+1. There is no single shared fare calculation implementation across passenger, driver and admin simulator paths. The initial canonical config command must not be mistaken for a reconciliation of fare calculations.
+2. A trustworthy future ride record needs an immutable pricing snapshot at quote/acceptance (formula version, config version, currency, relevant rates/multipliers/surge, gross fare and component breakdown). Commission/fixed fee should be captured at the point of financial authorization, not recomputed from today's admin settings at settlement.
+3. Cash completion must consume server-calculated fare/fee values and explicit collected amount; it cannot accept driver-reported fare, commission, wait seconds, or shortfall as authoritative. Server should derive allowable wait/shortfall from ride events and validated policy.
+4. Before finalizing config schema, enumerate and agree the fare formula (distance/time source, rounding stage, min fare placement, category multipliers, surge, priority, waiting, tips, cancellation and statutory surcharges). Existing UIs demonstrate differing calculations and cannot establish a safe single formula.
+5. The immediate safe coding step is therefore a narrowly versioned **configuration storage/validation command**, not a new fare calculator or cash settlement endpoint. Keep financial activation blocked until formula/snapshot and ride lifecycle are reconciled.
+
+### Status
+- Section 137 is documentation only; no source code, tests, route, UI, rules, or pricing values changed.
+- No unit tests, emulator, typecheck, build, or CI were run in this step.
+- Next: trace all completion/settlement fee paths and identify whether any immutable fare/commission snapshot already exists; then implement the isolated config command with explicit legacy field mapping and versioning.
