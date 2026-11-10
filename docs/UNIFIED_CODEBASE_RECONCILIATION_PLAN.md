@@ -2013,3 +2013,11 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Next operational action: obtain a functioning GitHub Actions runner / inspect repository Actions runner availability, then rerun the workflow. Do not change tests, weaken gates, or label the branch validated to work around this infrastructure failure.
 
 - Consumer/checkout-path review removed the generic `currentPeriodEnd` write from Gotham lifecycle updates. Gotham now writes only `gothamCurrentPeriodEnd`, avoiding accidental overwrites of membership or other product billing dates; a regression assertion protects this boundary.
+
+
+### Legacy subscription-ID resolution follow-up
+
+- The existing cancellation/reactivation routes explicitly support legacy Gold Driver and Gotham records stored in generic `subscriptionId` alongside `subscriptionType`.
+- The webhook resolver now classifies those generic IDs using that established discriminator, while preferring a dedicated product-specific ID when both are present.
+- It deduplicates matches for the same user and fails closed for multiple users or multiple dedicated product links.
+- Regression tests cover legacy Gold Driver/Gotham fallback, membership default, dedicated-ID precedence, duplicate-user/product collisions and no-match behavior.
