@@ -2051,3 +2051,5 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 2. Add/execute an end-to-end webhook test harness for the product resolver, duplicate event claim, replaced IDs, same-second event ordering, invoice-triggered refresh, and terminal deletion.
 3. Continue the outstanding reconciliation sections for Gotham quota concurrency/idempotency, PR #2 membership/boost/refund/webhook safeguards, PR #5 reconciliation, and Stripe product lifecycle/grace policy.
 4. Do not merge, deploy, sync AI Studio, or weaken release gates before all required tests and audits pass.
+
+- Invoice subscription ID extraction now accepts both legacy string and expanded-object forms from `invoice.subscription` and the newer `parent.subscription_details.subscription` path. It no longer stringifies an expanded Stripe object to `[object Object]`. Five focused regression cases cover these forms and missing subscription data.
