@@ -1819,3 +1819,33 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
   - `src/components/HomeHealthWidget.tsx` around lines 320–334: when no active property is selected, creates a root property with `ownerId`, `userId`, `homeownerId`, property/boiler/condition fields and active status.
 - Therefore the migration must cover at least three UI create paths: PropertyManager, Portfolio, and HomeHealthWidget. Portfolio and PropertyManager duplicate much of the property creation UX and need a shared trusted API/service to avoid policy drift.
 - GitHub code search indexes the default branch; fetched file contents above were explicitly read from integration. Treat the search as a discovery aid, not an exhaustive proof of integration contents. Continue searching integration tree/call sites and server/Admin SDK/import flows before tightening rules.
+
+
+## Section 59 — Gotham quota migration: property-write call-site inventory (2026-11-10)
+
+### Confirmed direct client create paths
+The following integration-branch components create properties documents directly with Firestore addDoc(collection(db, "properties"), ...):
+1. src/components/PropertyManager.tsx (around line 85): ownerId, name, address, postcode/city, propertyType, active status, timestamps.
+2. src/components/Portfolio.tsx (around line 269): same core schema plus contactName, contactPhone, accessInstructions.
+3. src/components/HomeHealthWidget.tsx (around line 325): creates Property Passport with ownerId, userId, homeownerId, property data, active status and createdAt; updates an existing property directly when editing.
+- Search also surfaced TenantReportPortal.tsx and PostJobWizard.tsx, but excerpts did not establish that either creates a property. Do not include them in migration until actual write operations are inspected.
+- No server-side property-create endpoint was found in the inspected server route inventory. Existing server property routes found so far are intelligence/rollup and predictive-maintenance operations, not canonical property creation.
+
+### Migration implications
+- The three confirmed client create paths must converge on one authenticated server command before Firestore direct-create is denied.
+- Preserve their distinct payload fields; normalize into a shared validated property schema without dropping Property Passport fields, contacts, access instructions, or UK postcode/address structure.
+- Editing existing properties is separate from creating new licensed slots. Existing update/delete/transfer rules and property owner/landlord/tenant access must not be unintentionally broken.
+- The direct create rule currently permits ownerId/userId owner writes and admin writes; it does not enforce Gotham entitlement or door count.
+- Property quota semantics remain undecided: source evidence does not yet establish whether every user's default allowance is zero, one, or a free baseline, nor whether gothamDoorsCount means purchased total or incremental capacity. Do not ship an assumed default or revoke/deny existing inventory until pricing/UX contract and existing customer data are reconciled.
+
+### Implementation gate
+1. Inspect authoritative Gotham plan catalogue, checkout request payload, fulfilment fields, subscription management UI, and all property delete/transfer/admin workflows.
+2. Confirm entitlement semantics and define active/legacy grandfathering and over-quota behaviour.
+3. Implement atomic reservation/creation with UID from verified bearer token (never request body), transactionally checking entitlement and quota; include idempotency so retries do not consume multiple slots.
+4. Migrate all three confirmed create call sites and test each payload shape.
+5. Only after migration, deny ordinary direct client property creation in Firestore rules; preserve explicit admin/trusted-server pathways.
+6. Emulator coverage: unauthenticated, spoofed UID, non-subscriber/default plan, within limit, at limit, concurrent attempts, idempotent retry, delete/release, transfer, admin, legacy existing properties, tier upgrade/downgrade and Stripe expiry.
+7. Run full CI; no main merge, AI Studio sync or deployment until promotion criteria are satisfied.
+
+### Status
+- Inventory and source inspection only. No property API, client migration, or Firestore rule changes committed in this section.
