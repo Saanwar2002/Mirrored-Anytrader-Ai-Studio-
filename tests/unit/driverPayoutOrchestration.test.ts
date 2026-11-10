@@ -4,6 +4,7 @@ import {
   executeDriverPayoutOrchestrationCommand,
   DRIVER_BASE_SHARE_RATE,
   PLATFORM_COMMISSION_RATE,
+  GOLD_DRIVER_COMMISSION_RATE,
   PAYOUT_LEASE_DURATION_MS,
 } from "../../src/server/driverPayoutOrchestration.ts";
 
@@ -663,4 +664,68 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(mockStore["ride_requests/ride_no_stripe_dest"].payoutTransferred).toBe(false);
     expect(mockStore["ride_requests/ride_no_stripe_dest"].payoutStatus).toBe("pending_stripe_onboarding");
   });
+  it("16. Gold Driver entitlement applies 10% commission to base fare, keeps full tip, and persists tier audit fields", async () => {
+    mockStore["users/driver_gold"] = {
+      uid: "driver_gold",
+      role: "driver",
+      isDriver: true,
+      stripeAccountId: "acct_driver_gold_123",
+      isGoldDriver: true,
+      driverTier: "gold",
+      driverSubscriptionId: "sub_gold_active",
+      driverSubscriptionStatus: "active",
+      commissionRate: 0.10,
+    };
+    mockStore["ride_requests/ride_gold_commission"] = {
+      status: "completed",
+      paymentStatus: "paid",
+      payoutTransferred: false,
+      finalFare: 50.0,
+      tipAmount: 5.0,
+      assignedDriverId: "driver_gold",
+      driverId: "driver_gold",
+      stripePaymentIntentId: "pi_verified_123",
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+
+    expect(result.processedCount).toBe(1);
+    expect(createdTransfers).toHaveLength(1);
+    expect(createdTransfers[0].payload.amount).toBe(5000); // £45 base share + £5 tip
+    expect(createdTransfers[0].payload.metadata.commissionRate).toBe(String(GOLD_DRIVER_COMMISSION_RATE));
+    expect(createdTransfers[0].payload.metadata.driverTier).toBe("gold");
+    const completedRide = mockStore["ride_requests/ride_gold_commission"];
+    expect(completedRide.appliedCommissionRate).toBe(GOLD_DRIVER_COMMISSION_RATE);
+    expect(completedRide.appliedDriverTier).toBe("gold");
+    expect(completedRide.platformFee).toBe(5);
+    expect(completedRide.driverEarnings).toBe(50);
+  });
+
+  it("17. Gold flags without a live subscription ID/status cannot lower the standard commission", async () => {
+    mockStore["users/driver_gold_stale"] = {
+      uid: "driver_gold_stale",
+      role: "driver",
+      isDriver: true,
+      stripeAccountId: "acct_driver_gold_stale",
+      isGoldDriver: true,
+      commissionRate: 0.10,
+      driverSubscriptionStatus: "canceled",
+    };
+    mockStore["ride_requests/ride_gold_stale"] = {
+      status: "completed",
+      paymentStatus: "paid",
+      payoutTransferred: false,
+      finalFare: 50.0,
+      assignedDriverId: "driver_gold_stale",
+      driverId: "driver_gold_stale",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+
+    await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+
+    expect(createdTransfers[0].payload.amount).toBe(4400);
+    expect(createdTransfers[0].payload.metadata.commissionRate).toBe(String(PLATFORM_COMMISSION_RATE));
+    expect(mockStore["ride_requests/ride_gold_stale"].appliedDriverTier).toBe("standard");
+  });
+
 });
