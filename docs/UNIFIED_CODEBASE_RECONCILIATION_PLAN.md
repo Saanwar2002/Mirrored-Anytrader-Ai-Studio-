@@ -2232,3 +2232,13 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Membership checkout conflict checks now consider the current product's own status fields, preventing an active Landlord or trader subscription from being silently replaced by a different membership checkout.
 - Source refetch confirms the live and mock fulfillment paths call the helper. Regression tests cover the resulting field mapping. CI is still unexecuted due the Actions runner provisioning failure.
 - Before this documentation update the branch was 284 ahead / 0 behind `main`, at `1932285359ad46e90158119212dd06a09fc15f19`. `main` remains untouched.
+
+
+## Section 81 — Authenticate all Profile, billing and job checkout callers (2026-11-10)
+
+- A repository-wide audit of `POST /api/create-checkout-session` found several additional active callers that omitted the Firebase bearer token required by the server's `requireAuth` middleware.
+- Added authenticated ID-token headers to the landlord upgrade in `Portfolio.tsx`, Exclusive Leads checkout in `TradesDashboard.tsx`, milestone funding, mediation stake and emergency boost checkout in `JobDetails.tsx`, job-post boost checkout in `PostJobWizard.tsx`, and emergency boost checkout in `EmergencyJobWizard.tsx`.
+- The Profile membership flow was already corrected in Section 79. BillingManager, TradesBannerAdStudio, TraderVideoVerificationCard and GothamHousingPortal already attach bearer tokens.
+- All discovered checkout callers now provide an Authorization bearer header; the server continues deriving the user identity from the verified token, not the request body.
+- Latest observed branch comparison before this documentation update: 290 ahead / 0 behind `main`, at `272ed836922dc39ff0d69505c307b0656ed6bc5a`. No production or main-branch changes.
+- GitHub Actions still fails before steps start due runner provisioning (runner ID 0); tests remain unexecuted.
