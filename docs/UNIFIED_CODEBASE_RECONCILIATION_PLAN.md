@@ -3495,3 +3495,25 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 141 is documentation only; no route, intent, Stripe session, ledger, or user balance changed.
 - No tests, emulator, typecheck, build, or CI were run in this step.
 - Next: review `PaymentLedgerEngine.recordEscrowFunding` and transaction/idempotency semantics alongside the existing webhook fulfillment markers; then specify precise fee receivable entries, reservation state transitions, and reversal/retry behavior.
+
+
+## Section 142 — Ledger engine review: release is transactionally written, escrow funding is not; idempotency lease is separate from the financial mutation
+
+### `src/server/paymentLedger.ts` findings (integration branch)
+- `LedgerEntry` uses integer minor units and explicit currency, but `createdAt` is an ISO string (not Firestore Timestamp). The type set remains escrow deposit/release, platform commission, refund, ride payment; no driver-fee receivable or settlement allocation type.
+- `recordEscrowFunding` wraps its work in `executeIdempotentOperation`, but milestone read/transition/update and ledger `.set()` are separate operations—not one Firestore transaction. A crash after milestone update but before ledger write (or vice versa) can leave a split state. The idempotency lock is in `payment_idempotency`, but it does not atomically include the business writes.
+- `releaseEscrowFunds` does use one Firestore transaction for job/quote/milestone and ledger release entry, then dispatches the domain event after commit. Stripe transfer is intentionally a separate post-commit side effect with deterministic Stripe idempotency key and persisted outcome/reconciliation path.
+- `executeIdempotentOperation` fences completion/cleanup by claim token and rejects concurrent live claims; however, its executor runs outside the idempotency transaction. A stale takeover may overlap a still-running external executor. This is safe only when the financial effect itself is independently transactional/idempotent (release's operation ID/transaction checks help; funding's split writes are weaker).
+- Existing `tests/unit/paymentLedger.test.ts` cover amount validation, 12% arithmetic, a simplified idempotency replay, operation-key mismatch, and stale claim fencing. Its mock DB does not model real Firestore transaction conflict/retry semantics or atomic multi-document commits; no emulator evidence is available.
+
+### Implications for fee-receivable design
+1. Do not implement cash-fee accrual by calling `executeIdempotentOperation` around independent aggregate increments. Use a Firestore transaction with immutable fee entry ID, source ride/completion ID, driver, exact pence/currency, policy version/rate, and unique source idempotency key.
+2. Fee settlement must transactionally reserve a specific set of outstanding fee entries (or a fixed ledger cursor/version), create the attempt + allocations + payment intent binding, and reject overlapping active reservations. Keep fees accrued after reservation outside the attempt.
+3. Verified paid webhook should atomically mark only those reserved entries settled and create a unique settlement marker; never write `pendingPlatformFees = 0` as a substitute for ledger reconciliation.
+4. Preserve external Stripe calls outside Firestore transactions. Use deterministic Stripe idempotency keys, explicit attempt states, and retry/reconciliation records for failures between Stripe Session creation and persistence.
+5. Add Firestore emulator concurrency/fault-injection tests for funding, reservations, webhook replay, claim takeover, and late fee accrual; unit mocks alone cannot establish these invariants.
+
+### Status
+- Section 142 is documentation only. No ledger engine, fee, payment, payout, or balance code changed.
+- No tests, emulator, typecheck, build, or CI were run.
+- Next: trace cash ride completion writes and identify a single trusted source event for fee accrual; then design an idempotent accrual command and schema before implementing settlement.
