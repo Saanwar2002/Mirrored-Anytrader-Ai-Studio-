@@ -3327,3 +3327,36 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 135 records implementation/test conventions only. No source code, tests, route, UI, Firestore rules, pricing document, or live configuration changed.
 - No unit tests, emulator tests, typecheck, build, or CI were run in this step.
 - Next: inspect exact admin route error handling, timestamp conventions, and existing test configuration, then implement the isolated pricing schema/command with unit tests before any client migration.
+
+
+## Section 136 — Admin route error handling is available, but existing pricing screens expose incompatible legacy units and mixed responsibilities
+
+### Exact integration-branch evidence
+- `server.ts` blob `d0d781571a2a1dd28478ca92930f4f9b919bf38a`:
+  - `requireAdmin` verifies a Firebase bearer token, calls `checkIsAdmin`, rejects unauthorized callers, and attaches the decoded token as `req.user`. The authenticated UID is available from that verified token; the route must not accept an actor UID in the request body.
+  - Existing admin routes demonstrate `app.post(path, requireAdmin, handler)`. New route error handling should use the shared `sendHttpError(res, error, req)` rather than exposing raw exception messages.
+  - The generic AI audit-log endpoint is still unsuitable for pricing audit: it spreads arbitrary request-body fields and accepts a client timestamp.
+- `src/server/httpErrors.ts` blob `4a94fe94f02303d3ba120f18d34b62691d90bd1e`:
+  - Provides `BadRequestError` (400), `ForbiddenError` (403), `ConflictError` (409), and `sendHttpError`, which emits structured safe error responses with a correlation ID. The pricing command should use `ConflictError` for an optimistic-version mismatch and route failures should flow through this responder.
+- `src/components/anyroller/PricingFares.tsx` blob `885960b0aeaba10a31096c565dbc05b39c161c36`:
+  - Loads `platform_config/rides`; UI commission is displayed as a percentage and stored as a decimal fraction (`commissionRate / 100`). Fare, distance, time, waiting, minimum fare, and fixed trip fee are displayed as GBP decimal numbers, not integer pence.
+  - Saves only its subset with `setDoc(..., { merge: true })`; it does not carry a config version or actor/audit metadata.
+  - Uses truthy fallback for several loaded fields, so legitimate numeric zero values can be replaced by defaults.
+- `src/components/RidesCommandCenter.tsx` blob `1078ff7c6dd0d9407cddfb5a0c1edeef8fc98915`:
+  - Loads and saves the same `platform_config/rides` document but mixes financial fare/commission values with dispatch, surge, vehicle, and operational settings.
+  - Its commission editor uses a percentage field called `commission`, and save maps it to decimal `commissionRate`; its sanitization uses `Number(value) || fallback`, which can turn explicit zero into a fallback for some fields.
+  - It writes with client-side `setDoc(..., { merge: true })`, not through a versioned server command.
+- `tsconfig.json` blob `fd560f328a1bdd5e1a5a83db0e89a5a14ec687fa` uses ESNext/bundler resolution, `allowImportingTsExtensions`, `noEmit`, and non-strict checking. The new module should follow the repository's existing explicit `.ts` import convention.
+- `tests/unit/propertyCommandService.test.ts` blob `a0e744354525419c3880dab8446545352fa68d47` demonstrates client command-service tests by stubbing global `fetch` with Vitest and asserting request/retry behavior. This is relevant for testing the future admin UI command client, but does not replace server command tests.
+
+### Reconciliation conclusions
+1. The server has a usable admin middleware and standardized 409 error class. The new endpoint can be narrowly scoped and should return the next config version; stale edits must return a structured conflict so the UI can reload rather than silently overwrite.
+2. The two current financial editors do not share a clean input contract. One calls commission `commissionRate` in storage and the other calls it `commission` in UI; both store a decimal fraction, while both show a percentage. Any migration must explicitly convert legacy values and reject ambiguous/invalid values rather than guessing.
+3. The UI stores monetary values as GBP decimal numbers, whereas the proposed authoritative server contract uses integer pence. The migration needs explicit conversion at the boundary, safe-integer checks, and tests for rounding (including half-penny inputs); do not silently round arbitrary legacy values without an agreed policy.
+4. Fare inputs (base/distance/time/wait/minimum), commission, fixed fee, and vehicle multipliers may influence ride pricing, but the first canonical schema must include only fields whose usage and formula are fully traced. Surge/dispatch policy should not be mixed into the financial config by convenience.
+5. A versioned endpoint must not simply redirect one screen while leaving another able to write the same financial fields directly. Both admin writers must be migrated or direct writes must be removed/denied in the same controlled rollout.
+
+### Status
+- Section 136 is documentation only; no route, UI, schema, test, Firestore rule, pricing record, or production configuration changed.
+- No tests, emulator, typecheck, build, or CI were run in this step.
+- Next: trace every server and client consumer of the proposed canonical pricing fields, decide the exact supported formula and legacy migration/rounding policy, then implement the strict server schema/command and its tests.
