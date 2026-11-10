@@ -3,6 +3,7 @@ import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
+import { evaluateCheckoutIntentBinding } from "./src/server/checkoutIntentIntegrity.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import crypto from "crypto";
@@ -1739,18 +1740,13 @@ async function startServer() {
           throw new Error("Checkout fulfillment rejected: payment intent record was not found.");
         }
         const intent = intentDoc.data() || {};
-        const sessionCurrency = String(session.currency || "").toLowerCase();
-        const expectedAmount = Number(intent.amount);
-        if (
-          intent.userId !== session.client_reference_id ||
-          intent.checkoutSessionId !== session.id ||
-          intent.mode !== session.mode ||
-          !Number.isSafeInteger(expectedAmount) ||
-          expectedAmount !== Number(session.amount_total) ||
-          String(intent.currency || "").toLowerCase() !== sessionCurrency ||
-          (intent.paymentIntentId && intent.paymentIntentId !== session.payment_intent) ||
-          !["session_created", "processing"].includes(String(intent.status))
-        ) {
+        const bindingState = evaluateCheckoutIntentBinding(intent, session as any);
+        if (bindingState === "pending") {
+          // Stripe can deliver checkout.session.completed before the checkout route
+          // persists the returned Session ID on the intent. Keep this retryable.
+          throw new Error("Checkout intent binding is still being finalized; retry webhook processing.");
+        }
+        if (bindingState === "mismatch") {
           await intentRef.update({
             status: "review_required",
             reviewReason: "checkout_session_intent_binding_mismatch",
@@ -2509,6 +2505,19 @@ async function startServer() {
       }
 
       const session = await stripe.checkout.sessions.create(sessionOptions);
+      if (!db) throw new Error("Checkout intent database binding is unavailable.");
+      const sessionPaymentIntentId = typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : typeof (session.payment_intent as any)?.id === "string"
+          ? (session.payment_intent as any).id
+          : null;
+      await db.collection("payment_intents").doc(intentId).update({
+        checkoutSessionId: session.id,
+        currency: String(session.currency || "gbp").toLowerCase(),
+        paymentIntentId: sessionPaymentIntentId,
+        status: "session_created",
+        sessionCreatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
 
       res.json({ url: session.url });
     } catch (error: any) {
