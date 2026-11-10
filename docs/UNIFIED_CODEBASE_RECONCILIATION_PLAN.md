@@ -2108,3 +2108,13 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Added a regression case asserting a dedicated Gotham ID takes precedence when a different membership ID exists.
 - Latest observed branch head at code review: `a7019e16352abba399ea2832fedcaa452a917894`; branch was 227 ahead / 0 behind `main` before this documentation update. No changes to `main`.
 - CI remains blocked: the latest observed push run `42806318058` (run 654) failed. Previous runs continue to fail before steps with runner ID 0; no code test result is available.
+
+
+## Section 71 — Property-create retry idempotency (2026-11-10)
+
+- Reviewed `createPropertyViaCommand` against the server's `property_creation_requests` idempotency record.
+- The client previously generated a fresh UUID for every invocation. A retry after a timeout or lost response therefore used a new key and could create a second property even if the first server transaction had committed.
+- The client now keeps the pending key per authenticated user and serialized payload until a successful response, reusing it after network/HTTP failures. It clears the pending key after success so a later intentional create of the same property payload starts a new operation.
+- Callers may supply a stable key explicitly; malformed supplied keys are rejected before the request.
+- Added focused tests for network retry key reuse, new key after success, caller-supplied key, and malformed key rejection. These tests are authored but remain unexecuted pending GitHub Actions runner restoration.
+- The server's transaction-level request record remains the authority; client-side key reuse is an additional retry guarantee, not a replacement for server idempotency.
