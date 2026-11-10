@@ -1873,3 +1873,58 @@ The following integration-branch components create properties documents directly
 ### Status
 - Audit findings documented; no lifecycle handler, cancellation route or property-write code changed in this section.
 - Integration only. No main merge, AI Studio sync, production data change or deployment.
+
+
+## Section 61 — Reconciliation checkpoint: property quota implementation and subscription lifecycle gap (2026-11-10 10:30 UTC)
+
+### Live repository state re-fetched
+
+- Working branch: `integration/pr-consolidation-20261109`.
+- Current integration head: `2027a0ae3433d33efc9d43d1b6226a00bab5b03a` (commit: `docs: update transfer authorization follow-up status`).
+- Original `main`: `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- Integration is **173 commits ahead / 0 behind** main. Main remains unchanged.
+- The latest fully successful code CI identified in the repository is run `42796203967` on code commit `111aad93e15b948ba6393d0ee24df14bf68dafea`. The run's `security-and-build-gate` job completed successfully through emulator/security/concurrency tests, unit/penetration tests, lint/type-check, production build and release audit.
+- The current branch is seven commits beyond that tested code commit. Those commits change `DEVELOPMENT.md`, `GOTHAM_PROPERTY_QUOTA_AUDIT.md`, `MASTER_BUILD_PLAN.md`, `src/server/authorization.ts`, and `tests/unit/propertySecurityRules.test.ts`. The latest follow-up CI attempt is documented as failing to obtain a runner (`runner_id: 0`, no steps). Therefore the current branch head is **not yet covered by a successful complete CI run**. Do not treat run 42796203967 as validation of the seven later commits.
+- A workflow-run lookup for the current documentation head returns no PR-triggered run; this is not proof that all push-triggered workflows were checked. The exact latest successful run above was independently inspected and its single gate job concluded `success`.
+
+### Gotham property quota — implementation now present; verification remains incomplete
+
+The earlier Sections 58–60 and parts of `GOTHAM_PROPERTY_QUOTA_AUDIT.md` describe the pre-remediation state and must not be read as current implementation status.
+
+Re-fetches from the current integration head confirm:
+- `POST /api/properties` derives ownership from the verified Firebase identity, rejects protected/unknown payload fields, checks real Gotham subscriptions against Stripe, and enforces the purchased door allowance using a per-user Firestore transaction/counter with legacy-count backfill.
+- `DELETE /api/properties/:id` performs owner/admin authorization and updates the same usage counter transactionally.
+- Property transfer claim is server-mediated and moves the quota count between owners within a transaction.
+- `firestore.rules` denies direct client create/delete on `/properties`; ownership changes are server-mediated.
+- `PropertyManager.tsx`, `Portfolio.tsx`, and `HomeHealthWidget.tsx` use `propertyCommandService.ts` for creation; the two deletion call sites use the server command.
+- Existing property edits remain separate. Existing inventory is not automatically deleted or hidden when a subscription lapses.
+
+**Remaining property acceptance gates:** add/run API-level tests for forged/protected fields, ordinary non-Gotham users, active/inactive/expired subscriptions, period-end cancellation, allowance boundaries, legacy backfill, idempotency replay, and concurrent create/delete/transfer. Review whether client-generated idempotency keys remain stable across a user retry after an ambiguous network result; the current helper creates a fresh UUID for each invocation, so a repeated invocation is not necessarily the same logical request. Reconcile usage counters against actual property ownership records and transfer/delete race cases before release.
+
+### Stripe subscription lifecycle — current source audit confirms the gap is broader than Gotham
+
+The current `server.ts` webhook has a lifecycle block for `customer.subscription.updated`, `customer.subscription.deleted`, and invoice events, but its user lookup and mutation target only `gothamSubscriptionId`. It does not yet synchronize the other subscription products:
+- membership (`subscriptionId` / `subscriptionStatus`);
+- Gold Driver (`driverSubscriptionId` / `driverSubscriptionStatus`);
+- Exclusive Leads (`exclusiveSubscriptionId`);
+- Video Pro (`videoProSubscriptionId`).
+
+As a result, cancellation, expiry, failed payment, recovery, or subscription replacement can leave non-Gotham entitlement fields stale. This blocks a claim that the complete Stripe subscription lifecycle is implemented.
+
+The cancellation/reactivation routes also need a cross-product failure-path correction. Current source still fabricates a 30-day period end for some non-Gotham products and, when Stripe configuration is unavailable, updates local cancellation flags and returns a mock-success response. The special 503 guard currently applies to real Gotham subscription IDs, not consistently to every real subscription type. A production Stripe outage must not be represented as successful cancellation/reactivation or as an invented paid-through date. Restrict mock behavior to explicit non-production test mode with `ALLOW_MOCK_PAYMENTS=true`; otherwise return a retryable service error without mutating entitlement state.
+
+For Gotham lifecycle events, the handler retrieves live subscription state for non-deletion events and preserves the separately purchased door quantity. However, the current entitlement calculation treats only `active` and `trialing` as entitled; `invoice.payment_failed` can therefore immediately disable the subscriber flag when Stripe reports `past_due`. Define and test an explicit grace policy before adopting that behavior. Scheduled cancellation must preserve benefits through the verified current period end; only terminal expiry/cancellation should stop new reservations. Do not delete existing property records on subscription lapse.
+
+### Next execution sequence
+
+1. Implement a single product-aware subscription resolver keyed by the correct stored subscription ID for each product. For non-deleted events, retrieve current Stripe state to resist stale/out-of-order event delivery; for deleted events, apply terminal state only when the subscription ID still matches. Use event ordering/idempotency guards per subscription and user.
+2. Define product-specific entitlement mapping and an explicit `past_due` / `unpaid` grace policy. Preserve period-end access when `cancel_at_period_end` is true and the paid-through date is still in the future.
+3. Remove fabricated period-end dates and false-success Stripe-unavailable fallbacks from cancel/reactivate for all product types. Keep mock paths strictly isolated to explicit non-production test configuration.
+4. Add webhook and route regression coverage for duplicate delivery, out-of-order events, cancellation scheduled/reversed, period-end deletion, invoice failure/recovery, replacement subscriptions, Stripe outage, and each product's entitlement fields.
+5. Add the property API concurrency/idempotency/quota tests above, including ambiguous client retry semantics and transfer/delete accounting.
+6. Run the complete CI gate on the latest integration head after all code changes; inspect each stage and release-audit warning. If a runner cannot be provisioned, record that as unverified rather than treating it as a pass.
+7. Keep PR #5 draft/unmerged until its refund replay identity, financial route wiring, webhook crash/claim tests, PR #2 membership/boost safeguards, and complete path-level reconciliation are resolved.
+
+### Safeguards reaffirmed
+
+No changes to `main`, PR merge, AI Studio Pull/Push, production Firebase, production secrets, deployment, or AnyRoller/taxi behavior. Continue only on the existing integration branch. No test or release gate may be weakened to manufacture a green result.
