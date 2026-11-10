@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "./AuthProvider";
-import { db, handleFirestoreError, OperationType, collection, query, where, onSnapshot, doc, deleteDoc, updateDoc } from "@/src/firebase";
+import { db, handleFirestoreError, OperationType, collection, query, where, onSnapshot, doc, updateDoc } from "@/src/firebase";
 import { Plus, Building2, Wrench, Home, Briefcase, MapPin, Search, Edit, Trash2, Clock, Camera, ArrowLeft, CheckCircle2, Store, FileText, Share2 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { cn } from "@/src/lib/utils";
@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { PropertyPassportModal } from "./PropertyPassportModal";
 import { lookupPostcode } from "@/src/services/postcodeService";
 import { toast } from "sonner";
-import { createPropertyViaCommand } from "../services/propertyCommandService";
+import { createPropertyViaCommand, deletePropertyViaCommand } from "../services/propertyCommandService";
 
 export function PropertyManager() {
   const { user } = useAuth();
@@ -128,7 +128,8 @@ export function PropertyManager() {
 
   const handleDeleteProperty = async (propertyId: string) => {
     try {
-      await deleteDoc(doc(db, "properties", propertyId));
+      if (!user) throw new Error("You must be signed in to delete a property.");
+      await deletePropertyViaCommand(user, propertyId);
       setDeletingId(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `properties/${propertyId}`);
