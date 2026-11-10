@@ -2192,37 +2192,39 @@ async function startServer() {
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
           } else if (meta.subscriptionType === 'gotham_saas' || meta.type === 'gotham_saas') {
+            const mockGothamSubscriptionId = "mock_sub_gotham_" + Math.random().toString(36).substring(7);
+            const mockGothamPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
             await db.collection("users").doc(userId).set({
-              subscriptionStatus: "active",
-              subscriptionId: "mock_sub_gotham_" + Math.random().toString(36).substring(7),
               tierId: meta.gothamTierName || "Gotham Enterprise",
               tier: "gotham",
               subscriptionType: "gotham_saas",
               isGothamSubscriber: true,
+              gothamSubscriptionId: mockGothamSubscriptionId,
+              gothamSubscriptionStatus: "active",
               gothamDoorsCount: Number(meta.gothamDoorsCount) || 100,
               gothamTierName: meta.gothamTierName || "Gotham Enterprise",
               gothamBillingCycle: meta.gothamBillingCycle || "monthly",
               gothamCancelAtPeriodEnd: false,
-              cancelAtPeriodEnd: false,
-              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              gothamCurrentPeriodEnd: mockGothamPeriodEnd,
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
           } else if (meta.subscriptionType === 'driver_gold' || meta.type === 'driver_gold') {
+            const mockDriverSubscriptionId = "mock_sub_gold_driver_" + Math.random().toString(36).substring(7);
+            const mockDriverPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
             await db.collection("users").doc(userId).set({
-              subscriptionStatus: "active",
-              subscriptionId: "mock_sub_gold_driver_" + Math.random().toString(36).substring(7),
               tierId: "Gold Driver",
               tier: "gold",
               driverTier: "gold",
               subscriptionType: "driver_gold",
               isGoldDriver: true,
+              driverSubscriptionId: mockDriverSubscriptionId,
+              driverSubscriptionStatus: "active",
               commissionRate: 0.10,
               destinationFilters: 4,
               advanceBookingDays: 14,
               priorityDispatch: 50,
               driverCancelAtPeriodEnd: false,
-              cancelAtPeriodEnd: false,
-              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              driverCurrentPeriodEnd: mockDriverPeriodEnd,
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
           } else if (authoritativeResult.mode === 'subscription') {
