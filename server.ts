@@ -3593,12 +3593,9 @@ async function startServer() {
         : null;
 
       const result = await db.runTransaction(async (tx: any) => {
-        const [userSnap, usageSnap, ownerQuery, userQuery, landlordQuery, requestSnap] = await Promise.all([
+        const [userSnap, usageSnap, requestSnap] = await Promise.all([
           tx.get(userRef),
           tx.get(usageRef),
-          tx.get(db.collection("properties").where("ownerId", "==", userId)),
-          tx.get(db.collection("properties").where("userId", "==", userId)),
-          tx.get(db.collection("properties").where("landlordId", "==", userId)),
           requestRef ? tx.get(requestRef) : Promise.resolve(null)
         ]);
         if (!userSnap.exists) throw new NotFoundError("User profile not found.");
@@ -3617,18 +3614,30 @@ async function startServer() {
           throw new ForbiddenError("Gotham subscription is not active. Property creation is unavailable until billing is restored.");
         }
         if (isGothamEntitled) {
-          const existingIds = new Set<string>();
-          for (const snap of [ownerQuery, userQuery, landlordQuery]) {
-            snap.docs.forEach((doc: any) => existingIds.add(doc.id));
-          }
-          const legacyCount = existingIds.size;
           const doorsAllowed = Number(profile.gothamDoorsCount);
           if (!Number.isSafeInteger(doorsAllowed) || doorsAllowed < 1) {
             throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
           }
-          // The per-user usage document is the transaction serialization point;
-          // derive the count from live properties so owner deletions release capacity.
-          const currentUsage = legacyCount;
+          let currentUsage: number;
+          if (usageSnap.exists) {
+            currentUsage = Number(usageSnap.data()?.propertyCount);
+            if (!Number.isSafeInteger(currentUsage) || currentUsage < 0) {
+              throw new ForbiddenError("Gotham property usage is invalid. Please contact support.");
+            }
+          } else {
+            // One-time legacy backfill. The usage document then becomes the
+            // serialization point for all later creates and deletes.
+            const [ownerQuery, userQuery, landlordQuery] = await Promise.all([
+              tx.get(db.collection("properties").where("ownerId", "==", userId)),
+              tx.get(db.collection("properties").where("userId", "==", userId)),
+              tx.get(db.collection("properties").where("landlordId", "==", userId))
+            ]);
+            const existingIds = new Set<string>();
+            for (const snap of [ownerQuery, userQuery, landlordQuery]) {
+              snap.docs.forEach((doc: any) => existingIds.add(doc.id));
+            }
+            currentUsage = existingIds.size;
+          }
           if (currentUsage >= doorsAllowed) {
             throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
           }
