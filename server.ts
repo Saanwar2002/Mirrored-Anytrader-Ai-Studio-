@@ -3634,7 +3634,7 @@ async function startServer() {
           verifiedGothamStatus = String(liveSubscription.status || "");
           const paidThrough = Number((liveSubscription as any).current_period_end || 0);
           const paidPeriodExpired = Boolean((liveSubscription as any).cancel_at_period_end) &&
-            paidThrough > 0 && Date.now() >= paidThrough * 1000;
+            (!paidThrough || Date.now() >= paidThrough * 1000);
           if (!["active", "trialing"].includes(verifiedGothamStatus) || paidPeriodExpired) {
             throw new ForbiddenError("Gotham subscription is not currently entitled to add properties.");
           }
@@ -3877,7 +3877,7 @@ async function startServer() {
           verifiedGothamStatus = String(liveSubscription.status || "");
           const paidThrough = Number((liveSubscription as any).current_period_end || 0);
           const expiredCancellation = Boolean((liveSubscription as any).cancel_at_period_end) &&
-            paidThrough > 0 && Date.now() >= paidThrough * 1000;
+            (!paidThrough || Date.now() >= paidThrough * 1000);
           if (!["active", "trialing"].includes(verifiedGothamStatus) || expiredCancellation) {
             throw new ForbiddenError("Gotham subscription is not currently entitled to receive another property.");
           }
