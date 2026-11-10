@@ -2671,3 +2671,15 @@ Commit: `749d830a61acdb53a169d85cd61ea13281e6f2c8`.
 
 **Verification boundary:** source-level fetch-back only. No Firestore emulator test or worker-level mocked regression test has yet been added or executed. Existing random-ID attempt records remain readable by the existing query; all new attempts use deterministic IDs. This does not retroactively deduplicate historical duplicate attempts.
 Regression coverage added in `tests/unit/instantMatchAttemptCreation.test.ts` for first creation, repeated-trigger deduplication, terminal match rejection and attempt-number sequencing. Commit: `c6ca6d789ed22e04a3f5e49b4d848e2c1f6cf19a`. These are mocked unit tests only and have not yet been executed. The listener/poll attempt-creation race is therefore addressed in source and has test coverage authored, but remains runtime-unverified.
+
+## Section 112 — Prevent replay of unresolved Instant Match refund operations (2026-11-10)
+
+Safety review identified that Stripe idempotency keys have finite retention and cannot be treated as permanent deduplication or lookup records. The refund operation now stops whenever `instant_match_refunds/{matchId}` already exists, regardless of its status. Only the caller that creates the operation record may submit the Stripe refund. Existing `processing`, `reconciliation_required`, `succeeded` and `manual_review` operations are never automatically resubmitted; unresolved records must be reconciled against Stripe before any further action. This deliberately prefers a locked/manual resolution after a crash over a possible duplicate refund.
+
+The Stripe-client-unavailable path now persists `reconciliation_required` through a transaction that checks the latest refund state, preventing it from overwriting a concurrently recorded success. The shared operation is exported for focused unit testing.
+
+Regression tests added in `tests/unit/instantMatchRefundOperation.test.ts` for successful refund identity persistence, missing PaymentIntent manual review, ambiguous Stripe exception with no replay, and completed-operation no-replay.
+
+Commits: worker safety change `ad27277cf0f4add0c7dcdc96a862571a51758d8b`; refund tests `9847d1694ee137738b793d09775e7143be9afb48`.
+
+**Verification boundary:** files were fetched back from the integration branch; tests have not been executed. The mocked tests validate intended state transitions but do not prove Stripe API behavior, Firestore transaction contention semantics, or recovery of an operation left `processing` by a process crash. The latter requires the planned read-only Stripe refund reconciliation before an operator may resolve it.
