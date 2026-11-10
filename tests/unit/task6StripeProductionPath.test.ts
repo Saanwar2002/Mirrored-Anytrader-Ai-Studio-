@@ -190,6 +190,8 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
       "firestore_transaction_committed",
       "firestore_transaction_start",
       "firestore_transaction_committed",
+      "firestore_transaction_start",
+      "firestore_transaction_committed",
       "stripe_transfer_create",
     ]);
 
@@ -323,7 +325,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
     );
 
     // Verify explicit failed status returned
-    expect(failedTransferResult.transferStatus).toBe("failed");
+    expect(failedTransferResult.transferStatus).toBe("reconciliation_required");
     expect(failedTransferResult.error).toContain("Stripe API Timeout");
 
     // Verify Firestore state: Milestone is STILL released (not rolled back)
@@ -410,7 +412,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
       },
       { stripe: idempotentStripeMock }
     );
-    expect(res1.transferStatus).toBe("failed");
+    expect(res1.transferStatus).toBe("reconciliation_required");
 
     // Attempt 2: Retry
     const res2 = await PaymentLedgerEngine.executeStripeEscrowTransfer(
@@ -525,7 +527,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
 
     // b. Ledger records failed transfer
     const ledgerDoc = (await db.collection("payment_ledger").where("idempotencyKey", "==", idempotencyKey).get()).docs[0].data();
-    expect(ledgerDoc.transferStatus).toBe("failed");
+    expect(ledgerDoc.transferStatus).toBe("reconciliation_required");
     expect(ledgerDoc.transferError).toContain("503 Service Unavailable");
 
     // c. Notification is NOT misleading
