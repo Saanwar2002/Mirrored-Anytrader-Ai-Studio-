@@ -45,6 +45,11 @@ describe("Stripe subscription lifecycle patch mapping", () => {
       .toMatchObject({ driverSubscriptionStatus: "canceled", isGoldDriver: false });
   });
 
+  it("treats deletion as terminal even if the event payload status is unexpectedly active", () => {
+    expect(buildSubscriptionLifecyclePatch("membership", { ...active, status: "active" }, true))
+      .toMatchObject({ subscriptionStatus: "canceled", isPro: false, isProInvoiceSubscriber: false });
+  });
+
   it("does not erase the independent Video Pro verification credential", () => {
     const patch = buildSubscriptionLifecyclePatch("video_pro", { ...active, status: "canceled" });
     expect(patch.hasVerifiedVideoProSubscription).toBe(false);
