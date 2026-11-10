@@ -1661,3 +1661,27 @@ A review of the Gold Driver and Gotham SaaS checkout callers found that both dis
 
 - Inspection only; no code change to lifecycle behaviour and no automated tests or Stripe test-mode events run.
 - Integration branch remains the sole working branch for reconciliation. No main merge, AI Studio Pull/Push, or deployment.
+
+
+## 52. Gold Driver and Gotham entitlement consumer audit (2026-11-10)
+
+### Gold Driver — entitlement mismatch found
+
+A targeted read of `src/components/driver/DriverTerminal.tsx`, `DriverEarnings.tsx`, `DriverJobs.tsx`, and `DriverMenu.tsx` shows that driver commission is currently sourced from platform/global ride configuration (including `platform_config/global_tiers.providerModels.on_demand_transport.tiers.STANDARD`, remote config, and ride settings). The inspected driver runtime does not read `users.driverTier`, `users.isGoldDriver`, or a per-user `users.commissionRate` to select a Gold-specific commission. Driver UI displays the effective configured commission, not a Gold entitlement override.
+
+Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by itself evidence that Gold Drivers receive a 10% commission. The product catalogue says Gold Driver offers a reduced 10% commission, while the actual runtime consumer path appears global/tier-config based. This is an implementation gap to resolve deliberately (e.g. a trusted server-derived driver tier/config selection), not by trusting a client profile field. The destination-filter/advance-booking/priority fields also have not been demonstrated to be consumed by driver runtime.
+
+### Gotham — license quantity not enforced in inspected portal
+
+`GothamHousingPortal.tsx` uses `isGothamSubscriber` / `subscriptionType=gotham_saas` to identify subscription status and sends `calculatorDoors` in checkout metadata. Its current portal references `gothamDoorsCount` only in the checkout request; the inspected portal does not use the persisted user `gothamDoorsCount` to cap property/door creation or feature access. Persisting the purchased count is therefore not proof that licensed-door enforcement exists. Trace the actual property creation/API paths and enforce limits server-side against the verified subscription record before claiming metered licensing is complete.
+
+### Decision and follow-up
+
+- Do not advertise Gold's 10% fee as technically fulfilled until the fare/commission calculation selects the Gold rate for the authenticated driver and tests prove it.
+- Do not claim Gotham door limits are enforced until all property/door write APIs are audited and a server-side limit is in place (if this is the intended commercial policy).
+- No entitlement-consumer code was changed in this pass: safely implementing these requires tracing server dispatch/fare authority and property write endpoints, not adding client-side checks.
+
+### Verification
+
+- Static source inspection only; no build/tests/emulator/Stripe events.
+- Integration-only documentation update; main, AI Studio, and deployment untouched.
