@@ -9,7 +9,8 @@ export function shouldClaimStripeWebhookEvent(
     const claimedAtMs = existingData.claimedAt?.toMillis
       ? Number(existingData.claimedAt.toMillis())
       : nowMs;
-    return nowMs - claimedAtMs >= staleAfterMs;
+    const ageMs = nowMs - claimedAtMs;
+    return !(ageMs < staleAfterMs);
   }
   return true;
 }
