@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { initiatePropertyTransfer, revokePropertyTransfer } from "@/src/services/propertyCommandService";
 import { useAuth } from "../AuthProvider";
 import { QRCodeSVG } from "qrcode.react";
-import { X, ArrowRight, ShieldCheck, Copy, Check, Share2, AlertTriangle, Clock, RefreshCw, KeyRound, UserCheck, Trash2, Mail, ExternalLink, Printer } from "lucide-react";
+import { X, ArrowRight, ShieldCheck, Copy, Check, Share2, AlertTriangle, Clock, KeyRound, UserCheck, Trash2, Mail, ExternalLink, Printer } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
 
@@ -279,24 +279,15 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
 
                     <div>
                       <label className="text-xs font-black text-slate-900 block mb-1">
-                        Generated Transfer Code
+                        Transfer Code
                       </label>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="text"
-                          readOnly
-                          value={generatedCode}
-                          className="w-full p-3 rounded-xl border border-black text-xs font-black bg-slate-100 text-slate-900 tracking-wider font-mono"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setGeneratedCode("")}
-                          className="p-3 bg-slate-100 hover:bg-slate-200 border border-black rounded-xl text-slate-700 transition"
-                          title="Transfer code is generated securely when activated"
-                        >
-                          <RefreshCw className="w-4 h-4" />
-                        </button>
-                      </div>
+                      <input
+                        type="text"
+                        readOnly
+                        value={generatedCode}
+                        placeholder="Generated securely after activation"
+                        className="w-full p-3 rounded-xl border border-black text-xs font-black bg-slate-100 text-slate-900 tracking-wider font-mono"
+                      />
                     </div>
                   </div>
                 </div>
