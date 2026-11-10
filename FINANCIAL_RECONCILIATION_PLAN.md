@@ -127,3 +127,13 @@ This document is the working checklist for the AnyTrader financial audit and rec
 - [CI run #455](https://github.com/Saanwar2002/AnyTrader/actions/runs/42621657222)
 - [Master build plan](./MASTER_BUILD_PLAN.md)
 - [AI Studio/Firebase pre-change review](./AI_STUDIO_FIREBASE_PRECHANGE_REVIEW.md)
+
+
+### Additional code-level evidence confirmed on 10 November 2026
+
+- `FIN-01`: `server.ts` claims a webhook with `status: processing`, `claimedAt` and `workerId`, but later marks the event completed/failed without checking that the worker still owns the current claim. The five-minute lease alone does not fence a stale worker.
+- `FIN-04`: `PaymentLedgerEngine.executeIdempotentOperation(db, idempotencyKey, operationName, executor)` stores `operationName`, status and response, but not authenticated owner, resource ID or canonical payload hash. The driver payout route passes a client-supplied key and the driver ID is only captured inside the executor; the idempotency record itself is not bound to that driver/amount/account.
+- `FIN-03`: `PaymentLedgerEngine.executeStripeEscrowTransfer` constructs a Stripe key from job/quote/milestone and the supplied idempotency key. In the milestone-release route in `server.ts`, a failed transfer causes a Firestore rollback that explicitly sets `releaseOperationId: null`. This discards the original operation identity and permits a retry to mint a different key after an ambiguous Stripe outcome. Do not confuse this escrow path with the separately fenced driver-payout orchestration, which already uses a unique payout claim token.
+- `FIN-02`: the `charge.refunded` handler processes only the embedded `charge.refunds.data` array, writes a manual-review marker when `has_more` is true, then marks the refund event `reconciled` with `requiresPaginationReview`. This is explicitly incomplete reconciliation, not a successful full-page reconciliation.
+
+These are source-level findings from the PR #5 head, not runtime or live-Stripe verification. Remediation still requires the AI Studio/Firebase pre-change gates and regression tests above.
