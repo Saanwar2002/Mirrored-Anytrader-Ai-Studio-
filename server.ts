@@ -3526,6 +3526,144 @@ async function startServer() {
     }
   });
 
+  // All property creation is server-authoritative so Gotham door entitlements
+  // cannot be bypassed by writing directly to Firestore from a client.
+  app.post("/api/properties", requireAuth, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const userId = String((req as any).user?.uid || "");
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+
+      const body = req.body || {};
+      const allowedFields = [
+        "name", "address", "postcode", "city", "propertyType", "status",
+        "contactName", "contactPhone", "accessInstructions", "era", "heatingType",
+        "boilerInfo", "roofCondition", "epcRating", "gasSafetyExpiry", "eicrExpiry"
+      ];
+      const protectedFields = [
+        "id", "ownerId", "userId", "homeownerId", "landlordId", "tenantId",
+        "gothamDoorsCount", "gothamSubscriptionStatus", "subscriptionStatus",
+        "usage", "propertyCount", "createdAt", "transferClaimedByUid", "verifiedByAdmin"
+      ];
+      if (Object.keys(body).some((key) => protectedFields.includes(key))) {
+        throw new BadRequestError("Property payload contains server-managed fields.");
+      }
+      if (Object.keys(body).some((key) => !allowedFields.includes(key))) {
+        throw new BadRequestError("Property payload contains unsupported fields.");
+      }
+      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 160) {
+        throw new BadRequestError("A property name of 1–160 characters is required.");
+      }
+      if (typeof body.propertyType !== "string" || body.propertyType.length > 80) {
+        throw new BadRequestError("A valid property type is required.");
+      }
+      if (!body.address || typeof body.address !== "object" || Array.isArray(body.address)) {
+        throw new BadRequestError("A structured property address is required.");
+      }
+      const address = {
+        line1: typeof body.address.line1 === "string" ? body.address.line1.slice(0, 200) : "",
+        city: typeof body.address.city === "string" ? body.address.city.slice(0, 100) : "",
+        postcode: typeof body.address.postcode === "string" ? body.address.postcode.slice(0, 20).toUpperCase() : "",
+        country: typeof body.address.country === "string" ? body.address.country.slice(0, 80) : "UK"
+      };
+      const propertyData: Record<string, any> = {
+        name: body.name.trim(),
+        address,
+        postcode: typeof body.postcode === "string" ? body.postcode.slice(0, 20).toUpperCase() : address.postcode,
+        city: typeof body.city === "string" ? body.city.slice(0, 100) : address.city,
+        propertyType: body.propertyType.trim(),
+        status: "active",
+        ownerId: userId,
+        userId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      for (const key of ["contactName", "contactPhone", "accessInstructions", "era", "heatingType", "roofCondition", "epcRating", "gasSafetyExpiry", "eicrExpiry"]) {
+        if (typeof body[key] === "string") propertyData[key] = body[key].slice(0, key === "accessInstructions" ? 2000 : 200);
+      }
+      if (body.boilerInfo && typeof body.boilerInfo === "object" && !Array.isArray(body.boilerInfo)) {
+        propertyData.boilerInfo = {
+          brand: typeof body.boilerInfo.brand === "string" ? body.boilerInfo.brand.slice(0, 100) : "",
+          model: typeof body.boilerInfo.model === "string" ? body.boilerInfo.model.slice(0, 100) : "",
+          age: typeof body.boilerInfo.age === "string" ? body.boilerInfo.age.slice(0, 20) : "",
+          lastServiced: typeof body.boilerInfo.lastServiced === "string" ? body.boilerInfo.lastServiced.slice(0, 40) : ""
+        };
+      }
+
+      const rawKey = String(req.headers["idempotency-key"] || "");
+      const idempotencyKey = /^[A-Za-z0-9_-]{12,100}$/.test(rawKey) ? rawKey : "";
+      const propertyRef = db.collection("properties").doc();
+      const userRef = db.collection("users").doc(userId);
+      const usageRef = db.collection("gotham_property_usage").doc(userId);
+      const requestRef = idempotencyKey
+        ? db.collection("property_creation_requests").doc(userId + "_" + idempotencyKey)
+        : null;
+
+      const result = await db.runTransaction(async (tx: any) => {
+        const [userSnap, usageSnap, ownerQuery, userQuery, landlordQuery, requestSnap] = await Promise.all([
+          tx.get(userRef),
+          tx.get(usageRef),
+          tx.get(db.collection("properties").where("ownerId", "==", userId)),
+          tx.get(db.collection("properties").where("userId", "==", userId)),
+          tx.get(db.collection("properties").where("landlordId", "==", userId)),
+          requestRef ? tx.get(requestRef) : Promise.resolve(null)
+        ]);
+        if (!userSnap.exists) throw new NotFoundError("User profile not found.");
+        if (requestSnap?.exists) {
+          const prior = requestSnap.data() || {};
+          return { id: String(prior.propertyId || ""), duplicate: true };
+        }
+        const profile = userSnap.data() || {};
+        const isGothamAccount = profile.subscriptionType === "gotham_saas" || profile.isGothamSubscriber === true;
+        const isGothamEntitled = isGothamAccount &&
+          profile.isGothamSubscriber === true &&
+          ["active", "trialing"].includes(String(profile.gothamSubscriptionStatus || "").toLowerCase()) &&
+          typeof profile.gothamSubscriptionId === "string" &&
+          profile.gothamSubscriptionId.length > 0;
+        if (isGothamAccount && !isGothamEntitled) {
+          throw new ForbiddenError("Gotham subscription is not active. Property creation is unavailable until billing is restored.");
+        }
+        if (isGothamEntitled) {
+          const existingIds = new Set<string>();
+          for (const snap of [ownerQuery, userQuery, landlordQuery]) {
+            snap.docs.forEach((doc: any) => existingIds.add(doc.id));
+          }
+          const legacyCount = existingIds.size;
+          const doorsAllowed = Number(profile.gothamDoorsCount);
+          if (!Number.isSafeInteger(doorsAllowed) || doorsAllowed < 1) {
+            throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
+          }
+          const storedUsage = usageSnap.exists ? Number(usageSnap.data()?.propertyCount) : 0;
+          const currentUsage = Math.max(Number.isSafeInteger(storedUsage) && storedUsage >= 0 ? storedUsage : 0, legacyCount);
+          if (currentUsage >= doorsAllowed) {
+            throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
+          }
+          tx.set(usageRef, {
+            userId,
+            propertyCount: currentUsage + 1,
+            allowance: doorsAllowed,
+            reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+        }
+        tx.create(propertyRef, propertyData);
+        if (requestRef) {
+          tx.create(requestRef, {
+            userId,
+            propertyId: propertyRef.id,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        }
+        return { id: propertyRef.id, duplicate: false };
+      });
+      if (!result.id) throw new Error("Property creation idempotency record is invalid.");
+      res.status(result.duplicate ? 200 : 201).json({ success: true, id: result.id, duplicate: result.duplicate });
+    } catch (error: any) {
+      console.error("Create Property Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
   app.post("/api/properties/:id/sync-public-passport", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
