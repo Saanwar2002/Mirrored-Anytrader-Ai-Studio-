@@ -3775,3 +3775,47 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 153 is documentation only; webhook code and event records unchanged.
 - No Stripe test events, tests, emulator, typecheck, build, or CI run.
 - Next: turn the evidence into a phased implementation checklist with dependency order and acceptance criteria, then start a safe first phase (pure pence calculator + tests) once repository test conventions are checked.
+
+
+## Section 154 — Reconciliation execution phases and acceptance gates (sequenced)
+
+### Phase A — Pure calculation contract (lowest risk; no persistence)
+- [ ] Define `TaxiPricingPolicyV1`: all fare inputs in explicit integer pence/rates basis points; distinguish quoted base, meter adjustment, wait, surge, tip, fixed platform fee and commission basis.
+- [ ] Extract pure fare/split functions from UI/worker; no Firebase/Stripe imports or side effects.
+- [ ] Fixtures: standard/gold commission; penny rounding; zero fixed fee; tips; wait; min fare; valid zero; NaN/Infinity/negative; £500/£200 caps; component conservation.
+- [ ] Acceptance: deterministic outputs and property invariant `driverBasePence + platformFeePence = baseFarePence`; `driverPayoutPence = driverBasePence + tipPence`; all inputs safe integer/finite as specified.
+
+### Phase B — Immutable ride pricing snapshot (server-only)
+- [ ] Specify ride creation/acceptance source fields and policy version; snapshot only after trusted source validation.
+- [ ] Write schema migration/legacy classification; no backfill from client estimate without explicit reviewed provenance.
+- [ ] Protect snapshot fields in Firestore rules and validate server writes.
+- [ ] Acceptance: clients cannot mutate; policy changes do not retroactively change completed ride split; legacy rides fail closed/flag for review.
+
+### Phase C — Exactly-once cash finalization and receivable accrual
+- [ ] Driver submits proposal; passenger acknowledges exact proposal/version; authorized override has separate server privilege and audit.
+- [ ] Server transaction checks participant, ride state, snapshot, proposal operation ID and unique fee-accrual key; atomically finalizes ride + immutable receivable + outbox.
+- [ ] Eliminate UI direct ride/user/metrics financial writes and duplicate snapshot handler; UI awaits server response and surfaces errors.
+- [ ] Acceptance: replay returns same result; concurrent passenger/driver/override races produce one terminal state/one fee entry; rules deny direct writes; no debt clearing by setting aggregate zero.
+
+### Phase D — Fee settlement attempt and webhook
+- [ ] Itemized receivable allocation; persist settlement attempt before Checkout; exact Session/PI/amount/currency/driver binding.
+- [ ] Webhook paid and async-success fulfill same attempt idempotently; failed/cancelled retains receivable; sandbox only fixture ledger.
+- [ ] Acceptance: replay/multiple event IDs cannot double settle; partial settlement leaves exact remainder; UI success only after verified backend fulfillment.
+
+### Phase E — Projections and reconciliation
+- [ ] Rebuild `pendingPlatformFees` from open receivables; metrics from idempotent outbox/event projections.
+- [ ] Report card collections lacking ledger, receivables lacking settlement, transfers without snapshot, aggregate drift, duplicate/reversed entries.
+- [ ] Acceptance: projection rebuild matches ledger; every financial aggregate has traceable source entries and adjustments.
+
+### Phase F — Tests, rollout and operations
+- [ ] Unit tests for pure calculator; Firestore emulator rules/transactions; concurrency/replay; Stripe mocked contract + test-mode webhook fixtures.
+- [ ] Run `npm test`, `npm run lint`, `npm run build`, relevant emulator suite, release audit; record exact results and CI links.
+- [ ] Deploy rules/backend/UI only after integration CI green; staged migration, monitor, rollback and operator reconciliation runbook. Never modify production financial records as part of test/migration without separately approved controlled procedure.
+
+### Immediate safe next step
+Implement Phase A calculator + unit tests on integration branch only. Repository `package.json` defines Vitest, `npm test`, `npm run lint`, and emulator scripts; tests require a real checkout/runtime (GitHub file API alone cannot execute them). Current session can author/commit source and tests, but must not report them passing without execution. The calculator should not be wired into cash/payout routes until its policy contract and fixture review are complete.
+
+### Status
+- Section 154 is documentation only; no code, test, financial data or production changes.
+- No test/lint/build/emulator/CI execution in this session.
+- Reconciliation branch remains integration-only; `main` untouched.
