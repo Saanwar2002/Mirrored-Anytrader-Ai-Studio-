@@ -3041,3 +3041,44 @@ The integration-branch `server.ts` was fetched directly (blob SHA `d0d781571a2a1
 ### Scope and safety
 
 This is a source-audit finding only. No source code or tests were changed or run in this section. No Stripe or Firestore production operations were performed. The taxi payment and payout repair remains coordinated and fail-closed; no payout gate is relaxed.
+
+
+## Section 127 — Cash-fee accrual and settlement confirmation are not a verified accounting lifecycle
+
+### Exact integration-branch evidence
+- `src/components/driver/DriverTerminal.tsx` (blob `40db85db97f62c425787fd64b77ea241d3dd8eb8`):
+  - In the cash-trip completion path, the client computes `baseFare` from the ride estimate plus paid waiting time, computes `totalFare = baseFare + tip`, and computes `platformFee = baseFare * fareConfig.commissionRate + fixedTripFee`.
+  - It writes the completed cash ride to `ride_requests` with `paymentMethod: "cash"`, `finalFare`, and `platformFeeOwed`, then directly increments `users/{driverId}.pendingPlatformFees` by `platformFee` from the client.
+  - The client-side computation and direct Firestore write are not a server-verified accounting event. Whether rules constrain these writes must be audited separately; no claim is made here about the deployed rules.
+- `server.ts` (blob `d0d781571a2a1dd28478ca92930f4f9b919bf38a`):
+  - `POST /api/driver/settle-fees` derives driver identity from the auth token, but starts with `amount || 9.75`; if Firestore is unavailable, the read fails, or the user document is missing, this client-supplied/fallback amount can be used. A zero stored balance also falls through because of `||`.
+  - When the document is readable, it uses `pendingPlatformFees` as a GBP decimal and converts to integer pence with `Math.round(pendingPlatformFees * 100)`.
+  - It creates card-only Checkout with metadata `driverId` and `type: "fee_settlement"`, but no shared `intentId`, no `client_reference_id`, and no persisted settlement/session record.
+  - The success URL includes the amount as a query parameter. The route returns the Checkout URL without recording an immutable amount snapshot or binding it to a settlement attempt.
+  - `POST /api/driver/confirm-fee-settlement` is gated to non-production with `ALLOW_MOCK_PAYMENTS === "true"`; in that sandbox it reads the current balance and unconditionally writes `pendingPlatformFees: 0`. It does not verify a Checkout Session, PaymentIntent, amount, currency, or payment status, and it is not transactionally tied to an accrual cutoff.
+- `src/components/driver/PlatformFeeSuccess.tsx` (blob `6f187db4db4c77f56fa25d824f4a05eb4781ea40`):
+  - On mount it calls the confirmation endpoint regardless of whether the URL contains `sandbox=true`.
+  - On a non-OK response or exception it still sets the displayed amount from the URL and emits a success toast; the page labels the method “Stripe Card Payment” and status “Success”. Thus the browser return URL can produce a success presentation without backend settlement confirmation.
+  - The URL amount is display input only and is not evidence of payment.
+
+### Reconciliation implications
+1. The fee balance currently has at least one client-side accrual writer and a separate sandbox-only zeroing endpoint; there is no demonstrated authoritative server-side fee ledger tying each cash ride accrual to a later settlement.
+2. A driver can accrue additional fees while a settlement is in flight. Clearing the whole live balance on return can erase fees accrued after the Checkout amount was calculated; a fixed amount URL does not solve this race.
+3. When the database read fails, the settlement route can price a Checkout from a request body/default rather than a verified outstanding balance. When a readable balance is zero, the `||` fallback can also substitute a nonzero request/default value.
+4. The success page intentionally degrades every backend failure into a success-looking state. It must be treated as a presentation defect, not proof of payment.
+5. Sandbox confirmation currently clears a balance without a payment artifact. It must remain isolated from any live financial state and must not be presented as a real Stripe settlement.
+
+### Required repair sequence (do not implement piecemeal)
+1. Inventory Firestore rules and every writer/reader of `pendingPlatformFees`, `platformFeeOwed`, and cash-trip completion fields. Establish whether client writes are permitted and whether retries can double-accrue.
+2. Move fee accrual to a trusted server-side, idempotent cash-trip completion operation, using integer pence and a stable ride/accrual ID. Preserve a per-ride immutable fee record and derive the driver's outstanding amount from those records or a reconciled aggregate.
+3. Create a settlement-attempt record server-side from the authenticated driver's authoritative outstanding balance. Reject missing database state; never accept a request-body/default amount as the financial authority. Bind Checkout Session, PaymentIntent, driver, GBP amount, and the exact set/cutoff of fee records being settled.
+4. Add a dedicated verified webhook fulfillment path for `fee_settlement`. Validate paid status, amount, currency, driver, session/intent binding, and attempt state; atomically mark the attempt and only the fee records included in it as settled. Preserve later accruals. Make webhook retries and concurrent settlement attempts idempotent.
+5. Restrict any manual/sandbox clearing to isolated test fixtures or a distinct non-financial test ledger. Do not let a success redirect or query-string amount mutate financial state.
+6. Change the success page to display success only from a server-verified settlement status. On failure/pending, show pending or failed and never emit a success toast or represent the URL amount as settled.
+7. Add tests for DB read failure, zero balance, forged body amount, duplicate cash completion, concurrent accrual during Checkout, duplicate webhook delivery, wrong driver/currency/amount/session, unpaid session, sandbox route behavior, and non-OK success-page response.
+
+### Status
+- Section 127 is evidence and plan documentation only.
+- No source code, Firestore rules, or tests were changed in this section.
+- No tests, typecheck, build, CI, Stripe calls, production operations, or production data changes were run.
+- Next: inspect the exact Firestore security rules and all other branch occurrences of the fee fields, then consolidate the trusted accrual/settlement design before editing financial code.
