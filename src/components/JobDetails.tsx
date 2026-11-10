@@ -1276,11 +1276,15 @@ const libraries: any[] = ['places', 'geometry'];
     setIsProcessing(true);
     try {
       const milestoneAmount = Math.max(1, Math.round(Number(milestone.amount) || 0));
+      const token = await user.getIdToken();
+      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
       const response = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" ,
-            "Idempotency-Key": crypto.randomUUID()
-          },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "Idempotency-Key": crypto.randomUUID()
+        },
         body: JSON.stringify({
           userId: user.uid,
           price_data: {
@@ -1456,11 +1460,15 @@ const libraries: any[] = ['places', 'geometry'];
       });
 
       // 2. Redirect to Stripe
+      const token = await user.getIdToken();
+      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
       const res = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" ,
-            "Idempotency-Key": crypto.randomUUID()
-          },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "Idempotency-Key": crypto.randomUUID()
+        },
         body: JSON.stringify({
           price_data: {
             currency: 'gbp',
@@ -3333,11 +3341,16 @@ const libraries: any[] = ['places', 'geometry'];
                     if (!confirmBoost) return;
 
                     try {
+                      if (!user) throw new Error("Please sign in to purchase a job boost.");
+                      const token = await user.getIdToken();
+                      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
                       const response = await fetch("/api/create-checkout-session", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" ,
-            "Idempotency-Key": crypto.randomUUID()
-          },
+                        headers: {
+                          "Content-Type": "application/json",
+                          Authorization: `Bearer ${token}`,
+                          "Idempotency-Key": crypto.randomUUID()
+                        },
                         body: JSON.stringify({
                           userId: user?.uid,
                           price_data: {
