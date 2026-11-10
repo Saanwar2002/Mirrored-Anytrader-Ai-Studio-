@@ -1738,3 +1738,18 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
 ### CI validation (pending at documentation time)
 - Run #537 (`316cdd5`) and #538 (`c497b44`) were both observed in progress after push. Run #538: [CI & Security Rules Release Gate](https://github.com/Saanwar2002/AnyTrader/actions/runs/42785092767).
 - Do not mark this repair verified until a run completes and emulator/security, unit/pen-test, TypeScript/lint, production build, and release audit results are inspected. If any subsequent stage fails, record and repair that blocker before advancing.
+
+
+## Section 57 — Stripe route repair CI verification and lifecycle audit queue (2026-11-10)
+
+### CI result
+- Run #538 on commit `c497b44e63a0bc59008eb609f364f9a47018389b` completed **successfully**: [CI & Security Rules Release Gate](https://github.com/Saanwar2002/AnyTrader/actions/runs/42785092767).
+- Job `security-and-build-gate` succeeded, including Firebase Security Rules + real Firestore emulator concurrency tests, unit/penetration suite, TypeScript/linter checks, production build, and final release audit. This supersedes the earlier intermediate run #537 failure (which tested commit `316cdd5` before the second boundary correction).
+- Run #539 is a docs-only follow-up on `5582303` and also succeeded.
+- CI success validates the checked commit, not the entire integration branch's readiness to merge; outstanding reconciliation/audit items remain.
+
+### Next required reconciliation audits (not yet fixed)
+1. Stripe subscription lifecycle: webhook currently explicitly fulfills `checkout.session.completed`, then marks other event types completed without processing them. Implement and test `customer.subscription.updated`, `customer.subscription.deleted`, and `invoice.payment_failed` so cancellation/expiry/payment failure cannot leave stale entitlements for membership, Gotham SaaS, Gold Driver, Exclusive Leads, and Video Pro. Preserve cancel-at-period-end benefits until actual period end; do not revoke merely on `cancel_at_period_end=true`.
+2. Gotham licence/door cap: verify server-side property CRUD enforces subscription door entitlement, not only checkout metadata/UI. Add regression tests for cap bypass and tier changes if missing.
+3. Review Stripe lifecycle mapping and current entitlement field names against actual checkout fulfilment and existing cancellation/reactivation endpoints before coding; avoid guessing or blanket revocation.
+4. Run focused tests plus full CI after changes. Integration branch only; no main merge, AI Studio Pull/Push, or deployment absent explicit approval.
