@@ -2249,3 +2249,13 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Verified the Profile plan selector compares `homeownerTierId` to the configured tier key (for example, `landlord`), not to the marketing label used in some checkout entry points (for example, `Premium Landlord`).
 - Normalised landlord checkout fulfillment to persist the canonical `homeownerTierId: landlord` regardless of which UI label initiated checkout. This keeps the selected plan highlighted consistently after checkout.
 - Updated the pure fulfillment helper, its regression test and both live/mock checkout call sites.
+
+
+## Section 83 — Complete Stripe checkout intent/session binding (2026-11-10)
+
+- The webhook required `checkoutSessionId` and `currency` on the pre-checkout intent, but the checkout route had only created the intent with user, mode, amount and metadata. It never persisted the returned Stripe Checkout Session ID, currency, PaymentIntent ID or a `session_created` state. This made the strict webhook binding reject valid sessions.
+- After Stripe creates a Checkout Session, the route now persists its exact session ID, currency, PaymentIntent ID (when present), and `session_created` status to the matching server-created intent before returning the redirect URL.
+- Extracted the binding decision into `src/server/checkoutIntentIntegrity.ts`. Exact matches are accepted; mismatches are marked for review; a webhook arriving while the intent is still pending and has no session ID is treated as retryable rather than permanently marked as a mismatch.
+- Added tests for exact matches, currency casing, expanded PaymentIntent objects, early webhook arrival, and mismatched user/session/mode/amount/currency/payment intent/status.
+- Source refetch confirms both checkout-session persistence and webhook use of the shared binding helper. Tests remain unexecuted while GitHub Actions runner provisioning is unavailable.
+- Before this documentation update the branch was 298 ahead / 0 behind `main`, at `458bc1a33ff54af7a77363498d7a22447da82a8c`. `main` remains unchanged.
