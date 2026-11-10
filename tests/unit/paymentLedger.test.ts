@@ -129,4 +129,20 @@ describe("Payment Ledger & Invariants", () => {
     expect(secondCall.result.count).toBe(1); // Not re-executed!
     expect(executionCount).toBe(1); // Function was only called once
   });
+  it("rejects reuse of a completed idempotency key for a different operation", async () => {
+    const store = new Map<string, any>();
+    const db = {
+      collection: () => ({ doc: (id: string) => ({ update: async (v: any) => store.set(id, {...store.get(id), ...v}), set: async (v: any) => store.set(id,v), delete: async () => store.delete(id) }) }),
+      runTransaction: async (fn: any) => fn({
+        get: async (ref: any) => ({ exists: store.has("key"), data: () => store.get("key") }),
+        set: (ref: any, value: any) => store.set("key", value),
+        update: (ref: any, value: any) => store.set("key", {...store.get("key"), ...value}),
+        delete: () => store.delete("key"),
+      }),
+    };
+    await PaymentLedgerEngine.executeIdempotentOperation(db, "key", "PAYMENT_CAPTURE", async () => "done");
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(db, "key", "REFUND", async () => "wrong"))
+      .rejects.toThrow("different financial operation");
+  });
+
 });
