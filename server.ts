@@ -2119,14 +2119,22 @@ async function startServer() {
                   });
                 }
               });
-              // Public cards are a projection. Keep this retryable and outside the
-              // transaction; if it fails, Stripe retries and this write is safe to repeat.
-              await publicCardRef.set({
-                isBoosted: true,
-                boostTier: meta.tier || "emergency_boost",
-                isInstantMatch: isIM,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-              }, { merge: true });
+              // The projection is a separate transaction because it is not part of
+              // the monetary/job fulfillment commit. Still fence it with the event claim:
+              // a worker whose lease was taken over must not publish stale projection data.
+              await db.runTransaction(async (tx: any) => {
+                const claimSnap = await tx.get(eventRef);
+                const claimData = claimSnap.data() || {};
+                if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                  throw new Error('Webhook claim lost before boost projection mutation.');
+                }
+                tx.set(publicCardRef, {
+                  isBoosted: true,
+                  boostTier: meta.tier || "emergency_boost",
+                  isInstantMatch: isIM,
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+              });
             }
           }
         }
