@@ -1778,3 +1778,35 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
 ### Verification / promotion safety
 - Inspection only; no quota enforcement code or rules changed in this section.
 - Integration only. Main, AI Studio sync, production Firebase, and deployment untouched.
+
+
+
+## Section 59 — Property write-path inventory and quota migration preparation (2026-11-10)
+
+### Inspected call sites
+- `src/components/PropertyManager.tsx` is a confirmed direct client creation path: `addDoc(collection(db, "properties"), ...)` in `handleAddProperty` (currently around lines 85–100). It writes ownerId, name, address, postcode, city, propertyType, active status, and ISO timestamps. The same component edits existing properties with `updateDoc` and deletes them with `deleteDoc`.
+- `src/components/property/TransferOwnershipModal.tsx` updates existing property documents for transfer; it is not a create path.
+- `src/components/property/ClaimPropertyPassportModal.tsx` queries and updates an existing property; it is not a create path.
+- `src/components/PropertyPassportModal.tsx` updates existing property metadata and nested records; no root-property creation identified in the inspected matches.
+- `src/components/property/MoveInLanding.tsx` reads private/public property records; no create path.
+- `src/components/TenantReportPortal.tsx` creates tenant issue records, not property records.
+- `src/components/anytrader/GothamHousingPortal.tsx` was inspected for root property creation patterns; no direct `addDoc/setDoc` to `properties` found in its content.
+- Existing `tests/unit/propertySecurityRules.test.ts` verifies privacy/ownership protection but does not assert that ordinary client property creation is denied or enforce a Gotham quota. The Firestore rules currently permit owner/user direct create, confirming the bypass described in Section 58.
+
+### Migration implications
+- The primary property-add UI path to migrate first is `PropertyManager.handleAddProperty`; edit/delete should remain distinct operations and must not consume/release a slot incorrectly.
+- Existing claim/transfer paths mutate existing property documents and need policy review: ownership transfer should move quota ownership/reservation atomically, not create a second property slot; passport claim must not silently create a quota slot.
+- Deletion currently happens directly in the client. Once quota reservations are introduced, deletion must release the corresponding slot through a trusted atomic operation or be handled by a server-side deletion workflow; direct deletion cannot leave orphaned quota reservations.
+- This is a focused call-site inventory of the principal property-management and adjacent property components, not proof that no other root-property creation exists anywhere in the repository. Before changing Firestore create rules, complete a repository-wide search for `addDoc(collection(db, "properties"))`, `setDoc(doc(db, "properties"`, Admin SDK writes, imports/seeds, and test fixtures.
+
+### Decision / next implementation work
+1. Add an explicit server-owned quota model (prefer deterministic slot documents or a per-owner counter updated transactionally) with documented migration/grandfathering for existing properties.
+2. Define authoritative entitlement source and allowed admin/legacy exemptions. Stripe checkout metadata alone is not authoritative for ongoing entitlement; reconcile against verified subscription state and stored user entitlement fields.
+3. Design one trusted create operation that authenticates the Firebase ID token, validates payload/ownership, checks active subscription and licensed door count, atomically reserves a slot and creates the property, and returns the new property ID.
+4. Migrate `PropertyManager` create/delete flows and all other discovered write paths; preserve existing update/transfer semantics with explicit slot transfer rules.
+5. Only after migration and emulator coverage, deny direct ordinary-user `create` on `/properties/{propertyId}`; preserve admin paths and existing reads/updates as intended.
+6. Add concurrency, cap, downgrade, cancellation, transfer, delete/release, grandfathering, spoofing, and idempotent retry tests.
+
+### Status
+- Inspection/documentation only; no application code or Firestore rules changed.
+- Integration branch only. Main, AI Studio sync, Firebase production, and deployment untouched.
