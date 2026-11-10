@@ -1729,6 +1729,11 @@ async function startServer() {
         if (session.payment_status !== 'paid') {
           console.warn(`[Webhook Warning] Checkout session ${session.id} completed with payment_status '${session.payment_status}'. Skipping fulfillment until paid.`);
           await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
             const latest = await tx.get(eventRef);
             if (latest.data()?.claimToken !== claimToken || latest.data()?.status !== 'processing') throw new Error('Webhook claim lost before unpaid-event completion.');
             tx.update(eventRef, { status: 'completed', skippedReason: 'payment_not_paid', claimToken: admin.firestore.FieldValue.delete() });
@@ -1754,17 +1759,32 @@ async function startServer() {
           throw new Error("Checkout intent binding is still being finalized; retry webhook processing.");
         }
         if (bindingState === "mismatch") {
-          await intentRef.update({
-            status: "review_required",
-            reviewReason: "checkout_session_intent_binding_mismatch",
-            reviewSessionId: session.id,
-            reviewAt: admin.firestore.FieldValue.serverTimestamp()
+          await db.runTransaction(async (tx: any) => {
+            const [claimSnap, latestIntent] = await Promise.all([tx.get(eventRef), tx.get(intentRef)]);
+            const claimData = claimSnap.data() || {};
+            if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              throw new Error('Webhook claim lost before checkout intent review mutation.');
+            }
+            if (latestIntent.exists) tx.update(intentRef, {
+              status: "review_required",
+              reviewReason: "checkout_session_intent_binding_mismatch",
+              reviewSessionId: session.id,
+              reviewAt: admin.firestore.FieldValue.serverTimestamp()
+            });
           });
           throw new Error("Checkout fulfillment rejected: Stripe session does not match its authoritative payment intent.");
         }
-        await intentRef.update({
-          status: "processing",
-          processingStartedAt: admin.firestore.FieldValue.serverTimestamp()
+        await db.runTransaction(async (tx: any) => {
+          const [claimSnap, latestIntent] = await Promise.all([tx.get(eventRef), tx.get(intentRef)]);
+          const claimData = claimSnap.data() || {};
+          if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+            throw new Error('Webhook claim lost before checkout intent processing mutation.');
+          }
+          if (!latestIntent.exists) throw new Error('Checkout intent disappeared before processing.');
+          tx.update(intentRef, {
+            status: "processing",
+            processingStartedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
         });
         const userId = intent.userId;
         const meta = intent.metadata || {};
@@ -1777,6 +1797,11 @@ async function startServer() {
             const userRef = db.collection("users").doc(userId);
             const markerRef = db.collection("stripe_fulfillments").doc(`video_pro_${session.id}`);
             await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
               if (!userSnap.exists) throw new Error("Video Pro subscription user does not exist.");
               if (markerSnap.exists) return;
@@ -1802,6 +1827,11 @@ async function startServer() {
             const userRef = db.collection("users").doc(userId);
             const markerRef = db.collection("stripe_fulfillments").doc(`exclusive_leads_${session.id}`);
             await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
               if (!userSnap.exists) throw new Error("Exclusive Leads subscription user does not exist.");
               if (markerSnap.exists) return;
@@ -1827,6 +1857,11 @@ async function startServer() {
             const userRef = db.collection("users").doc(userId);
             const markerRef = db.collection("stripe_fulfillments").doc(`driver_gold_${session.id}`);
             await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
               if (!userSnap.exists) throw new Error("Gold Driver subscription user does not exist.");
               if (markerSnap.exists) return;
@@ -1861,6 +1896,11 @@ async function startServer() {
             const userRef = db.collection("users").doc(userId);
             const markerRef = db.collection("stripe_fulfillments").doc(`gotham_saas_${session.id}`);
             await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
               if (!userSnap.exists) throw new Error("Gotham SaaS subscription user does not exist.");
               if (markerSnap.exists) return;
@@ -1907,6 +1947,11 @@ async function startServer() {
                 )
               : null;
             await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
               if (!userSnap.exists) throw new Error("Membership subscription user does not exist.");
               if (markerSnap.exists) return;
@@ -1945,6 +1990,11 @@ async function startServer() {
                 const fulfillmentRef = db.collection("stripe_fulfillments").doc(`ad_wallet_${event.id}`);
                 const walletRef = db.collection("users").doc(userId);
                 await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
                   const fulfillment = await tx.get(fulfillmentRef);
                   if (fulfillment.exists) return;
                   tx.set(walletRef, {
@@ -1967,6 +2017,11 @@ async function startServer() {
               const mediationJobRef = db.collection("jobs").doc(meta.jobId);
               const mediationFulfillmentRef = db.collection("stripe_fulfillments").doc(`mediation_stake_${session.id}`);
               await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
                 const [jobSnap, fulfillmentSnap] = await Promise.all([
                   tx.get(mediationJobRef), tx.get(mediationFulfillmentRef)
                 ]);
@@ -2014,6 +2069,11 @@ async function startServer() {
               const instantMatchFulfillmentRef = db.collection("stripe_fulfillments").doc(`instant_match_${session.id}`);
               const boostExpiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
               await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
                 const [jobSnap, boostMarkerSnap, matchSnap, imMarkerSnap] = await Promise.all([
                   tx.get(jobRef), tx.get(boostFulfillmentRef), ...(isIM ? [tx.get(matchRef), tx.get(instantMatchFulfillmentRef)] : [])
                 ]);
@@ -2104,6 +2164,11 @@ async function startServer() {
             const { product, userDoc } = resolved;
             const eventCreated = Number(event.created || 0);
             await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
               const latest = await tx.get(userDoc.ref);
               if (!latest.exists) return;
               const current = latest.data() || {};
