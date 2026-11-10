@@ -2554,3 +2554,17 @@ A second pass inventoried the Stripe webhook handler's Firestore mutation calls 
 The newest Actions run observed after the Section 102 plan commit is run 42831357287 (run number 764), for commit e065add975fa7e2db5e0b69dc694e74d5f7235fe. Its sole job reports runner_id 0, empty runner name, and an empty steps array; it failed within seconds without reaching a workflow step. This repeats the pre-runner failure shape from Section 100 and does not establish a code test failure or prove the exact account/billing cause.
 
 **Remaining FIN-01 work:** execute the unit suite when a runner is available; add emulator coverage for claim takeover and Firestore transaction retry; audit non-Firestore effects and delivery/retry semantics; then inspect actual CI step results. FIN-01 remains open. No live Stripe/Firebase operations were run.
+
+
+## Section 104 — Ambiguous escrow transfer outcomes remain locked (2026-11-10)
+
+FIN-03 follow-up remediation on the integration branch:
+
+- A thrown `stripe.transfers.create` call is not proof that Stripe did not create the transfer. The transport can fail after Stripe accepts the request, so treating every exception as a definite failure and clearing `releaseOperationId` allowed a caller to submit a new key and mint a different Stripe idempotency key for the same milestone.
+- `executeStripeEscrowTransfer` now classifies exceptions from the Stripe transfer call as `reconciliation_required`, records that status on the ledger, and returns the exact deterministic Stripe idempotency key. Preflight failures detected before calling Stripe remain `failed`.
+- The escrow release route now handles this ambiguous result separately: it preserves the milestone's `funds_released` state and original `releaseOperationId`, marks `releaseStatus: reconciliation_required` only when the milestone still carries that exact operation key, and returns an explicit warning not to retry with a new key. The previous rollback-to-funded/clear-key behavior remains limited to definite preflight failures.
+- Added a unit case that simulates a transfer request throwing after submission and asserts the reconciliation-required result, stable Stripe key, preserved milestone operation key/state, and ledger status.
+
+Commits: ledger implementation `3ff058a1b91066ca25081c82c54e2d6d9b19a6b7`; route handling `f5b2c06a0ca676988267bf7f28d1f04dfc015667`; regression test `14a8c58595f8653748d67af9967ee24d5aa8a965`.
+
+**Verification boundary:** fetch-back/source inspection and branch comparison are pending. The unit test has not been executed; CI runner availability remains unresolved. This is a conservative lock-and-escalate behavior, not an automated Stripe transfer reconciler. An authorized operator still needs to reconcile Stripe's transfer records against the stored operation metadata before releasing the lock or retrying. No live Stripe/Firebase operation was performed.
