@@ -41,3 +41,62 @@ export function buildSubscriptionLifecyclePatch(product: SubscriptionProduct, su
   }
   return patch;
 }
+
+
+export interface SubscriptionProductMatch {
+  product: {
+    key: SubscriptionProduct;
+    idField: string;
+    lastCreated: string;
+    lastId: string;
+  };
+  userDoc: any;
+}
+
+export function resolveSubscriptionProductMatch(
+  matches: Array<SubscriptionProductMatch>
+): SubscriptionProductMatch | null {
+  if (matches.length === 0) return null;
+
+  const userIds = new Set(matches.map((match) => String(match.userDoc.id)));
+  if (userIds.size !== 1) {
+    throw new Error("Stripe subscription is linked to multiple users; manual reconciliation required.");
+  }
+
+  const dedicated = matches.filter((match) => match.product.key !== "membership");
+  if (dedicated.length > 1) {
+    throw new Error("Stripe subscription ID is linked across multiple products; manual reconciliation required.");
+  }
+  if (dedicated.length === 1) return dedicated[0];
+
+  const generic = matches.find((match) => match.product.idField === "subscriptionId");
+  if (!generic) return null;
+
+  const userData = generic.userDoc.data ? generic.userDoc.data() : {};
+  const legacyType = String(userData.subscriptionType || "");
+  if (legacyType === "driver_gold") {
+    return {
+      ...generic,
+      product: {
+        ...generic.product,
+        key: "gold_driver",
+        idField: "subscriptionId",
+        lastCreated: "driverSubscriptionLastEventCreated",
+        lastId: "driverSubscriptionLastEventId"
+      }
+    };
+  }
+  if (legacyType === "gotham_saas") {
+    return {
+      ...generic,
+      product: {
+        ...generic.product,
+        key: "gotham_saas",
+        idField: "subscriptionId",
+        lastCreated: "gothamSubscriptionLastEventCreated",
+        lastId: "gothamSubscriptionLastEventId"
+      }
+    };
+  }
+  return generic;
+}
