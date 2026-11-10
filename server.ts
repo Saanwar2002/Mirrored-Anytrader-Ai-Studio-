@@ -3738,7 +3738,7 @@ async function startServer() {
       const buyerEmail = typeof req.body?.buyerEmail === "string" ? req.body.buyerEmail.trim().toLowerCase() : "";
       const validityDays = Number(req.body?.validityDays);
       if (![14, 30, 60].includes(validityDays)) throw new BadRequestError("Transfer validity must be 14, 30, or 60 days.");
-      if (buyerEmail && !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(buyerEmail)) {
+      if (buyerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(buyerEmail)) {
         throw new BadRequestError("A valid buyer email address is required.");
       }
 
@@ -3751,8 +3751,8 @@ async function startServer() {
         const propertySnap = await tx.get(propertyRef);
         if (!propertySnap.exists) throw new NotFoundError("Property not found.");
         const property = propertySnap.data() || {};
-        const ownerIds = [property.ownerId, property.userId].filter((value: any) => typeof value === "string" && value.length > 0);
-        if (!ownerIds.includes(userId)) throw new ForbiddenError("Only the current property owner can initiate a transfer.");
+        const currentOwnerId = String(property.ownerId || property.userId || "");
+        if (currentOwnerId !== userId) throw new ForbiddenError("Only the current property owner can initiate a transfer.");
         const duplicateCode = await tx.get(db.collection("properties")
           .where("transferCode", "==", code)
           .where("transferStatus", "==", "pending")
@@ -3789,8 +3789,8 @@ async function startServer() {
         const propertySnap = await tx.get(propertyRef);
         if (!propertySnap.exists) throw new NotFoundError("Property not found.");
         const property = propertySnap.data() || {};
-        const ownerIds = [property.ownerId, property.userId].filter((value: any) => typeof value === "string" && value.length > 0);
-        if (!ownerIds.includes(userId)) throw new ForbiddenError("Only the current property owner can revoke a transfer.");
+        const currentOwnerId = String(property.ownerId || property.userId || "");
+        if (currentOwnerId !== userId) throw new ForbiddenError("Only the current property owner can revoke a transfer.");
         if (property.transferStatus !== "pending") throw new ConflictError("There is no pending transfer to revoke.");
         tx.update(propertyRef, {
           transferStatus: "none",
