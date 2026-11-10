@@ -1,4 +1,5 @@
 import express from "express";
+import { evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
@@ -3674,18 +3675,12 @@ async function startServer() {
           throw new ForbiddenError("Gotham subscription is not active. Property creation is unavailable until billing is restored.");
         }
         const doorsAllowed = isGothamEntitled ? Number(profile.gothamDoorsCount) : 0;
-        if (isGothamEntitled && (!Number.isSafeInteger(doorsAllowed) || doorsAllowed < 1)) {
-          throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
-        }
         // Once a Gotham usage document exists, keep it current even while the
         // account is on another plan so a later Gotham renewal starts accurately.
         if (isGothamEntitled || usageSnap.exists) {
           let currentUsage: number;
           if (usageSnap.exists) {
             currentUsage = Number(usageSnap.data()?.propertyCount);
-            if (!Number.isSafeInteger(currentUsage) || currentUsage < 0) {
-              throw new ForbiddenError("Gotham property usage is invalid. Please contact support.");
-            }
           } else {
             // One-time legacy backfill. The usage document then becomes the
             // serialization point for all later creates and deletes.
@@ -3700,12 +3695,19 @@ async function startServer() {
             }
             currentUsage = existingIds.size;
           }
-          if (isGothamEntitled && currentUsage >= doorsAllowed) {
+          const quotaDecision = evaluateGothamPropertyQuota(currentUsage, doorsAllowed, isGothamEntitled);
+          if (!quotaDecision.allowed) {
+            if (quotaDecision.reason === "invalid_usage") {
+              throw new ForbiddenError("Gotham property usage is invalid. Please contact support.");
+            }
+            if (quotaDecision.reason === "invalid_allowance") {
+              throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
+            }
             throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
           }
           const usagePatch: Record<string, any> = {
             userId,
-            propertyCount: currentUsage + 1,
+            propertyCount: quotaDecision.nextUsage,
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
           };
           if (isGothamEntitled) {
