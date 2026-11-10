@@ -2140,3 +2140,14 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Source refetch confirms the route imports and calls the helper and writes `quotaDecision.nextUsage` in the same transaction as the property and idempotency record.
 - Latest observed branch head: `950bdac143fd98cd3f52191e7a16f92845a473d2`; comparison: 235 ahead / 0 behind `main`.
 - Latest push workflow run `42806902691` (run 663) failed before any steps (runner provisioning failure); tests remain unexecuted.
+
+
+## Section 74 — Gotham quota decrement invariants (2026-11-10)
+
+- Extracted the shared decrement guard into `decrementGothamPropertyUsage`.
+- The property-delete transaction and ownership-transfer transaction now use the same tested decrement decision instead of duplicating counter validation and underflow checks.
+- Invalid, negative, fractional counters are rejected; zero is rejected as an underflow/inconsistent counter; positive safe integers decrement exactly once.
+- Added three focused decrement tests. The create, delete and transfer Firestore transactions still own the counter reads/writes and remain atomic.
+- Refetched source confirms both delete and transfer paths call the helper.
+- Latest branch head: `f1bbdcec72c515878b52fc8f96a3f94d86b2faef`; comparison: 239 ahead / 0 behind `main`.
+- Latest push run `42807065937` (run 667) failed before test steps because the Actions runner is unavailable (runner ID 0). No test execution is claimed.
