@@ -240,6 +240,24 @@ export async function getDynamicFirestoreConfigs(firestoreDb: any): Promise<{
  * Resolves the server-authoritative line item and Stripe Connect routing
  * based strictly on validated server state. DISCARDS client-provided prices.
  */
+async function loadAuthorizedCheckoutJob(firestoreDb: any, jobId: string, authUid: string, purpose: "boost" | "mediation_stake"): Promise<Record<string, any>> {
+  if (!jobId || typeof jobId !== "string") throw new BadRequestError("A valid jobId is required for checkout");
+  if (!firestoreDb) throw new BadRequestError("Database unavailable for job checkout authorization");
+  const jobSnap = await firestoreDb.collection("jobs").doc(jobId).get();
+  if (!jobSnap.exists) throw new NotFoundError("Job not found");
+  const jobData = jobSnap.data() || {};
+  const ownerId = jobData.homeownerId || jobData.userId || jobData.ownerId || jobData.posterId || jobData.customerId;
+  const assignedTraderId = jobData.acceptedTradespersonId || jobData.acceptedTraderId || jobData.assignedTraderId || jobData.tradespersonId || jobData.traderId;
+  if (purpose === "mediation_stake") {
+    if (authUid !== ownerId && authUid !== assignedTraderId) throw new ForbiddenError("Only a job participant can pay the mediation stake");
+    if (jobData.status !== "disputed") throw new BadRequestError("Mediation stake can only be paid after the job has entered disputed status");
+    if (jobData.mediationStakePaid === true || jobData.dispute?.mediationStakePaid === true) throw new BadRequestError("The mediation stake has already been paid for this job");
+  } else {
+    if (authUid !== ownerId) throw new ForbiddenError("Only the job owner can purchase a job boost");
+    if (!["open", "quoted", "posted", "quoting", "in_bidding"].includes(String(jobData.status || ""))) throw new BadRequestError("Only active jobs can be boosted");
+  }
+  return jobData;
+}
 export async function resolveAuthoritativeLineItem(
   body: any,
   authUid: string,
@@ -247,6 +265,9 @@ export async function resolveAuthoritativeLineItem(
 ): Promise<AuthoritativeLineItemResult> {
   const metadata = body.metadata || {};
   const mode = body.mode || "subscription";
+  const hasExplicitMembershipSelection =
+    ["price_payg", "price_pro", "price_premium", "price_platinum", "price_landlord", "price_driver_gold"].includes(String(body.priceId || "")) ||
+    (typeof body.tierName === "string" && body.tierName.trim().length > 0);
 
   // Load dynamic admin-managed configs from Firestore (falls back gracefully to SERVER_PRICING_CATALOG if unset)
   const { globalTiers, globalConfig } = await getDynamicFirestoreConfigs(firestoreDb);
@@ -254,7 +275,7 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 1. CLIENT MONEY: Tradesperson Milestone Escrow Funding
   // =========================================================================
-  if (metadata.type === "milestone_funding") {
+  if (metadata.type === "milestone_funding" && !hasExplicitMembershipSelection) {
     const { jobId, quoteId, milestoneId } = metadata;
     if (!jobId || !quoteId || !milestoneId) {
       throw new BadRequestError("Milestone funding requires jobId, quoteId, and milestoneId in metadata");
@@ -390,9 +411,8 @@ export async function resolveAuthoritativeLineItem(
   // 2. B2B SaaS METERED BILLING ("Gotham" Housing Portal)
   // =========================================================================
   if (
-    metadata.type === "gotham_saas" ||
-    metadata.subscriptionType === "gotham_saas" ||
-    body.tierName?.toLowerCase().includes("gotham")
+    (!hasExplicitMembershipSelection || body.priceId === "price_gotham_saas" || (typeof body.tierName === "string" && body.tierName.toLowerCase().includes("gotham"))) &&
+    (metadata.type === "gotham_saas" || metadata.subscriptionType === "gotham_saas" || (typeof body.tierName === "string" && body.tierName.toLowerCase().includes("gotham"))
   ) {
     const doors = Number(metadata.gothamDoorsCount || body.doorsCount || 100);
     const cycle = (metadata.gothamBillingCycle || "monthly") as "monthly" | "annual";
@@ -430,7 +450,7 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 3. AD WALLET TOPUP (Bounded Advertising Balance)
   // =========================================================================
-  if (metadata.type === "ad_wallet_topup") {
+  if (metadata.type === "ad_wallet_topup" && !hasExplicitMembershipSelection) {
     const rawTopup = Number(metadata.topupAmount || 25);
     // Sanitize to valid integer bounds: min £10, max £5,000
     const sanitizedPounds = Math.max(10, Math.min(5000, Math.round(rawTopup)));
@@ -463,7 +483,8 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 4. DISPUTE MEDIATION STAKE (£25.00)
   // =========================================================================
-  if (metadata.type === "mediation_stake" || body.priceId === "price_dispute_stake") {
+  if (body.priceId === "price_dispute_stake" || (metadata.type === "mediation_stake" && !hasExplicitMembershipSelection)) {
+    await loadAuthorizedCheckoutJob(firestoreDb, String(metadata.jobId || ""), authUid, "mediation_stake");
     const catalogItem = SERVER_PRICING_CATALOG.price_dispute_stake;
     const dynamicStake = Number(globalConfig?.paidAddons?.milestoneEscrow?.homeownerMediationStake);
     const resolvedAmountPence = (!isNaN(dynamicStake) && dynamicStake > 0)
@@ -498,7 +519,8 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 5. PRIORITY BOOSTS (Emergency £4.99, Instant Match £2.99)
   // =========================================================================
-  if (metadata.type === "boost" || metadata.tier === "emergency_boost" || body.priceId === "price_emergency_boost") {
+  if (["price_emergency_boost", "price_instant_match", "price_mock_boost", "price_mock_instant_match"].includes(String(body.priceId || "")) || (!hasExplicitMembershipSelection && (metadata.type === "boost" || metadata.tier === "emergency_boost" || metadata.tier === "instant_match"))) {
+    await loadAuthorizedCheckoutJob(firestoreDb, String(metadata.jobId || ""), authUid, "boost");
     const isInstantMatch = metadata.tier === "instant_match" || body.priceId === "price_instant_match";
     const catalogItem = isInstantMatch
       ? SERVER_PRICING_CATALOG.price_instant_match
@@ -539,7 +561,7 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 6. ADD-ONS: Exclusive Leads (£15/mo), Verified Video Pro (£10/mo or £96/yr)
   // =========================================================================
-  if (metadata.isExclusiveAddon === "true" || metadata.type === "exclusive_leads" || body.priceId === "price_exclusive_leads") {
+  if (body.priceId === "price_exclusive_leads" || (!hasExplicitMembershipSelection && (metadata.isExclusiveAddon === "true" || metadata.type === "exclusive_leads"))) {
     const catalogItem = SERVER_PRICING_CATALOG.price_exclusive_leads;
     const dynamicPrice = Number(globalConfig?.paidAddons?.exclusiveLeads?.price || globalConfig?.exclusiveLeadsFee);
     const resolvedAmountPence = (!isNaN(dynamicPrice) && dynamicPrice > 0)
@@ -570,7 +592,7 @@ export async function resolveAuthoritativeLineItem(
     };
   }
 
-  if (metadata.isVideoPro === "true" || metadata.type === "video_pro_subscription" || body.priceId === "price_video_pro") {
+  if (body.priceId === "price_video_pro" || (!hasExplicitMembershipSelection && (metadata.isVideoPro === "true" || metadata.type === "video_pro_subscription"))) {
     const isAnnual = metadata.billingCycle === "annual";
     const catalogItem = isAnnual
       ? SERVER_PRICING_CATALOG.price_video_pro_annual
@@ -611,23 +633,19 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   // 7. MEMBERSHIP TIERS (Landlord Pro, Driver Gold, Trader Pro/Premium/Platinum)
   // =========================================================================
-  const rawTier = (body.tierName || metadata.tierName || metadata.tier || body.priceId || "Pro").toString();
+  const rawTier = (body.priceId || body.tierName || metadata.tierName || metadata.tier || "Pro").toString();
   const lowerTier = rawTier.toLowerCase();
 
   let matchedCatalogKey = "price_pro";
   let canonicalTier = "pro";
 
   if (
-    lowerTier.includes("landlord") ||
-    metadata.subscriptionType === "landlord" ||
-    body.priceId === "price_landlord"
+    lowerTier.includes("landlord") || body.priceId === "price_landlord"
   ) {
     matchedCatalogKey = "price_landlord";
     canonicalTier = "landlord";
   } else if (
-    lowerTier.includes("gold driver") ||
-    metadata.subscriptionType === "driver_gold" ||
-    body.priceId === "price_driver_gold"
+    lowerTier.includes("gold driver") || body.priceId === "price_driver_gold"
   ) {
     matchedCatalogKey = "price_driver_gold";
     canonicalTier = "driver_gold";
@@ -688,7 +706,6 @@ export async function resolveAuthoritativeLineItem(
       tier: canonicalTier,
       subscriptionType: canonicalTier === "landlord" ? "landlord" : canonicalTier === "driver_gold" ? "driver_gold" : "tier",
       userId: authUid,
-      ...metadata,
     },
   };
 }
