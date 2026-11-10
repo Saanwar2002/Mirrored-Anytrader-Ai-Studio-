@@ -137,4 +137,21 @@ describe("Stripe subscription product resolution", () => {
   it("returns null when no product matches", () => {
     expect(resolveSubscriptionProductMatch([])).toBeNull();
   });
+
+  it("ignores a legacy Gold Driver ID when a newer dedicated ID has replaced it", () => {
+    const result = resolveSubscriptionProductMatch([{
+      product: membership,
+      userDoc: user("u1", { subscriptionType: "driver_gold", subscriptionId: "sub_old", driverSubscriptionId: "sub_new" })
+    }]);
+    expect(result).toBeNull();
+  });
+
+  it("ignores a legacy Gotham ID when a newer dedicated ID has replaced it", () => {
+    const result = resolveSubscriptionProductMatch([{
+      product: membership,
+      userDoc: user("u1", { subscriptionType: "gotham_saas", subscriptionId: "sub_old", gothamSubscriptionId: "sub_new" })
+    }]);
+    expect(result).toBeNull();
+  });
+
 });
