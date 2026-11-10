@@ -3684,3 +3684,28 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 149 is documentation only; payout implementation unchanged.
 - No tests, emulator, typecheck, build, or CI run.
 - Next: inspect payment verification requirements in payout and ledger writer fields to map how one ride snapshot can match collected Stripe amount, payout transfer, and platform receivable without double counting.
+
+
+## Section 150 — Payout proof checks collection, but exact overpayment and canonical ride ledger are unresolved
+
+### Collection reconciliation in payout worker
+- Stripe path retrieves `ride.stripePaymentIntentId || ride.paymentIntentId`; requires GBP and PaymentIntent `succeeded`, then checks `amount_received >= baseFarePence + tipPence`. It accepts over-collection rather than requiring exact match; `verifiedCollectedPence` is recorded in local flow but does not establish a fee receivable/settlement allocation.
+- Fallback ledger query requires `transactionId` match (PI or `ride_<id>`), `type == RIDE_PAYMENT`, captured/completed, GBP and amount ≥ expected. It is structurally sound as a fail-closed type filter but previous source search found no canonical writer producing such RIDE_PAYMENT entries for taxi checkout.
+- When proof fails, payout is refused and ride gets `rejected_unverified_payment`; the worker does not itself create the missing collection proof.
+- A verified collected amount does not establish the platform fee was recognized, allocated, or settled. Stripe Connect destination transfer and platform fee are separate financial legs; the platform's receivable needs its own durable lifecycle.
+
+### Accounting implications
+- Card ride: customer collection (base+tip) → driver transfer (net base+tip) + platform fee (base residual). Fee may be retained via Stripe application fee or platform balance mechanics; actual checkout configuration must be verified and ledgered, not assumed from metadata.
+- Cash ride: customer cash to driver → platform fee receivable from driver → later driver settlement. No Stripe collection for ride fare; fee accrual must be independent of payment verification used by card payout.
+- Avoid treating `payment_ledger RIDE_PAYMENT` as proof of cash fee settlement. Separate types/entries: ride collection, platform fee receivable/accrual, driver fee settlement, Stripe transfer, refund/adjustment, with ride and operation linkage.
+
+### Required controls
+1. Require exact expected collected amount or explicitly support adjustment/refund with reason and ledger record; define how overpayment is handled.
+2. Use one immutable ride snapshot to calculate expected collected amount and split; store source PaymentIntent/Checkout Session binding.
+3. Create ledger rows in same transaction as local finalization or use durable outbox + idempotent consumer; Stripe external effects require intent/attempt and webhook proof.
+4. Add reconciliation report for rides with payment proof but no collection ledger, fee receivable without settlement, and payout transfer without matching ride snapshot.
+
+### Status
+- Section 150 is documentation only; no payout, Stripe, ledger, or ride changes.
+- No tests, emulator, typecheck, build, or CI run.
+- Next: inspect PaymentLedgerEngine's idempotency/entry model and Stripe Checkout Connect configuration to establish the proper distinct ledger entry types and transaction boundary.
