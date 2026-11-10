@@ -16,6 +16,22 @@ describe("Stripe subscription lifecycle patch mapping", () => {
     for (const [key, value] of Object.entries(expected)) expect(patch[key]).toBe(value);
   });
 
+  it("maps landlord cancellation to homeowner-only lifecycle fields", () => {
+    const patch = buildSubscriptionLifecyclePatch("landlord", {
+      ...active,
+      status: "canceled",
+      cancel_at_period_end: true
+    });
+    expect(patch).toMatchObject({
+      homeownerSubscriptionStatus: "canceled",
+      homeownerCancelAtPeriodEnd: true,
+      homeownerCurrentPeriodEnd: new Date(1_800_000_000_000).toISOString()
+    });
+    expect(patch).not.toHaveProperty("subscriptionStatus");
+    expect(patch).not.toHaveProperty("isPro");
+    expect(patch).not.toHaveProperty("isProInvoiceSubscriber");
+  });
+
   it.each([
     ["membership", { isPro: false, isProInvoiceSubscriber: false }],
     ["gold_driver", { isGoldDriver: false }],
