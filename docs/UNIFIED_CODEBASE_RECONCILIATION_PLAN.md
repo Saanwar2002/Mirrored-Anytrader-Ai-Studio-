@@ -2593,3 +2593,17 @@ A fresh review at integration HEAD `b430e240d0d0a8fdb3c6372d7176a036d8db08f8` re
 - Static source review only. No Stripe API, Firebase production data, or live refund operations were called. No tests were run as part of this source-location check.
 
 Next: inspect all current-branch references to refund persistence and the payment ledger's refund recording contract before proposing a new event handler. Keep the ZIP/PR #5 implementation as historical evidence, not as a source to transplant.
+
+
+## Section 107 — FIN-02 active Instant Match refund side-effect audit (2026-11-10)
+
+The follow-up search found an active refund-producing path outside the Stripe webhook:
+
+- `server.ts` imports `startInstantMatchEngine` from `instantMatchWorker.ts` and invokes it with the Firestore instance during server startup (import at line 21; startup invocation at line 7700 in the inspected branch file).
+- `instantMatchWorker.ts` issues `stripe.refunds.create({ payment_intent, reason: 'requested_by_customer' })` when an Instant Match expires after exhausting attempts. The same refund logic appears in two independently-triggered paths: the Firestore `instant_matches` snapshot listener and the 10-second timeout interval.
+- Neither call supplies a Stripe idempotency key. The code marks the match `expired` before issuing the refund, does not persist the refund ID or a durable refund-operation status, and catches/logs Stripe errors without surfacing a retryable operation state. A process crash or ambiguous Stripe response can therefore leave the match expired with refund outcome unknown; overlapping listener/interval execution can attempt the same refund more than once. Stripe API idempotency is not explicitly used by this worker.
+- This is not a general refund event-ingestion/reconciliation path and does not satisfy FIN-02's requirement to enumerate and reconcile individual refund records. It is a live refund-creation side effect, so it is in scope for AnyTrader financial integrity and must be treated separately from the missing `charge.refunded` webhook branch.
+- No code change is made in this section. Safe remediation requires a durable per-match refund operation/claim with a stable key, lease/token fencing, explicit states for pending/ambiguous/confirmed/failed, persisted Stripe refund ID, and a retry/reconciliation path that first checks Stripe outcome rather than blindly creating another refund. Both worker triggers must converge on the same operation. Add deterministic unit tests with a mocked Stripe client and Firestore transaction harness; never call live Stripe in tests.
+- Static review only. No worker was started, no Stripe request was made, and no Firebase data was read or mutated.
+
+Next: inspect worker deployment/runtime topology and existing Instant Match tests, then design a single idempotent refund operation shared by both timeout triggers. Keep refund ingestion (FIN-02) distinct from refund initiation and reconciliation.
