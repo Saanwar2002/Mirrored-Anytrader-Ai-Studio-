@@ -2054,8 +2054,8 @@ async function startServer() {
             }
           }
         }
-      // Synchronize Gotham entitlements from Stripe's current subscription state.
-      // Invoice events are treated only as triggers: an invoice payment alone never grants access.
+      // Synchronize product entitlements from the current Stripe subscription state.
+      // Invoice events are triggers only: payment events never grant access by themselves.
       if (
         event.type === "customer.subscription.updated" ||
         event.type === "customer.subscription.deleted" ||
@@ -2065,50 +2065,103 @@ async function startServer() {
       ) {
         const payload = event.data.object as any;
         const isSubscriptionDeleted = event.type === "customer.subscription.deleted";
-        const subscriptionId = isSubscriptionDeleted || event.type.startsWith("customer.subscription.")
+        const subscriptionId = event.type.startsWith("customer.subscription.")
           ? String(payload.id || "")
           : String(payload.subscription || payload.parent?.subscription_details?.subscription || "");
         if (subscriptionId) {
-          // A deleted event is terminal; for all other events retrieve the live Stripe
-          // object so delayed/out-of-order webhook deliveries cannot restore stale access.
+          // Use Stripe's live state for update/invoice events; the deleted event itself
+          // is terminal. A replaced subscription ID is never allowed to update the new one.
           const subscription = isSubscriptionDeleted
             ? payload as Stripe.Subscription
             : await stripeClient.subscriptions.retrieve(subscriptionId);
-          const users = await db.collection("users")
-            .where("gothamSubscriptionId", "==", subscriptionId)
-            .limit(2)
-            .get();
-          if (users.size > 1) {
-            throw new Error("Gotham subscription is linked to multiple users; manual reconciliation required.");
+          const products = [
+            { key: "membership", idField: "subscriptionId", lastCreated: "subscriptionLastEventCreated", lastId: "subscriptionLastEventId" },
+            { key: "gold_driver", idField: "driverSubscriptionId", lastCreated: "driverSubscriptionLastEventCreated", lastId: "driverSubscriptionLastEventId" },
+            { key: "exclusive_leads", idField: "exclusiveSubscriptionId", lastCreated: "exclusiveSubscriptionLastEventCreated", lastId: "exclusiveSubscriptionLastEventId" },
+            { key: "video_pro", idField: "videoProSubscriptionId", lastCreated: "videoProSubscriptionLastEventCreated", lastId: "videoProSubscriptionLastEventId" },
+            { key: "gotham_saas", idField: "gothamSubscriptionId", lastCreated: "gothamSubscriptionLastEventCreated", lastId: "gothamSubscriptionLastEventId" }
+          ];
+          const matches = await Promise.all(products.map(async (product) => {
+            const snap = await db.collection("users").where(product.idField, "==", subscriptionId).limit(2).get();
+            if (snap.size > 1) {
+              throw new Error("Stripe subscription is linked to multiple users for " + product.key + "; manual reconciliation required.");
+            }
+            return snap.empty ? null : { product, userDoc: snap.docs[0] };
+          }));
+          const linked = matches.filter((entry: any) => entry !== null) as Array<{ product: any; userDoc: any }>;
+          if (linked.length > 1) {
+            throw new Error("Stripe subscription ID is linked across multiple products; manual reconciliation required.");
           }
-          if (users.size === 1) {
-            const userDoc = users.docs[0];
+          if (linked.length === 1) {
+            const { product, userDoc } = linked[0];
             const subscriptionStatus = String(subscription.status || (isSubscriptionDeleted ? "canceled" : "unknown"));
             const isEntitled = subscriptionStatus === "active" || subscriptionStatus === "trialing";
+            const isTerminal = isSubscriptionDeleted || ["canceled", "unpaid", "incomplete_expired"].includes(subscriptionStatus);
             const periodEnd = Number((subscription as any).current_period_end || 0);
             const eventCreated = Number(event.created || 0);
             await db.runTransaction(async (tx: any) => {
               const latest = await tx.get(userDoc.ref);
               if (!latest.exists) return;
               const current = latest.data() || {};
-              // Do not let an older delivery overwrite a newer lifecycle decision.
-              if (Number(current.gothamSubscriptionLastEventCreated || 0) > eventCreated) return;
-              if (current.gothamSubscriptionId !== subscriptionId) return;
+              if (current[product.idField] !== subscriptionId) return;
+              // Event ordering is tracked independently for each product subscription.
+              if (Number(current[product.lastCreated] || 0) > eventCreated) return;
               const patch: Record<string, any> = {
-                gothamSubscriptionStatus: subscriptionStatus,
-                isGothamSubscriber: isEntitled,
-                gothamCancelAtPeriodEnd: Boolean((subscription as any).cancel_at_period_end),
-                gothamSubscriptionLastEventCreated: eventCreated,
-                gothamSubscriptionLastEventId: event.id,
+                [product.lastCreated]: eventCreated,
+                [product.lastId]: event.id,
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
               };
-              if (periodEnd > 0) {
-                const endDate = new Date(periodEnd * 1000).toISOString();
-                patch.gothamCurrentPeriodEnd = endDate;
-                patch.currentPeriodEnd = endDate;
+              if (product.key === "membership") {
+                patch.subscriptionStatus = subscriptionStatus;
+                patch.cancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
+                if (isEntitled) {
+                  patch.isPro = true;
+                  patch.isProInvoiceSubscriber = true;
+                } else if (isTerminal) {
+                  patch.isPro = false;
+                  patch.isProInvoiceSubscriber = false;
+                }
+                if (periodEnd > 0) patch.currentPeriodEnd = new Date(periodEnd * 1000).toISOString();
+              } else if (product.key === "gold_driver") {
+                patch.driverSubscriptionStatus = subscriptionStatus;
+                patch.driverCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
+                if (isEntitled) patch.isGoldDriver = true;
+                else if (isTerminal) patch.isGoldDriver = false;
+                if (periodEnd > 0) patch.driverCurrentPeriodEnd = new Date(periodEnd * 1000).toISOString();
+              } else if (product.key === "exclusive_leads") {
+                patch.exclusiveCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
+                if (isEntitled) {
+                  patch.hasExclusiveAddon = true;
+                  patch.isExclusiveActive = true;
+                } else if (isTerminal) {
+                  patch.hasExclusiveAddon = false;
+                  patch.isExclusiveActive = false;
+                }
+                if (periodEnd > 0) patch.exclusiveCurrentPeriodEnd = new Date(periodEnd * 1000).toISOString();
+              } else if (product.key === "video_pro") {
+                patch.videoProCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
+                if (isEntitled) {
+                  patch.hasVerifiedVideoProSubscription = true;
+                  patch.videoVerificationStatus = "verified";
+                } else if (isTerminal) {
+                  patch.hasVerifiedVideoProSubscription = false;
+                  patch.videoVerificationStatus = "unverified";
+                }
+                if (periodEnd > 0) patch.videoProCurrentPeriodEnd = new Date(periodEnd * 1000).toISOString();
+              } else {
+                patch.gothamSubscriptionStatus = subscriptionStatus;
+                patch.gothamCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
+                if (isEntitled) patch.isGothamSubscriber = true;
+                else if (isTerminal) patch.isGothamSubscriber = false;
+                if (periodEnd > 0) {
+                  const endDate = new Date(periodEnd * 1000).toISOString();
+                  patch.gothamCurrentPeriodEnd = endDate;
+                  patch.currentPeriodEnd = endDate;
+                }
+                // Never overwrite purchased door count with Stripe's aggregate line quantity.
               }
-              // Gotham is priced as one aggregate subscription line item; Stripe's
-              // line-item quantity is always 1 and must never replace purchased door count.
+              // past_due, incomplete and paused remain status-only: entitlement is
+              // deliberately unchanged until a product-specific grace policy is approved.
               tx.update(userDoc.ref, patch);
             });
           }
