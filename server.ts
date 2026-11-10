@@ -3596,7 +3596,9 @@ async function startServer() {
         const previousRequest = await requestRef.get();
         if (previousRequest.exists) {
           const previous = previousRequest.data() || {};
-          return res.status(200).json({ success: true, id: String(previous.propertyId || ""), duplicate: true });
+          const previousPropertyId = String(previous.propertyId || "");
+          if (!previousPropertyId) throw new Error("Property creation idempotency record is invalid.");
+          return res.status(200).json({ success: true, id: previousPropertyId, duplicate: true });
         }
       }
       const entitlementSnap = await userRef.get();
