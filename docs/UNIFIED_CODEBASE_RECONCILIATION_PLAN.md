@@ -2999,3 +2999,45 @@ Observed behavior:
 ### Scope and safety
 
 This is a source-audit finding only. No source code or tests were changed or run in this section. No Stripe or Firestore production operations were performed. Taxi-specific binding, amount, destination, ride fulfillment, and ledger requirements in Sections 119–124 remain unresolved and must be repaired as a coordinated flow; this section does not authorize loosening any payment or payout gate.
+
+## Section 126 — Checkout route inventory: payment-method scope and fee-settlement binding gap
+
+### Exact source evidence
+
+The integration-branch `server.ts` was fetched directly (blob SHA `d0d781571a2a1dd28478ca92930f4f9b919bf38a`) and the following Checkout Session creation sites were enumerated:
+
+1. `POST /api/create-checkout-session` (around lines 2333–2630):
+   - Creates a `payment_intents/{intentId}` record before Stripe Checkout.
+   - Uses `payment_method_types: ['card']`, `client_reference_id: userId`, and `metadata: { intentId }`.
+   - Persists Checkout Session ID, currency, PaymentIntent ID, and `session_created` after Stripe returns.
+   - For payment mode, it may configure `payment_intent_data` for Connect destination charges.
+2. `POST /api/create-setup-session` (around lines 2640–2690):
+   - Uses `mode: 'setup'` and `payment_method_types: ['card']`.
+   - It is a card-setup flow, not a payment fulfillment flow; no payment-intent binding is expected.
+3. `POST /api/rides/create-trip-payment` delegates to `src/server/tripPaymentAuthorization.ts`:
+   - Uses `mode: 'payment'` and `payment_method_types: ['card']`.
+   - Does not currently bind to the shared server-created `payment_intents` record or shared webhook fulfillment (Sections 119–125).
+4. `POST /api/driver/settle-fees` (around lines 4793–4815):
+   - Uses `mode: 'payment'` and `payment_method_types: ['card']`.
+   - Session metadata contains only `driverId` and `type: 'fee_settlement'`; it has no `intentId` and no `client_reference_id`.
+   - The shared `checkout.session.completed` webhook requires both fields before it will process a paid Session. No `fee_settlement` fulfillment handler was found in the inspected webhook dispatch.
+   - The route therefore creates a real card Checkout Session that cannot pass the shared checkout intent-binding gate and has no corresponding webhook fulfillment in the inspected path. The route's success URL is not payment evidence.
+
+### Conclusions
+
+- All four enumerated Checkout Session creation sites explicitly constrain accepted methods to card. The asynchronous Checkout gap in Section 125 is therefore not currently demonstrated as an active asynchronous-method bug in these routes. It remains a future-proofing issue if any route changes its method configuration or another Session creator is added.
+- The driver fee-settlement route is a separate, concrete integration gap: it creates a paid Checkout Session without the required server-side intent binding and without a matching webhook fulfillment branch.
+- The fee-settlement route's development sandbox path is separate from Stripe settlement and must not be treated as external payment evidence. Existing manual confirmation endpoints require their own authorization and financial-state audit before relying on them.
+
+### Required repair
+
+1. Decide whether fee settlement is intended to be webhook-verified Stripe payment or an explicitly manual/sandbox operation. Do not mix the two.
+2. If Stripe payment is intended, create a pre-checkout server intent bound to the authenticated driver, authoritative outstanding fee balance, GBP integer-pence amount, and fee-settlement purpose. Set `metadata.intentId` and `client_reference_id`, then persist Session and PaymentIntent IDs before returning the URL.
+3. Add a dedicated webhook fulfillment handler that verifies exact paid status, amount, currency, driver identity, and current outstanding fee balance; atomically records a deterministic settlement marker and updates fee balances. Handle duplicate and concurrent delivery and do not trust client-supplied settlement amounts.
+4. If manual settlement remains supported, keep it separate from Stripe Checkout and require auditable evidence plus strict server-side authorization; never let a success redirect or sandbox URL mark a Stripe payment as settled.
+5. Add route inventory regression tests asserting that every payment-mode Checkout Session creator either supplies the shared binding and has an explicit webhook fulfillment handler, or is explicitly documented as non-fulfilling/setup-only.
+6. Keep card-only constraints explicit until asynchronous methods have complete event and settlement handling. Revisit Section 125 if accepted methods expand.
+
+### Scope and safety
+
+This is a source-audit finding only. No source code or tests were changed or run in this section. No Stripe or Firestore production operations were performed. The taxi payment and payout repair remains coordinated and fail-closed; no payout gate is relaxed.
