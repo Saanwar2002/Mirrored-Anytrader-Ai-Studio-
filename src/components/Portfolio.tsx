@@ -11,7 +11,7 @@ import { ClaimPropertyPassportModal } from "./property/ClaimPropertyPassportModa
 import { EstateAgentQRGeneratorModal } from "./property/EstateAgentQRGeneratorModal";
 import { createJobViaCommand } from "../services/jobCommandService";
 import { toast } from "sonner";
-import { createPropertyViaCommand } from "../services/propertyCommandService";
+import { createPropertyViaCommand, deletePropertyViaCommand } from "../services/propertyCommandService";
 
 export default function Portfolio() {
   const { user, profile } = useAuth();
@@ -325,7 +325,8 @@ export default function Portfolio() {
 
   const handleDeleteProperty = async (propertyId: string) => {
     try {
-      await deleteDoc(doc(db, "properties", propertyId));
+      if (!user) throw new Error("You must be signed in to delete a property.");
+      await deletePropertyViaCommand(user, propertyId);
       setDeletingId(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `properties/${propertyId}`);
