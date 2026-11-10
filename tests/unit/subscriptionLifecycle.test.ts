@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSubscriptionLifecyclePatch } from "../../src/server/subscriptionLifecycle.ts";
+import { buildSubscriptionLifecyclePatch, resolveSubscriptionProductMatch } from "../../src/server/subscriptionLifecycle.ts";
 
 const active = { id: "sub_test", status: "active", cancel_at_period_end: false, current_period_end: 1_800_000_000 };
 
@@ -84,5 +84,57 @@ describe("Stripe subscription lifecycle patch mapping", () => {
     expect(patch).not.toHaveProperty("doorAllowance");
     expect(patch).not.toHaveProperty("quantity");
     expect(patch).not.toHaveProperty("currentPeriodEnd");
+  });
+});
+
+
+describe("Stripe subscription product resolution", () => {
+  const membership = { key: "membership" as const, idField: "subscriptionId", lastCreated: "subscriptionLastEventCreated", lastId: "subscriptionLastEventId" };
+  const gold = { key: "gold_driver" as const, idField: "driverSubscriptionId", lastCreated: "driverSubscriptionLastEventCreated", lastId: "driverSubscriptionLastEventId" };
+  const gotham = { key: "gotham_saas" as const, idField: "gothamSubscriptionId", lastCreated: "gothamSubscriptionLastEventCreated", lastId: "gothamSubscriptionLastEventId" };
+  const user = (id: string, data: Record<string, unknown>) => ({ id, data: () => data });
+
+  it("resolves legacy generic Gold Driver subscription IDs by subscriptionType", () => {
+    const result = resolveSubscriptionProductMatch([{ product: membership, userDoc: user("u1", { subscriptionType: "driver_gold" }) }]);
+    expect(result?.product).toMatchObject({ key: "gold_driver", idField: "subscriptionId", lastCreated: "driverSubscriptionLastEventCreated" });
+  });
+
+  it("resolves legacy generic Gotham subscription IDs by subscriptionType", () => {
+    const result = resolveSubscriptionProductMatch([{ product: membership, userDoc: user("u1", { subscriptionType: "gotham_saas" }) }]);
+    expect(result?.product).toMatchObject({ key: "gotham_saas", idField: "subscriptionId", lastCreated: "gothamSubscriptionLastEventCreated" });
+  });
+
+  it("keeps generic subscription IDs mapped to membership by default", () => {
+    const result = resolveSubscriptionProductMatch([{ product: membership, userDoc: user("u1", { subscriptionType: "membership" }) }]);
+    expect(result?.product.key).toBe("membership");
+  });
+
+  it("prefers a dedicated product ID when the same user also has the legacy generic field", () => {
+    const doc = user("u1", { subscriptionType: "driver_gold" });
+    const result = resolveSubscriptionProductMatch([
+      { product: membership, userDoc: doc },
+      { product: gold, userDoc: doc }
+    ]);
+    expect(result?.product.key).toBe("gold_driver");
+    expect(result?.product.idField).toBe("driverSubscriptionId");
+  });
+
+  it("rejects one subscription ID linked to two different users", () => {
+    expect(() => resolveSubscriptionProductMatch([
+      { product: membership, userDoc: user("u1", {}) },
+      { product: gold, userDoc: user("u2", {}) }
+    ])).toThrow(/multiple users/);
+  });
+
+  it("rejects one subscription ID linked to multiple dedicated product fields", () => {
+    const doc = user("u1", {});
+    expect(() => resolveSubscriptionProductMatch([
+      { product: gold, userDoc: doc },
+      { product: gotham, userDoc: doc }
+    ])).toThrow(/multiple products/);
+  });
+
+  it("returns null when no product matches", () => {
+    expect(resolveSubscriptionProductMatch([])).toBeNull();
   });
 });
