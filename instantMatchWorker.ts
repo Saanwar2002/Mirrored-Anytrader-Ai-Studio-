@@ -209,6 +209,23 @@ export function startInstantMatchEngine(db: admin.firestore.Firestore) {
   };
 }
 
+export async function createInstantMatchAttempt(db: any, matchRef: any, attemptNumber: number, trader: any, intervalSeconds: number): Promise<boolean> {
+  const attemptRef = db.collection("instant_match_attempts").doc(matchRef.id + "_" + attemptNumber);
+  const expiresAt = new Date(Date.now() + intervalSeconds * 1000);
+  return db.runTransaction(async (tx: any) => {
+    const [latestMatchSnap, existingAttemptSnap] = await Promise.all([tx.get(matchRef), tx.get(attemptRef)]);
+    if (!latestMatchSnap.exists || existingAttemptSnap.exists) return false;
+    const latestMatch = latestMatchSnap.data() || {};
+    if (latestMatch.status !== "searching" || Number(latestMatch.currentAttempt || 0) !== attemptNumber - 1) return false;
+    tx.create(attemptRef, {
+      id: attemptRef.id, instantMatchId: matchRef.id, attemptNumber, traderId: trader.id,
+      traderCompositeScore: Math.floor(Math.random() * 50) + 70, smartScheduleFitApplied: true,
+      status: "pending", createdAt: new Date().toISOString(), expiresAt: expiresAt.toISOString()
+    });
+    tx.update(matchRef, { currentAttempt: attemptNumber });
+    return true;
+  });
+}
 async function initiateNextAttempt(db: admin.firestore.Firestore, matchRef: admin.firestore.DocumentReference, match: any, attemptNumber: number) {
   // 1. Get previously tried traders
   const previouslyTriedSnap = await db.collection("instant_match_attempts").where("instantMatchId", "==", matchRef.id).get();
@@ -341,27 +358,5 @@ async function initiateNextAttempt(db: admin.firestore.Firestore, matchRef: admi
   // Pick the top matched trader
   const nextTrader = availableTraders[0];
   
-  // Listener and timeout poll may race. A deterministic attempt ID plus a
-  // transaction on the match ensures only one trader attempt is created.
-  const attemptRef = db.collection("instant_match_attempts").doc(matchRef.id + "_" + attemptNumber);
-  const intervalSeconds = globalConfig.imAttemptIntervalSeconds ?? 60;
-  const expiresAt = new Date(Date.now() + intervalSeconds * 1000);
-  await db.runTransaction(async (tx: any) => {
-    const [latestMatchSnap, existingAttemptSnap] = await Promise.all([tx.get(matchRef), tx.get(attemptRef)]);
-    if (!latestMatchSnap.exists || existingAttemptSnap.exists) return;
-    const latestMatch = latestMatchSnap.data() || {};
-    if (latestMatch.status !== "searching" || Number(latestMatch.currentAttempt || 0) !== attemptNumber - 1) return;
-    tx.create(attemptRef, {
-      id: attemptRef.id,
-      instantMatchId: matchRef.id,
-      attemptNumber,
-      traderId: nextTrader.id,
-      traderCompositeScore: Math.floor(Math.random() * 50) + 70,
-      smartScheduleFitApplied: true,
-      status: "pending",
-      createdAt: new Date().toISOString(),
-      expiresAt: expiresAt.toISOString()
-    });
-    tx.update(matchRef, { currentAttempt: attemptNumber });
-  });
+  await createInstantMatchAttempt(db, matchRef, attemptNumber, nextTrader, globalConfig.imAttemptIntervalSeconds ?? 60);
 }
