@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, resolveSubscriptionProductMatch } from "../../src/server/subscriptionLifecycle.ts";
+import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "../../src/server/subscriptionLifecycle.ts";
 
 const active = { id: "sub_test", status: "active", cancel_at_period_end: false, current_period_end: 1_800_000_000 };
 
@@ -180,5 +180,23 @@ describe("Stripe invoice subscription ID extraction", () => {
 
   it("returns an empty string for invoices without a subscription", () => {
     expect(extractInvoiceSubscriptionId({})).toBe("");
+  });
+});
+
+
+describe("Stripe subscription lifecycle event selection", () => {
+  it.each([
+    "customer.subscription.created",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
+    "invoice.payment_failed",
+    "invoice.payment_succeeded",
+    "invoice.paid"
+  ])("handles lifecycle trigger %s", (eventType) => {
+    expect(isStripeSubscriptionLifecycleEventType(eventType)).toBe(true);
+  });
+
+  it.each(["checkout.session.completed", "payment_intent.succeeded", "customer.created", "invoice.created"])("does not treat unrelated event %s as a subscription lifecycle trigger", (eventType) => {
+    expect(isStripeSubscriptionLifecycleEventType(eventType)).toBe(false);
   });
 });
