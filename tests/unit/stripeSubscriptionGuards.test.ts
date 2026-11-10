@@ -38,6 +38,14 @@ describe("product-specific subscription ID selection", () => {
     expect(getSubscriptionIdForProduct({ subscriptionId: "sub_membership", subscriptionType: "tier" }, "driver_gold")).toBeUndefined();
   });
 
+  it("uses a dedicated Gotham ID even when a membership ID is also present", () => {
+    expect(getSubscriptionIdForProduct({
+      gothamSubscriptionId: "sub_gotham",
+      subscriptionId: "sub_membership",
+      subscriptionType: "gotham_saas"
+    }, "gotham_saas")).toBe("sub_gotham");
+  });
+
   it("allows the legacy Gotham generic ID only with matching subscriptionType", () => {
     expect(getSubscriptionIdForProduct({ subscriptionId: "sub_legacy", subscriptionType: "gotham_saas" }, "gotham_saas")).toBe("sub_legacy");
     expect(getSubscriptionIdForProduct({ subscriptionId: "sub_membership", subscriptionType: "tier" }, "gotham_saas")).toBeUndefined();
