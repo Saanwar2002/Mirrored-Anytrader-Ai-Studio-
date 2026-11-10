@@ -2766,7 +2766,7 @@ async function startServer() {
           success: true,
           mock: true,
           cancelAtPeriodEnd: true,
-          currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd || fieldUpdates.gothamCurrentPeriodEnd || fieldUpdates.driverCurrentPeriodEnd,
+          currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.homeownerCurrentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd || fieldUpdates.gothamCurrentPeriodEnd || fieldUpdates.driverCurrentPeriodEnd,
           message: "Subscription set to cancel at the end of the current billing cycle without renewing."
         });
       }
@@ -2804,7 +2804,7 @@ async function startServer() {
       res.json({
         success: true,
         cancelAtPeriodEnd: true,
-        currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd || fieldUpdates.gothamCurrentPeriodEnd || fieldUpdates.driverCurrentPeriodEnd,
+        currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.homeownerCurrentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd || fieldUpdates.gothamCurrentPeriodEnd || fieldUpdates.driverCurrentPeriodEnd,
         message: "Subscription will cancel at the end of the current billing cycle. You will retain all benefits until your renewal date."
       });
     } catch (error: any) {
