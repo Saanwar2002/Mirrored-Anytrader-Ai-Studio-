@@ -2142,11 +2142,11 @@ async function startServer() {
                 patch.videoProCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
                 if (isEntitled) {
                   patch.hasVerifiedVideoProSubscription = true;
-                  patch.videoVerificationStatus = "verified";
                 } else if (isTerminal) {
                   patch.hasVerifiedVideoProSubscription = false;
-                  patch.videoVerificationStatus = "unverified";
                 }
+                // Video verification is a separate credential; subscription expiry must
+                // not erase or rewrite an independently verified video record.
                 if (periodEnd > 0) patch.videoProCurrentPeriodEnd = new Date(periodEnd * 1000).toISOString();
               } else {
                 patch.gothamSubscriptionStatus = subscriptionStatus;
