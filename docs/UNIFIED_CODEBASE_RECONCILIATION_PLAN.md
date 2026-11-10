@@ -1984,7 +1984,7 @@ For every product, retrieve current Stripe state for non-deleted events, verify 
 - This change is source-reviewed only at commit time; no test suite or CI result is claimed in this checkpoint.
 - Required regression tests: all five product mappings; duplicate and cross-product ID collision; replaced subscription ID; duplicate and out-of-order events; active/trialing restoration; terminal deletion; scheduled cancellation retaining entitlement; invoice failure/recovery; unknown/intermediate statuses preserving entitlement; period-end persistence; Gotham door-count preservation.
 - Existing webhook event-level processing marker remains in place. The per-product event timestamp guards are additional state ordering, not a substitute for a tested end-to-end webhook idempotency suite.
-- Review Video Pro's terminal `videoVerificationStatus = "unverified"` value against every consumer before release; if consumers expect a different state, align the mapping and tests.
+- Follow-up consumer review found `videoVerificationStatus` also represents an independently verified video credential (matching, recommendation and verification UI consumers). The lifecycle handler therefore changes only `hasVerifiedVideoProSubscription` on subscription transitions and deliberately leaves `videoVerificationStatus` untouched, so subscription expiry cannot erase a separately verified video credential.
 - CI must run against the resulting integration head and every relevant job must be inspected. Empty status arrays or empty PR-only workflow-run lookups are not passes.
 
 ### Next action
