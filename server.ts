@@ -1,5 +1,5 @@
 import express from "express";
-import { evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
+import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
@@ -3762,12 +3762,14 @@ async function startServer() {
           if ((isGothamAccount || usageSnap?.exists) && usageRef) {
             let currentUsage: number;
             if (usageSnap?.exists) {
-              currentUsage = Number(usageSnap.data()?.propertyCount);
-              if (!Number.isSafeInteger(currentUsage) || currentUsage < 0) {
-                throw new ForbiddenError("Gotham property usage is invalid; deletion requires reconciliation.");
+              const decrement = decrementGothamPropertyUsage(Number(usageSnap.data()?.propertyCount));
+              if (!decrement.allowed) {
+                if (decrement.reason === "invalid_usage") {
+                  throw new ForbiddenError("Gotham property usage is invalid; deletion requires reconciliation.");
+                }
+                throw new ForbiddenError("Gotham property usage is inconsistent; deletion requires reconciliation.");
               }
-              if (currentUsage < 1) throw new ForbiddenError("Gotham property usage is inconsistent; deletion requires reconciliation.");
-              currentUsage -= 1;
+              currentUsage = decrement.nextUsage;
             } else {
               // If no reservation counter exists yet, backfill after excluding the
               // property being deleted so the delete and first create serialize.
@@ -3952,12 +3954,14 @@ async function startServer() {
         let newCount: number | null = null;
         if (previousIsGotham) {
           if (previousUsageSnap.exists) {
-            previousCount = Number(previousUsageSnap.data()?.propertyCount);
-            if (!Number.isSafeInteger(previousCount) || previousCount < 0) {
-              throw new ForbiddenError("Previous owner's Gotham usage requires reconciliation.");
+            const decrement = decrementGothamPropertyUsage(Number(previousUsageSnap.data()?.propertyCount));
+            if (!decrement.allowed) {
+              if (decrement.reason === "invalid_usage") {
+                throw new ForbiddenError("Previous owner's Gotham usage requires reconciliation.");
+              }
+              throw new ForbiddenError("Previous owner's Gotham usage is inconsistent; transfer requires reconciliation.");
             }
-            if (previousCount < 1) throw new ForbiddenError("Previous owner's Gotham usage is inconsistent; transfer requires reconciliation.");
-            previousCount -= 1;
+            previousCount = decrement.nextUsage;
           } else {
             const [ownerQ, userQ, landlordQ] = await Promise.all([
               tx.get(db.collection("properties").where("ownerId", "==", previousOwnerId)),
