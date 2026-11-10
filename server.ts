@@ -2140,7 +2140,7 @@ async function startServer() {
       const role = String(userData.role || "").toLowerCase();
       const { globalTiers } = await getDynamicFirestoreConfigs(db);
 
-      const terminalStatuses = ["canceled", "unpaid", "incomplete_expired"];
+      const terminalStatuses = ["canceled", "unpaid", "incomplete_expired", "free"];
       if (role === "homeowner" || role === "customer") {
         if (!["standard", "standard homeowner"].includes(tierName)) {
           throw new ForbiddenError("Homeowners may select only the Standard free tier without a paid subscription.");
