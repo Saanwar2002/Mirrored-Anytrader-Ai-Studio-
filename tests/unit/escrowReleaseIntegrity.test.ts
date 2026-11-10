@@ -346,9 +346,11 @@ describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", (
   describe("Stripe Transfer Execution & Idempotency Key Stability", () => {
     it("Test 12: Executes transfer with deterministic idempotency key and records completed ledger", async () => {
       const capturedOpts: any[] = [];
+      const capturedParams: any[] = [];
       const mockStripe = {
         transfers: {
-          create: vi.fn().mockImplementation(async (_params: any, opts: any) => {
+          create: vi.fn().mockImplementation(async (params: any, opts: any) => {
+            capturedParams.push(params);
             capturedOpts.push(opts);
             return { id: "tr_verified_success_888" };
           }),
@@ -380,6 +382,15 @@ describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", (
       expect(transferResult.transferStatus).toBe("completed");
       expect(transferResult.stripeTransferId).toBe("tr_verified_success_888");
       expect(capturedOpts[0].idempotencyKey).toBe(`release:${jobId}:${quoteId}:${milestoneId}:rel_idem_test_key_1`);
+      expect(capturedParams[0].metadata).toMatchObject({
+        jobId,
+        quoteId,
+        milestoneId,
+        traderId: releaseResult.traderId,
+        releaseOperationId: "rel_idem_test_key_1",
+        stripeIdempotencyKey: capturedOpts[0].idempotencyKey,
+        operationType: "ANYTRADER_ESCROW_RELEASE",
+      });
 
       const ledger = store[`payment_ledger/${releaseResult.ledgerEntryId}`];
       expect(ledger.stripeTransferId).toBe("tr_verified_success_888");
