@@ -56,7 +56,7 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
   };
 
   const handleCancelTransfer = async () => {
-    if (!property?.id) return;
+    if (!user || !property?.id) return;
     setSubmitting(true);
     try {
       await revokePropertyTransfer(user, property.id);
