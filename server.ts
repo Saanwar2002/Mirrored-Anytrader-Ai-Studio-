@@ -3977,14 +3977,9 @@ async function startServer() {
         }
         if (currentNewIsGotham || newUsageSnap.exists) {
           const allowance = currentNewIsGotham ? Number(currentNewProfile.gothamDoorsCount) : 0;
-          if (currentNewIsGotham && (!Number.isSafeInteger(allowance) || allowance < 1)) {
-            throw new ForbiddenError("New owner's Gotham door allowance is invalid.");
-          }
+          let currentNewCount: number;
           if (newUsageSnap.exists) {
-            newCount = Number(newUsageSnap.data()?.propertyCount);
-            if (!Number.isSafeInteger(newCount) || newCount < 0) {
-              throw new ForbiddenError("New owner's Gotham usage requires reconciliation.");
-            }
+            currentNewCount = Number(newUsageSnap.data()?.propertyCount);
           } else {
             const [ownerQ, userQ, landlordQ] = await Promise.all([
               tx.get(db.collection("properties").where("ownerId", "==", userId)),
@@ -3993,11 +3988,19 @@ async function startServer() {
             ]);
             const ids = new Set<string>();
             for (const snap of [ownerQ, userQ, landlordQ]) snap.docs.forEach((doc: any) => ids.add(doc.id));
-            newCount = ids.size;
+            currentNewCount = ids.size;
           }
-          if (currentNewIsGotham && newCount >= allowance) {
+          const quotaDecision = evaluateGothamPropertyQuota(currentNewCount, allowance, currentNewIsGotham);
+          if (!quotaDecision.allowed) {
+            if (quotaDecision.reason === "invalid_usage") {
+              throw new ForbiddenError("New owner's Gotham usage requires reconciliation.");
+            }
+            if (quotaDecision.reason === "invalid_allowance") {
+              throw new ForbiddenError("New owner's Gotham door allowance is invalid.");
+            }
             throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
           }
+          newCount = quotaDecision.nextUsage;
         }
 
         const history = Array.isArray(property.transferHistory) ? property.transferHistory : [];
@@ -4026,7 +4029,7 @@ async function startServer() {
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         if (newCount !== null) tx.set(newUsageRef, {
-          userId, propertyCount: newCount + 1,
+          userId, propertyCount: newCount,
           ...(currentNewIsGotham ? { allowance: Number(currentNewProfile.gothamDoorsCount) } : {}),
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
