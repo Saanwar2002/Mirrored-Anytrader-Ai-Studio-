@@ -2946,3 +2946,29 @@ A further comparison of the exact checkout and payout arithmetic found two concr
 **Decision:** the taxi repair is not complete merely when a webhook can set paymentStatus=paid. The checkout cap, canonical tip value, paid gross amount, ledger gross amount and payout verifier must share one exact integer-pence contract. The existing payout worker's fail-closed cap must not be bypassed to accommodate the looser checkout input.
 
 **Verification boundary:** exact integration-branch source fetch and static arithmetic/control-flow inspection only. No source code or tests were changed or executed. No Stripe API, Firestore production data, customer payment or payout was accessed. Main remains untouched; GitHub billing approval remains pending.
+
+
+## Section 124 — Taxi checkout can report success after Stripe session creation fails (2026-11-10)
+
+Exact-branch inspection of `src/server/tripPaymentAuthorization.ts` found an additional failure-mode defect.
+
+### Finding
+
+- When a Stripe client is supplied, the taxi command attempts `stripeClient.checkout.sessions.create(...)`.
+- If Stripe throws, the catch logs the error and rethrows only when `NODE_ENV === "production"`.
+- In non-production environments, it suppresses the Stripe error and continues.
+- The command initialized `checkoutUrl` before the Stripe call to a local `/payment-success?rideId=...&fare=...&tip=...` URL. If session creation throws, it can therefore return `success: true` with that local success URL and `session: null`.
+- The route can return this URL as though checkout were ready. This is not Stripe payment evidence, but a client may be sent to a success-looking page without any Checkout Session existing.
+- This differs from the route's explicit no-Stripe development mock gate: the dangerous path occurs even when a Stripe client exists but its session-creation request fails.
+
+### Required repair
+
+1. If a Stripe client is present, failure to create a Checkout Session must fail the command in every environment. Never convert a Stripe API failure into a successful-looking local payment URL.
+2. A successful result must require a non-empty Stripe Checkout Session ID and URL, and must include a durable server-side intent/session binding before returning the URL.
+3. Keep any explicitly permitted mock/development path separate, visibly marked as mock, and incapable of setting paid state, writing a RIDE_PAYMENT receipt, or qualifying for payout.
+4. Add tests for Stripe session creation throwing in development and production, missing session ID, missing URL, Firestore intent persistence failure, and success only after durable session binding.
+5. The UI success/cancel routes must not be treated as proof of payment; only the verified Stripe webhook path can authorize ride paid state and payout evidence.
+
+**Decision:** remove the non-production swallow-and-fallback behavior as part of the coordinated taxi checkout repair. Do not patch this command alone while the missing pre-checkout intent, webhook fulfillment, and tip source-of-truth issues remain unresolved.
+
+**Verification boundary:** source fetch and static control-flow inspection only. No code or tests changed or executed; no Stripe API, production Firestore data, customer payments or payouts accessed. Main remains untouched.
