@@ -2617,6 +2617,9 @@ async function startServer() {
       }
 
       const userData = userDoc.data() || {};
+      if (!["tier", "exclusive_leads", "video_pro", "gotham_saas", "driver_gold"].includes(subscriptionType)) {
+        return res.status(400).json({ error: "Unsupported subscription type." });
+      }
       let subId: string | undefined;
       let fieldUpdates: any = {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -2656,9 +2659,12 @@ async function startServer() {
         fieldUpdates.currentPeriodEnd = currentEnd;
       }
 
-      if (subscriptionType === "gotham_saas" && !subId) {
-        return res.status(409).json({ error: "No verified Gotham Stripe subscription is linked to this account." });
+      if (!subId) {
+        return res.status(409).json({ error: "No Stripe subscription is linked to this account for the selected product." });
       }
+      const isExplicitMockSubscription = String(subId).startsWith("mock_") &&
+        process.env.NODE_ENV !== "production" &&
+        process.env.ALLOW_MOCK_PAYMENTS === "true";
 
       let stripe;
       try {
@@ -2738,6 +2744,9 @@ async function startServer() {
       }
 
       const userData = userDoc.data() || {};
+      if (!["tier", "exclusive_leads", "video_pro", "gotham_saas", "driver_gold"].includes(subscriptionType)) {
+        return res.status(400).json({ error: "Unsupported subscription type." });
+      }
       let subId: string | undefined;
       let fieldUpdates: any = {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -2762,9 +2771,12 @@ async function startServer() {
         fieldUpdates.cancelAtPeriodEnd = false;
       }
 
-      if (subscriptionType === "gotham_saas" && !subId) {
-        return res.status(409).json({ error: "No verified Gotham Stripe subscription is linked to this account." });
+      if (!subId) {
+        return res.status(409).json({ error: "No Stripe subscription is linked to this account for the selected product." });
       }
+      const isExplicitMockSubscription = String(subId).startsWith("mock_") &&
+        process.env.NODE_ENV !== "production" &&
+        process.env.ALLOW_MOCK_PAYMENTS === "true";
 
       let stripe;
       try {
