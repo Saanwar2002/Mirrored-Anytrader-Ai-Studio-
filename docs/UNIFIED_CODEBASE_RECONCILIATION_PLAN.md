@@ -3266,3 +3266,33 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 133 is documentation only; no source code, Firestore rules, or configuration changed.
 - No tests, emulator, typecheck, build, CI, or production operation was run.
 - Next: inspect current admin authorization helpers and server route conventions to determine the safest reusable pattern for a versioned pricing-admin command and audit transaction.
+
+
+## Section 134 — Existing server admin authorization is reusable; generic audit endpoints are not a safe pricing-write contract
+
+### Exact integration-branch evidence
+- `server.ts` blob `d0d781571a2a1dd28478ca92930f4f9b919bf38a`:
+  - `requireAuth` verifies a Firebase bearer token with `verifyTokenSafely` and attaches the decoded token to the request.
+  - `requireAdmin` verifies the token if needed, calls `checkIsAdmin`, rejects non-admin callers, and may migrate a verified admin to custom claims.
+  - `checkIsAdmin` accepts server-minted `admin === true` or `isAdmin === true` custom claims, or a server-side `admins/{uid}` document. This is the existing server authorization boundary to reuse for pricing administration.
+  - Existing admin routes commonly use `requireAdmin`, but the generic `POST /api/admin/agents/audit-logs` spreads `req.body` into the persisted record and accepts a caller-provided timestamp. It is a generic operational log endpoint, not a constrained, immutable financial configuration audit mechanism.
+  - Existing `/api/admin/sync-public-job-cards` and `/api/admin/sync-public-properties` demonstrate the simple `requireAdmin` route shape, but do not provide a versioned config transaction.
+- No existing dedicated server route was found that updates `platform_config/rides` with schema validation, optimistic version checks, and an atomic audit record. Existing client screens write directly to Firestore as documented in Section 133.
+
+### Recommended server command contract (proposal; not implemented)
+- Route: `PUT /api/admin/rides-pricing`, protected by `requireAdmin`.
+- Body contains only the proposed pricing fields and `expectedConfigVersion`; reject unknown keys and reject any client-supplied actor, timestamp, version, or audit metadata.
+- Server validates finite bounded values, explicit GBP currency, commission basis points, fixed fee pence, fare formula version, and an integer expected version. No fallback defaults for missing/invalid financial values.
+- In one Firestore transaction:
+  1. Read current canonical pricing document and compare `configVersion` to `expectedConfigVersion`.
+  2. Reject stale writes with a conflict response.
+  3. Write the complete validated config with `configVersion + 1`, server timestamp, and authenticated admin UID.
+  4. Create a separate append-only audit document with before/after snapshots, version transition, actor UID, and server timestamp.
+- Keep the audit write in the same transaction as the config write so a successful config update cannot exist without its audit event.
+- Do not reuse the generic audit endpoint, accept arbitrary audit payloads, or make the admin client write the pricing document directly.
+- The cash completion command reads this canonical version and snapshots its exact values. Existing operational dispatch/surge settings should be separated from financial pricing.
+
+### Status
+- Section 134 is documentation only; no route, authorization helper, config, or audit collection changed.
+- No tests, emulator, typecheck, build, CI, or production operation was run.
+- Next: inspect the repository's Firestore transaction and command test conventions, then design the implementation/test split for the pricing admin command and cash completion command.
