@@ -104,3 +104,10 @@ export function resolveSubscriptionProductMatch(
   }
   return generic;
 }
+
+export function extractInvoiceSubscriptionId(invoice: any): string {
+  const subscription = invoice?.subscription ?? invoice?.parent?.subscription_details?.subscription;
+  if (typeof subscription === "string") return subscription;
+  if (subscription && typeof subscription.id === "string") return subscription.id;
+  return "";
+}
