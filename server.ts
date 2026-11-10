@@ -3782,6 +3782,229 @@ async function startServer() {
     }
   });
 
+  // Public transfer-code verification returns only the preview fields shown to a buyer.
+  app.get("/api/properties/transfer/:code", async (req, res) => {
+    try {
+      const code = String(req.params.code || "").trim().toUpperCase();
+      if (!/^TRF-[A-HJ-NP-Z2-9]{6}$/.test(code)) {
+        return res.status(400).json({ error: "Invalid transfer code." });
+      }
+      if (!db) return res.status(503).json({ error: "Property transfer verification is unavailable." });
+      const matches = await db.collection("properties")
+        .where("transferCode", "==", code)
+        .where("transferStatus", "==", "pending")
+        .limit(2)
+        .get();
+      if (matches.size !== 1) return res.status(404).json({ error: "Invalid or expired transfer code." });
+      const propertyDoc = matches.docs[0];
+      const property = propertyDoc.data() || {};
+      const expiry = property.transferExpiresAt ? new Date(property.transferExpiresAt).getTime() : 0;
+      if (expiry && expiry < Date.now()) {
+        return res.status(410).json({ error: "This transfer code has expired." });
+      }
+      res.json({
+        success: true,
+        property: {
+          id: propertyDoc.id,
+          name: property.name || "Residential Property",
+          propertyType: property.propertyType || "Residential",
+          address: {
+            line1: property.address?.line1 || "",
+            postcode: property.address?.postcode || property.postcode || "",
+            city: property.address?.city || property.city || ""
+          },
+          epcRating: property.epcRating || "C",
+          boilerInfo: { brand: property.boilerInfo?.brand || "Standard" },
+          roofCondition: property.roofCondition || "Good"
+        }
+      });
+    } catch (error: any) {
+      console.error("Verify Property Transfer Code Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Ownership claim updates both owners' Gotham counters atomically with the transfer.
+  app.post("/api/properties/claim-transfer", requireAuth, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const user = (req as any).user;
+      const userId = String(user?.uid || "");
+      const code = String(req.body?.code || "").trim().toUpperCase();
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+      if (!/^TRF-[A-HJ-NP-Z2-9]{6}$/.test(code)) throw new BadRequestError("A valid transfer code is required.");
+
+      const claimRef = db.collection("property_transfer_claims").doc(userId + "_" + code);
+      const priorClaim = await claimRef.get();
+      if (priorClaim.exists) {
+        const prior = priorClaim.data() || {};
+        const priorPropertyId = String(prior.propertyId || "");
+        if (!priorPropertyId) throw new Error("Property transfer idempotency record is invalid.");
+        return res.json({ success: true, id: priorPropertyId, duplicate: true });
+      }
+
+      const newOwnerRef = db.collection("users").doc(userId);
+      const newOwnerSnap = await newOwnerRef.get();
+      const newOwnerProfile = newOwnerSnap.exists ? (newOwnerSnap.data() || {}) : {};
+      const newOwnerIsGotham = newOwnerProfile.subscriptionType === "gotham_saas" || newOwnerProfile.isGothamSubscriber === true;
+      let verifiedGothamSubscriptionId = "";
+      let verifiedGothamStatus = "";
+      if (newOwnerIsGotham) {
+        verifiedGothamSubscriptionId = String(newOwnerProfile.gothamSubscriptionId || "");
+        if (!verifiedGothamSubscriptionId) throw new ForbiddenError("No verified Gotham subscription is linked to this account.");
+        if (verifiedGothamSubscriptionId.startsWith("mock_")) {
+          if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCK_PAYMENTS !== "true") {
+            return res.status(503).json({ error: "Gotham subscription verification is unavailable." });
+          }
+          verifiedGothamStatus = String(newOwnerProfile.gothamSubscriptionStatus || "");
+        } else {
+          let stripeClient;
+          try { stripeClient = getStripe(); } catch (_) {
+            return res.status(503).json({ error: "Stripe is unavailable; Gotham entitlement could not be verified." });
+          }
+          let liveSubscription: Stripe.Subscription;
+          try { liveSubscription = await stripeClient.subscriptions.retrieve(verifiedGothamSubscriptionId); } catch (_) {
+            return res.status(503).json({ error: "Gotham subscription could not be verified with Stripe." });
+          }
+          verifiedGothamStatus = String(liveSubscription.status || "");
+          const paidThrough = Number((liveSubscription as any).current_period_end || 0);
+          const expiredCancellation = Boolean((liveSubscription as any).cancel_at_period_end) &&
+            paidThrough > 0 && Date.now() >= paidThrough * 1000;
+          if (!["active", "trialing"].includes(verifiedGothamStatus) || expiredCancellation) {
+            throw new ForbiddenError("Gotham subscription is not currently entitled to receive another property.");
+          }
+        }
+        if (!["active", "trialing"].includes(verifiedGothamStatus)) {
+          throw new ForbiddenError("Gotham subscription is not currently entitled to receive another property.");
+        }
+      }
+
+      const transferQuery = db.collection("properties")
+        .where("transferCode", "==", code)
+        .where("transferStatus", "==", "pending")
+        .limit(2);
+      const result = await db.runTransaction(async (tx: any) => {
+        const matches = await tx.get(transferQuery);
+        if (matches.size !== 1) throw new NotFoundError("Invalid, expired, or already claimed transfer code.");
+        const propertyDoc = matches.docs[0];
+        const propertyRef = propertyDoc.ref;
+        const property = propertyDoc.data() || {};
+        const expiry = property.transferExpiresAt ? new Date(property.transferExpiresAt).getTime() : 0;
+        if (expiry && expiry < Date.now()) throw new ForbiddenError("This property transfer code has expired.");
+        const previousOwnerId = String(property.ownerId || property.userId || property.landlordId || "");
+        if (!previousOwnerId) throw new ForbiddenError("Property has no verifiable previous owner.");
+        if (previousOwnerId === userId) throw new BadRequestError("This property is already owned by your account.");
+
+        const previousOwnerRef = db.collection("users").doc(previousOwnerId);
+        const previousUsageRef = db.collection("gotham_property_usage").doc(previousOwnerId);
+        const newUsageRef = db.collection("gotham_property_usage").doc(userId);
+        const [previousOwnerSnap, latestNewOwnerSnap, previousUsageSnap, newUsageSnap, claimSnap] = await Promise.all([
+          tx.get(previousOwnerRef), tx.get(newOwnerRef), tx.get(previousUsageRef), tx.get(newUsageRef), tx.get(claimRef)
+        ]);
+        if (claimSnap.exists) {
+          const prior = claimSnap.data() || {};
+          return { id: String(prior.propertyId || ""), duplicate: true };
+        }
+        const previousProfile = previousOwnerSnap.exists ? (previousOwnerSnap.data() || {}) : {};
+        const currentNewProfile = latestNewOwnerSnap.exists ? (latestNewOwnerSnap.data() || {}) : {};
+        const previousIsGotham = previousProfile.subscriptionType === "gotham_saas" || previousProfile.isGothamSubscriber === true;
+        const currentNewIsGotham = currentNewProfile.subscriptionType === "gotham_saas" || currentNewProfile.isGothamSubscriber === true;
+        if (currentNewIsGotham && (
+          currentNewProfile.gothamSubscriptionId !== verifiedGothamSubscriptionId ||
+          !["active", "trialing"].includes(verifiedGothamStatus.toLowerCase())
+        )) throw new ForbiddenError("Gotham subscription changed during the property transfer. Please retry.");
+
+        let previousCount: number | null = null;
+        let newCount: number | null = null;
+        if (previousIsGotham) {
+          if (previousUsageSnap.exists) {
+            previousCount = Number(previousUsageSnap.data()?.propertyCount);
+            if (!Number.isSafeInteger(previousCount) || previousCount < 0) {
+              throw new ForbiddenError("Previous owner's Gotham usage requires reconciliation.");
+            }
+            previousCount = Math.max(0, previousCount - 1);
+          } else {
+            const [ownerQ, userQ, landlordQ] = await Promise.all([
+              tx.get(db.collection("properties").where("ownerId", "==", previousOwnerId)),
+              tx.get(db.collection("properties").where("userId", "==", previousOwnerId)),
+              tx.get(db.collection("properties").where("landlordId", "==", previousOwnerId))
+            ]);
+            const ids = new Set<string>();
+            for (const snap of [ownerQ, userQ, landlordQ]) snap.docs.forEach((doc: any) => {
+              if (doc.id !== propertyRef.id) ids.add(doc.id);
+            });
+            previousCount = ids.size;
+          }
+        }
+        if (currentNewIsGotham) {
+          const allowance = Number(currentNewProfile.gothamDoorsCount);
+          if (!Number.isSafeInteger(allowance) || allowance < 1) {
+            throw new ForbiddenError("New owner's Gotham door allowance is invalid.");
+          }
+          if (newUsageSnap.exists) {
+            newCount = Number(newUsageSnap.data()?.propertyCount);
+            if (!Number.isSafeInteger(newCount) || newCount < 0) {
+              throw new ForbiddenError("New owner's Gotham usage requires reconciliation.");
+            }
+          } else {
+            const [ownerQ, userQ, landlordQ] = await Promise.all([
+              tx.get(db.collection("properties").where("ownerId", "==", userId)),
+              tx.get(db.collection("properties").where("userId", "==", userId)),
+              tx.get(db.collection("properties").where("landlordId", "==", userId))
+            ]);
+            const ids = new Set<string>();
+            for (const snap of [ownerQ, userQ, landlordQ]) ids.forEach?.(() => {});
+            for (const snap of [ownerQ, userQ, landlordQ]) snap.docs.forEach((doc: any) => ids.add(doc.id));
+            newCount = ids.size;
+          }
+          if (newCount >= allowance) {
+            throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
+          }
+        }
+
+        const history = Array.isArray(property.transferHistory) ? property.transferHistory : [];
+        tx.update(propertyRef, {
+          ownerId: userId,
+          userId,
+          homeownerId: userId,
+          transferStatus: "completed",
+          transferCode: null,
+          transferExpiresAt: null,
+          transferClaimedAt: new Date().toISOString(),
+          transferClaimedByUid: userId,
+          previousOwnersCount: Number(property.previousOwnersCount || 0) + 1,
+          transferHistory: [...history, {
+            transferredAt: new Date().toISOString(),
+            transferCode: code,
+            fromOwnerUid: previousOwnerId,
+            toOwnerUid: userId,
+            toOwnerEmail: user.email || null,
+            propertyName: property.name || "Property"
+          }],
+          updatedAt: new Date().toISOString()
+        });
+        if (previousCount !== null) tx.set(previousUsageRef, {
+          userId: previousOwnerId, propertyCount: previousCount,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        if (newCount !== null) tx.set(newUsageRef, {
+          userId, propertyCount: newCount + 1, allowance: Number(currentNewProfile.gothamDoorsCount),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        tx.create(claimRef, {
+          userId, propertyId: propertyRef.id,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        return { id: propertyRef.id, duplicate: false };
+      });
+      if (!result.id) throw new Error("Property transfer idempotency record is invalid.");
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error("Claim Property Transfer Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
   app.post("/api/properties/:id/sync-public-passport", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
