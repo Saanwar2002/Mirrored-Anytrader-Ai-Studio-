@@ -2837,3 +2837,26 @@ The follow-up audit traced the integration-branch implementation in `src/server/
 5. Treat this as a separate high-priority payment-flow correctness fix before enabling any fallback-based driver payout. No live customer, Stripe, Firestore or payout operation is authorized by this audit.
 
 **Verification boundary:** integration-branch source fetch and static control-flow trace only. No source code or tests were changed or executed in this step. No Stripe API, Firestore production data, customer payment or payout was accessed. Main remains untouched; GitHub billing approval remains pending.
+
+
+## Section 120 — Taxi fulfillment must satisfy the existing payout contract (2026-11-10)
+
+A second pass through `src/server/driverPayoutOrchestration.ts` and its unit tests establishes the exact downstream contract that a taxi-trip webhook repair must preserve:
+
+- The payout worker queries only `ride_requests` with `status == "completed"`, `paymentStatus == "paid"`, and `payoutTransferred == false`. A successful Checkout Session alone does not make a ride eligible.
+- The worker derives the payout base from authoritative `finalFare`, adds the ride's `tipAmount`, and retrieves the ride's exact `stripePaymentIntentId`. It rejects a missing authoritative fare, an unavailable/unverified PaymentIntent, underpayment, or non-GBP currency.
+- For the existing 12% standard commission path, the expected driver transfer is 88% of base fare plus 100% of tip. Existing tests explicitly assert £50 base + £5 tip produces £49 driver transfer, and that a £10 collection cannot authorize that payout.
+- The Section 118 ledger fallback is only a fallback when PaymentIntent retrieval fails; it requires an explicit `RIDE_PAYMENT` type, completed status, GBP currency and sufficient amount. The positive fallback fixture does not prove a production writer exists.
+- `tests/unit/checkoutIntentIntegrity.test.ts` confirms the shared checkout-binding contract: intent `userId` must equal session `client_reference_id`; Checkout Session ID, mode, integer amount, currency and PaymentIntent binding must match; only `session_created` or `processing` intent states are accepted after binding. A pending intent without a session ID is retryable; mismatches are rejected.
+
+### Implementation gates before restoring the taxi path
+
+1. The taxi command must persist a pre-checkout intent with the passenger UID, exact integer total in pence (base plus tip), GBP currency, payment mode and server-derived taxi metadata. The Stripe Session must carry that intent ID and passenger client reference; the intent must be updated with the returned Checkout Session ID and PaymentIntent ID before the route reports success.
+2. The webhook must not mark the ride paid based on metadata alone. It must pass the shared intent binding and additionally verify taxi metadata against the persisted intent, then transactionally re-read the ride and ensure its passenger, assigned driver, authoritative fare and Connect destination still match the intent. It must verify the paid session's exact amount/currency and non-empty PaymentIntent ID.
+3. Only after those checks may one transaction set the ride's `stripePaymentIntentId`, `paymentStatus: "paid"` and verified payment evidence, and create an event-scoped fulfillment marker. The ride's operational `status` must remain governed by the ride lifecycle; payment completion must not falsely mark an unfinished trip as completed.
+4. Create a `RIDE_PAYMENT` ledger receipt only after the same authoritative verification, keyed deterministically to the Stripe PaymentIntent (and protected against duplicate webhook events). Its amount must represent the gross collected amount in integer pence; the existing payout split remains 88% of base fare plus the full tip. Keep gross amount, base fare, tip, application fee and net driver transfer distinguishable rather than storing an ambiguous net amount.
+5. Add tests at both command and webhook boundaries for exact binding, duplicate delivery, early webhook-before-session-write, unpaid checkout, wrong passenger/driver/ride, changed fare or Connect account, wrong amount/currency, missing PaymentIntent, and ledger idempotency. Add an integration-level regression proving that successful verified fulfillment makes the ride eligible for the existing PaymentIntent-based payout verification without bypassing any payout gate.
+
+**Safety decision:** do not create a ledger receipt from Checkout Session metadata, do not set `paymentStatus: "paid"` before the exact Stripe evidence and ride identity checks, and do not weaken the existing payout contract to compensate for the broken checkout/webhook binding. The current positive `RIDE_PAYMENT` fallback test remains a contract test only.
+
+**Verification boundary:** read-only source and test inspection on the integration branch. No code or tests were changed or executed in this step. No Stripe, Firestore production, customer payment or payout operation was performed. Main remains untouched; GitHub billing approval remains pending.
