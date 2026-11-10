@@ -2395,3 +2395,21 @@ Read-only inspection of `PaymentLedgerEngine.executeIdempotentOperation` confirm
 - Failure deletes/releases the idempotency record, which can be unsafe after an ambiguous external side effect unless the operation itself is independently reconciled/idempotent.
 
 **FIN-04 confirmed at source level; FIN-01 pattern also applies here.** Proposed safe remediation: persist a canonical binding (operation, tenant/owner, resource IDs, normalized payload hash), reject key reuse on any binding mismatch, and claim with a unique generation/token; finalize only transactionally if that generation remains current. Define recovery behavior for ambiguous side effects before changing the current delete-on-failure behavior. Add replay-same-input, key-different-resource, key-different-payload, operation mismatch, concurrent claimant, stale takeover/old worker completion, and ambiguous external outcome tests. No code/test changes made in this audit.
+
+
+## Section 90 — Escrow Stripe transfer idempotency review (FIN-03) (2026-11-10)
+
+- `PaymentLedgerEngine.executeStripeEscrowTransfer` derives Stripe's request key as `release:{jobId}:{quoteId}:{milestoneId-or-0}:{idempotencyKey}` and passes it to `stripe.transfers.create`. Stripe request-level idempotency is present and scoped to job/quote/milestone plus the caller-provided key.
+- The method writes transfer ID/status to a ledger row queried by the caller's `idempotencyKey`, and returns the Stripe transfer ID/key. On errors it records transfer failure but does not independently query/reconcile a possibly-created Stripe transfer before retry.
+- The release route inspected in Section 88 clears milestone `releaseOperationId` after failure. If a retry then creates a fresh caller key, Stripe's composed idempotency key changes, defeating the intended stable Stripe dedupe for an ambiguous prior request. This confirms FIN-03 is an **operation-identity continuity** problem rather than absence of a Stripe idempotency parameter.
+- Remediation must preserve the exact operation key from the first release attempt across Firestore rollback/retry, reconcile by Stripe transfer metadata/idempotency outcome before a new transfer, and ensure ledger + milestone state converges. Keep destination-charge and mock-account paths unchanged and do not trigger live transfers during tests.
+
+### Consolidated source-level status
+
+- FIN-01 stale webhook worker fencing: confirmed risk in claim/finalization pattern; add generation-token ownership checks to every financial side effect and terminal status write.
+- FIN-04 generic idempotency binding/fencing: confirmed missing binding and stale-completion guard; add canonical request binding + claim generation.
+- FIN-03 escrow release identity: confirmed reset can rotate Stripe request key; persist stable operation identity and reconcile ambiguous outcomes.
+- FIN-02 refunds: webhook event branch not located in `server.ts`; identify alternate refund ingestion/reconciliation path before assuming implementation location. Embedded refund pagination issue remains to validate against actual source.
+- FIN-05 cross-operation reconciliation: remains read-only design; no automatic transfers/refunds or ledger repairs.
+
+No source implementation changed. Next safe work is bounded diff review of ZIP-vs-integration server and payout files, then a read-only full archive manifest and required AI Studio/Firebase pre-change gate.
