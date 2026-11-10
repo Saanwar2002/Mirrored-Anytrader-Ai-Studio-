@@ -3957,7 +3957,6 @@ async function startServer() {
               tx.get(db.collection("properties").where("landlordId", "==", userId))
             ]);
             const ids = new Set<string>();
-            for (const snap of [ownerQ, userQ, landlordQ]) ids.forEach?.(() => {});
             for (const snap of [ownerQ, userQ, landlordQ]) snap.docs.forEach((doc: any) => ids.add(doc.id));
             newCount = ids.size;
           }
