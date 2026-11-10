@@ -2809,3 +2809,31 @@ The driver payout fallback previously queried `payment_ledger` by `transactionId
 The current integration-branch `server.ts` no longer contains the `ledg_ride_` writer found by repository-wide search results (those search hits resolve to a different indexed revision). The current branch still declares `RIDE_PAYMENT` in the `LedgerEntry` union, but the inspected branch source does not establish a live writer for this event type. Therefore the new positive-path test validates the contract for an explicitly typed receipt; it does not prove production currently emits such receipts. Until a canonical writer is located or added and verified, PaymentIntent retrieval remains the authoritative normal path and missing/legacy/untyped ledger records intentionally fail closed.
 
 **Verification boundary:** both changed source/test files were fetched back from `integration/pr-consolidation-20261109` and their expected changes confirmed. The unit tests, lint/typecheck, build and CI have not been run in this environment. No production Firestore or Stripe data was accessed. No live payout/refund was initiated. Main remains untouched; GitHub billing approval remains pending.
+
+
+## Section 119 — Trace the canonical taxi ride checkout and webhook path (2026-11-10)
+
+The follow-up audit traced the integration-branch implementation in `src/server/tripPaymentAuthorization.ts`, its authenticated route in `server.ts` (`POST /api/rides/create-trip-payment`), and the shared `checkout.session.completed` webhook handler.
+
+### Observed checkout behavior
+
+- The route calls `executeCreateTripPaymentCommand`. That command loads the authoritative ride from `ride_requests` (with a legacy `rides` fallback), checks the passenger/assigned-driver/admin relationship, resolves the assigned driver's Connect account from the server-side user document, and derives the fare from the ride record.
+- It creates a Stripe Checkout Session directly. The session metadata includes `type: "taxi_trip"`, `rideId`, driver/recipient IDs, passenger ID, base fare and tip. The PaymentIntent data configures a Connect destination charge with a 12% application fee and server-derived destination account.
+- Critically, this direct session creation does **not** create or persist a corresponding `payment_intents/{intentId}` authorization record, does not set `metadata.intentId`, and does not set `client_reference_id`. The route returns only the checkout URL. The command does not write a ride-payment ledger row or an authoritative paid state to the ride document.
+
+### Observed webhook behavior and consequence
+
+- Before any product-specific fulfillment branch, the shared `checkout.session.completed` handler requires `session.metadata.intentId` and `session.client_reference_id`, loads `payment_intents/{intentId}`, and validates the session against that server-created intent record.
+- The taxi-trip Checkout Session created by the traced command supplies neither required binding and has no matching authorization record created by that command. Consequently, this checkout cannot pass the shared webhook's initial authoritative-intent gate as currently implemented. The `taxi_trip` metadata does not itself trigger a ride-specific fulfillment branch in the inspected handler.
+- The inspected integration-branch source therefore does not establish a working webhook path that marks the ride paid or writes a canonical `RIDE_PAYMENT` event to `payment_ledger`. The ledger engine still declares the type, but declaration alone is not a writer.
+- This is more than an absent ledger writer: there is a checkout-to-webhook contract gap. A customer may complete the direct taxi-trip Checkout Session, while the webhook rejects fulfillment because its required authorization binding is absent. This source trace does not establish what the customer-facing recovery or manual reconciliation process currently does.
+
+### Reconciliation decision
+
+1. Do **not** add a synthetic `RIDE_PAYMENT` writer or relax the payout fallback based only on `taxi_trip` session metadata. The verified payment must first be bound to the exact ride, passenger, assigned driver, amount, currency, Connect destination and Stripe PaymentIntent using a server-created authorization record.
+2. Keep the Section 118 fallback fail-closed. An explicitly typed ledger receipt may satisfy its contract only when a real, authoritative writer emits it after verified Stripe payment and binds it to the correct ride and PaymentIntent. Until then, PaymentIntent retrieval remains the primary proof and absent/untyped records do not authorize payout.
+3. The next implementation should be a dedicated, idempotent taxi-trip payment authorization/fulfillment flow: persist the server-generated intent record before returning the session URL; bind the Checkout Session and client reference to that record; verify paid status, exact amount/currency, ride identity, passenger, assigned driver and destination account in the webhook; then transactionally persist the ride's paid state, a fulfillment marker and a deterministic `RIDE_PAYMENT` event. Any mismatch must move to review without payout authorization.
+4. Add focused tests for session creation binding, webhook success, unpaid session, missing/mismatched authorization, wrong ride/driver/passenger, amount/currency mismatch, duplicate webhook delivery and ledger idempotency. Ensure the Connect destination/application-fee accounting fields are explicitly modelled; do not infer settlement from Checkout completion alone.
+5. Treat this as a separate high-priority payment-flow correctness fix before enabling any fallback-based driver payout. No live customer, Stripe, Firestore or payout operation is authorized by this audit.
+
+**Verification boundary:** integration-branch source fetch and static control-flow trace only. No source code or tests were changed or executed in this step. No Stripe API, Firestore production data, customer payment or payout was accessed. Main remains untouched; GitHub billing approval remains pending.
