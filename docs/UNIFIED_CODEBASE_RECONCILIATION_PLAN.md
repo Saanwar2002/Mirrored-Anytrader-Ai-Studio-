@@ -1849,3 +1849,27 @@ The following integration-branch components create properties documents directly
 
 ### Status
 - Inventory and source inspection only. No property API, client migration, or Firestore rule changes committed in this section.
+
+
+## Section 60 — Gotham entitlement semantics and cancellation lifecycle findings (2026-11-10)
+
+### Pricing contract confirmed
+- Gotham calculator in src/server/pricingCatalog.ts accepts a requested door quantity, clamps it to 1..100,000, and defaults a missing/zero value to 100. Pricing: 1–100 doors £4.50/door/month; 101–1,000 £3.50; 1,001+ £2.50; annual billing applies a 15% discount.
+- GothamHousingPortal UI (src/components/anytrader/GothamHousingPortal.tsx) defaults calculatorDoors to 4,850 and submits gothamDoorsCount with subscriptionType gotham_saas to /api/create-checkout-session. This is a purchased portfolio capacity, not an incremental per-property allowance. The 100-door server fallback is a checkout compatibility default, not evidence of a free 100-door entitlement.
+- Checkout fulfillment writes isGothamSubscriber=true, gothamSubscriptionId, gothamSubscriptionStatus=active, gothamDoorsCount, tier, billing cycle and gothamCancelAtPeriodEnd=false. It does not currently persist Gotham current_period_end in the inspected fulfilment branch.
+
+### Lifecycle gap confirmed
+- Stripe webhook route has explicit checkout.session.completed fulfillment. Other event types are currently marked as processed/completed without applying subscription state transitions (see Section 57). Thus subscription updates, deletion and failed invoices can leave Firestore entitlement markers stale.
+- /api/cancel-subscription schedules Stripe cancel_at_period_end and records Gotham pending cancellation; /api/reactivate-subscription clears it. Benefits should remain through period end. However, when Stripe is unavailable, cancellation code fabricates a 30-day current period end and writes a mock cancellation success; this must not be used as production entitlement evidence. Mock fallback should be constrained to explicit test/development mode, not a general Stripe failure.
+- The cancellation route does not revoke Gotham immediately, which is correct for scheduled cancellation. Actual period-end deletion/expiry still needs webhook-driven status synchronization and an authoritative period-end timestamp.
+
+### Safe next implementation sequence
+1. Extend Gotham checkout fulfilment to persist authoritative Stripe subscription status and current_period_end from a retrieved/expanded Stripe subscription (or the event's verified subscription object), not a guessed duration.
+2. Implement idempotent handlers for customer.subscription.updated, customer.subscription.deleted and invoice.payment_failed; map by verified subscription ID to the correct product entitlement. For Gotham, preserve active access when cancel_at_period_end=true and current_period_end is in the future; revoke/disable new door reservations only when Stripe confirms terminal status/period end. Handle past_due/unpaid according to a deliberately approved grace policy.
+3. Fix cancel/reactivate endpoint fallbacks: never fabricate a period end or report real cancellation success when Stripe API is unavailable; return a clear service error unless explicit test mode is active.
+4. Implement the server-authoritative property-create reservation command and migrate the three direct-write call sites (Section 59). Existing properties are grandfathered pending explicit policy; do not delete or hide records on subscription lapse.
+5. Add Stripe webhook tests for duplicate delivery, out-of-order events, cancellation scheduled, cancellation reversed, period-end deletion, failed invoice, recovery payment, and subscription replacement.
+
+### Status
+- Audit findings documented; no lifecycle handler, cancellation route or property-write code changed in this section.
+- Integration only. No main merge, AI Studio sync, production data change or deployment.
