@@ -1,6 +1,6 @@
 import express from "express";
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
-import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
+import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import crypto from "crypto";
@@ -2058,13 +2058,7 @@ async function startServer() {
         }
       // Synchronize product entitlements from the current Stripe subscription state.
       // Invoice events are triggers only: payment events never grant access by themselves.
-      if (
-        event.type === "customer.subscription.updated" ||
-        event.type === "customer.subscription.deleted" ||
-        event.type === "invoice.payment_failed" ||
-        event.type === "invoice.payment_succeeded" ||
-        event.type === "invoice.paid"
-      ) {
+      if (isStripeSubscriptionLifecycleEventType(event.type)) {
         const payload = event.data.object as any;
         const isSubscriptionDeleted = event.type === "customer.subscription.deleted";
         const subscriptionId = event.type.startsWith("customer.subscription.")
