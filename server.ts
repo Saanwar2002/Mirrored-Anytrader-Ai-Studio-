@@ -1,6 +1,5 @@
 import express from "express";
-import { resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
-import { buildSubscriptionLifecyclePatch } from "./src/server/subscriptionLifecycle.ts";
+import { buildSubscriptionLifecyclePatch, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import crypto from "crypto";
