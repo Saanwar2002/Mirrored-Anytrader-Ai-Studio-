@@ -3193,3 +3193,41 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 131 is documentation only; no application code, config, or rules changed.
 - No tests, emulator, typecheck, build, CI, or production operation was run.
 - Next: inspect the Remote Config provider and configuration write permissions/version semantics; then specify the canonical pricing schema and cash-completion command contract before coding.
+
+
+## Section 132 — Remote Config and local simulation overrides are presentation inputs, not a trusted pricing authority
+
+### Exact integration-branch evidence
+- `src/services/remoteConfigService.ts` blob `959ee6fccda2e9b4de74f46eac0abb898b52656a`:
+  - Firebase Remote Config is initialized only in the browser (`typeof window === "undefined"` returns defaults).
+  - `platformCommissionRate` defaults to 0.12. If Remote Config is unsupported or fetch fails, the code returns defaults.
+  - The fetch uses `Promise.race` with a 1,000 ms timeout, but does not cancel or await the underlying fetch after the timeout. It then reads active SDK values and merges local overrides.
+  - `getSavedOverrides()` reads `anytrader_remote_config_sim_overrides` from browser localStorage; `getMergedValuesWithOverrides` spreads those values over the fetched/default values without schema validation.
+- `src/components/RemoteConfigProvider.tsx` blob `90e4d4cf67370d08a4132083ed8eb89bb7600fdd`:
+  - Provider exposes `updateSimulationOverrides`, persists arbitrary partial config overrides to localStorage, and immediately merges them into UI state.
+  - No server-side persistence, authenticated config version, audit trail, or authoritative pricing snapshot is produced by this provider.
+- `src/components/anyroller/GlobalSettings.tsx` blob `00f98d7d1ea9d9f68dddeffd2140cfcd7ee82e8a`:
+  - “Apply Simulator State” changes local simulation overrides, including commission; it does not publish or update Firebase Remote Config.
+  - The UI copy nevertheless describes the settings as system-wide and says changes override payment QR rates and active terminal totals. The same component calls the source “live Google Cloud” when no local override is active, which can mislead operators about what is authoritative.
+- `firestore.rules` blob `0d1139b17382491e47d7f0151fd41187978abedb`:
+  - Client reads of `platform_config/{doc}` are allowed except the secrets document; writes are restricted to admins. This is a reasonable client permission boundary, but the rules do not establish schema validation, versioning, or an immutable audit record for pricing changes.
+- `DriverTerminal.tsx` consumes the browser Remote Config commission if present, otherwise reads `platform_config/rides` and defaults to 12%; it separately reads `fixedTripFee` from `platform_config/rides`. No server-side cash completion command currently reads and snapshots a canonical pricing record.
+
+### Reconciliation conclusions
+1. Browser Remote Config values and localStorage simulation overrides are not suitable as the monetary authority for cash completion, fee accrual, or settlement. They are mutable client presentation inputs and may differ across devices/sessions.
+2. The 1-second fetch race plus fallback defaults means two clients may calculate different amounts depending on fetch timing, support, cache, or local override state.
+3. The UI's “system-wide” and “live cloud” descriptions overstate what the simulator actually changes. Applying an override changes that browser's local state only; it does not publish a global config.
+4. `platform_config/rides` is a possible Firestore-owned source, but the checked-in rules only provide access control, not a typed/validated pricing contract. The server must validate every field and fail closed if the canonical document is missing or invalid.
+5. The server must persist a pricing snapshot with each cash-completion/fee-accrual event: integer pence, commission basis points or a validated rational rate, fixed fee in pence, currency, config version, and effective timestamp. Later config edits must not rewrite historical fee calculations.
+
+### Recommended canonical design (proposal; not implemented)
+- Use one server-read Firestore document, e.g. `platform_config/rides_pricing`, as the operational pricing authority for cash rides. Keep Firebase Remote Config for non-financial client presentation and rollout flags only.
+- Add a strict schema and bounded validation for commission rate, fixed fee, currency, and effective version. Require an explicit monotonically increasing `configVersion` and server-authored `updatedAt`/actor audit metadata. Admin writes should go through a validated server command or a rules-constrained schema; do not rely on admin UI convention alone.
+- Resolve the pricing document inside the same trusted completion command that calculates and records the fee, and copy the exact snapshot into the immutable ride fee-accrual record. Use integer pence throughout.
+- Keep local simulation overrides explicitly labelled and isolated from real-money paths; the server must never accept a client-supplied rate, fee, or config version as authority.
+- Correct GlobalSettings labels/help text so simulation overrides are described as local preview-only, not live system-wide changes.
+
+### Status
+- Section 132 is documentation only; no source code, Firestore rules, Remote Config parameters, or live configuration changed.
+- No tests, emulator, typecheck, build, CI, Firebase console access, or production operation was run.
+- Next: inspect all server-side reads and admin mutation paths for `platform_config/rides` and any existing audit/version conventions, then finalize the pricing schema before implementation.
