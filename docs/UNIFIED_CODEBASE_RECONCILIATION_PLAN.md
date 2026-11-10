@@ -2259,3 +2259,62 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Added tests for exact matches, currency casing, expanded PaymentIntent objects, early webhook arrival, and mismatched user/session/mode/amount/currency/payment intent/status.
 - Source refetch confirms both checkout-session persistence and webhook use of the shared binding helper. Tests remain unexecuted while GitHub Actions runner provisioning is unavailable.
 - Before this documentation update the branch was 298 ahead / 0 behind `main`, at `458bc1a33ff54af7a77363498d7a22447da82a8c`. `main` remains unchanged.
+
+
+## Section 84 — Firestore invitation and property-rule reconciliation (2026-11-10)
+
+### Refs and scope checked
+
+- Compared `firestore.rules` on `main` with the current `integration/pr-consolidation-20261109` ref using GitHub file contents and a line-level diff.
+- Main rules blob: `1047baad36aa1ccceb0b4bc4e7e693fb0ec3a5f6` (1,608 lines).
+- Integration rules blob: `0d1139b17382491e47d7f0151fd41187978abedb` (1,650 lines).
+- The branch comparison currently reports integration **301 commits ahead / 0 behind** main. This is a live comparison at this review, replacing older historical counts in earlier sections.
+- Integration security regression file: `tests/unit/firebaseEmulatorSecurityRules.test.ts`, blob `2ff5b2c066066ad3528a1e7d978c3651e6656024`.
+
+### Invitation rule decision matrix
+
+| Capability | main | integration | Review decision |
+|---|---|---|---|
+| Recipient direct get | Verified-email comparison, including case variants; missing-document reads are also allowed by a broad `resource == null` clause | Requires a real document and verified recipient email match (case-insensitive), or inviter/admin | Retain integration |
+| Recipient list | Combined get/list expression; broad missing-resource clause | Separate list predicate requiring exact email equality for query provability, or inviter/admin | Retain integration; keep client query equality aligned |
+| Recipient acceptance | Any update permitted to a verified matching recipient | Only verified matching recipient can transition pending → accepted, set `acceptedAt == request.time`, and change only `status` and `acceptedAt` | Retain integration |
+| Inviter management | Inviter may update; create/delete limited by existing checks | Inviter retains read/list and management; admin retains full access | Retain integration pending full product-flow regression |
+| Admin management | Admin access retained | Admin access retained | Preserve |
+| Unrelated / unverified recipient | Main blocks unverified email but has broader missing-resource behavior | Unverified and unrelated recipient denied; missing direct get denied | Retain integration |
+
+**Security conclusion:** the integration invitation block is materially safer than main. In particular, main permits a verified recipient to update arbitrary invitation fields, whereas integration restricts recipient updates to the intended pending-to-accepted transition and prevents changing email, inviter, permissions or other fields. The integration also removes the broad missing-document read allowance. Do not revert this block to the main version.
+
+### Emulator coverage inspected
+
+Test 94, “PL-08: Invitations - verified recipients can only accept their own pending invitation”, is present in the integration security suite. Source review confirms it covers:
+- unverified recipient direct get, recipient list query and acceptance update denied;
+- verified recipient direct get and exact-equality pending list query allowed;
+- missing invitation direct get denied;
+- unrelated verified recipient denied;
+- inviter direct read and cancellation update allowed;
+- admin direct read and management update allowed;
+- intended pending → accepted update with server timestamp allowed;
+- recipient attempts to alter email, inviter or extra fields denied.
+
+The test is authored in the integration branch. This review did not execute the Firebase emulator suite; do not describe the rule change as runtime-validated solely from source inspection.
+
+### Compatibility / test gaps retained for follow-up
+
+1. The test reads a legacy invitation whose stored email has mixed case, but it does not test listing or accepting that same mixed-case record. The client onboarding query lowercases the user's email and uses exact equality; new BusinessTeamManagement invitations are also stored lowercased. Legacy mixed-case records may therefore be readable by direct get but not discoverable/acceptable through the normal list/accept path. Decide whether a one-time data normalization is needed; do not perform a live data migration as part of this repository audit.
+2. The inviter positive test covers direct get and cancellation update but not the actual `where('invitedBy', '==', uid), where('status', '==', 'pending')` list query used by BusinessTeamManagement. Add a positive emulator list assertion before final security sign-off.
+3. The admin positive test covers direct get and update but not admin collection listing. Add a positive admin list assertion if that is an intended UI/API use case.
+4. The integration file defines `isVerifiedInvitationRecipientForAcceptance()`, but the acceptance rule currently repeats the predicate inline. This is redundant, not a reason to weaken the rule; either use the helper consistently or remove it in a reviewed cleanup.
+5. The onboarding client reads invitations by lowercased email and then accepts by updating only `status` and `acceptedAt`. That matches the intended integration recipient rule for normalized new invitations. Preserve this flow and test the end-to-end query/update behavior.
+
+### Other Firestore rule deltas in this comparison
+
+- Property creation and deletion are now server-only (`allow create: if false`, `allow delete: if false`) so quota counters and transfer/accounting state are changed atomically by authenticated server commands.
+- Owner updates now protect the complete ownership-transfer metadata set, including recipient/initiator metadata and transfer code/status/expiry/history/claim fields. The earlier client-side transfer path was moved to authenticated server commands (see Sections 75–77); do not restore direct client writes.
+- These property restrictions are intended changes and must remain paired with the server command paths and their regression tests. A rules-only change without those callers would break legitimate user workflows.
+
+### Decision and next work
+
+- **Accept integration Firestore rules as the candidate baseline; do not copy main or ZIP rules over them.**
+- Preserve the existing AI Studio PL-01–PL-15 protections and the integration's stricter invitation and property-transfer controls.
+- Add the missing inviter/admin list assertions and mixed-case legacy-invitation behavior test to the emulator suite, then run the complete emulator/security gate when CI runner provisioning is available.
+- Continue the broader full ZIP path/hash manifest and AI Studio/Firebase pre-change verification. No application code, Firebase live rules, production data, main branch, or AI Studio workspace was changed during this read-only review.
