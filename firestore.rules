@@ -765,6 +765,7 @@ service cloud.firestore {
             'pendingTransferToUid', 'transferStatus', 'transferCode',
             'transferExpiresAt', 'transferTargetEmail', 'transferHistory',
             'transferClaimedAt', 'transferClaimedByUid', 'previousOwnersCount',
+            'transferTargetName', 'transferInitiatedAt', 'transferInitiatorUid',
             'verifiedByAdmin'
           ])
         )
