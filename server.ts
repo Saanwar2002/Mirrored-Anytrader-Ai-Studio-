@@ -2101,10 +2101,16 @@ async function startServer() {
                 }
                 if (isIM && !imMarkerSnap.exists) {
                   if (!matchSnap.exists) {
+                    const paymentIntentId = typeof intent.paymentIntentId === "string" && /^pi_[A-Za-z0-9]+$/.test(intent.paymentIntentId)
+                      ? intent.paymentIntentId : null;
                     tx.create(matchRef, {
                       id: matchId, jobId: meta.jobId, customerId: userId || "",
                       chargeAmountPence: Number(session.amount_total || 0),
-                      chargeTier: "instant_match", feeWaived: false, status: "searching",
+                      chargeTier: "instant_match", feeWaived: false,
+                      status: paymentIntentId ? "searching" : "refund_review_required",
+                      refundStatus: paymentIntentId ? "not_started" : "manual_review",
+                      refundReviewReason: paymentIntentId ? null : "missing_or_invalid_payment_intent",
+                      stripePaymentIntentId: paymentIntentId,
                       currentAttempt: 0,
                       createdAt: admin.firestore.FieldValue.serverTimestamp(),
                       searchingAt: admin.firestore.FieldValue.serverTimestamp()
