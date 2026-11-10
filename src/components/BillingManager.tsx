@@ -654,7 +654,7 @@ export default function BillingManager() {
   const handleToggleGoldDriver = async () => {
     if (!user || !profile) return;
     const isCurrentlyActive = Boolean(profile?.isGoldDriver || profile?.driverTier === "gold");
-    const isCanceling = Boolean(profile?.driverCancelAtPeriodEnd || profile?.cancelAtPeriodEnd);
+    const isCanceling = Boolean(profile?.driverCancelAtPeriodEnd);
 
     if (isCurrentlyActive && isCanceling) {
       await handleReactivateSubscription('driver_gold');
