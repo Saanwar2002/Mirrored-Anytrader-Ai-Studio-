@@ -3662,3 +3662,25 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 148 is documentation only; checkout, payout, cash, Stripe, and ledger code untouched.
 - No tests, emulator, typecheck, build, or CI run.
 - Next: trace fee tier resolution and rounding/pence conversions to see whether payout has a reusable pure calculator; document extraction before any shared calculator implementation.
+
+
+## Section 149 — Payout calculator is inline and entitlement-driven; cash fee must not infer tier from UI
+
+### Exact payout math (`src/server/driverPayoutOrchestration.ts`)
+- Gold commission is applied only when persisted `isGoldDriver === true`, a non-empty `driverSubscriptionId`, and `driverSubscriptionStatus === "active"`; otherwise `PLATFORM_COMMISSION_RATE`.
+- Inputs are `ride.finalFare` and `ride.tipAmount`, converted from GBP decimal to integer pence using `Math.round(value * 100)`.
+- Driver base earnings are rounded once: `round(basePence * (1 - commissionRate))`; tip pence are added in full. Platform commission is the residual `basePence - driverBaseEarningsPence`, ensuring base split reconciles exactly in pence.
+- This is an inline worker calculation rather than an exported reusable pure calculator. It also reads driver entitlement and ride data in worker orchestration, so extracting math must keep eligibility/authorization outside the pure function.
+- Payout validates fare >0, fare ≤£500 and tip ≤£200; Checkout's tip cap is £500. These are not a common ride-level contract.
+- No equivalent persisted pricing/commission snapshot is required on ride before payout; effective tier is resolved at payout time. That means entitlement changes between ride completion and payout can alter split unless snapshotting is introduced.
+
+### Proposed extraction boundary (not implemented)
+- Pure `calculateRideSplit({baseFarePence, tipPence, commissionRateBps})`: validate safe integers/ranges; return driver base, tip, total payout, platform commission. No Firestore, Stripe, or tier lookup.
+- Separate policy resolver determines commission rate from trusted driver entitlement and policy version; completion snapshots the rate and amounts. Payout consumes the snapshot and verifies Stripe collected amount matches base+tip.
+- Add unit fixtures for standard/gold rates, £0.01 rounding, tips, caps, invalid NaN/Infinity/negative and reconciliation identity: driver base + platform fee = base fare pence; payout = driver base + tip.
+- Add integration/emulator tests for entitlement changes after completion, duplicate payout, and fee ledger matching.
+
+### Status
+- Section 149 is documentation only; payout implementation unchanged.
+- No tests, emulator, typecheck, build, or CI run.
+- Next: inspect payment verification requirements in payout and ledger writer fields to map how one ride snapshot can match collected Stripe amount, payout transfer, and platform receivable without double counting.
