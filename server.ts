@@ -2,7 +2,7 @@ import express from "express";
 import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
-import { shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
+import { ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
 import { evaluateCheckoutIntentBinding } from "./src/server/checkoutIntentIntegrity.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -1731,7 +1731,7 @@ async function startServer() {
           await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
             const latest = await tx.get(eventRef);
@@ -1762,7 +1762,7 @@ async function startServer() {
           await db.runTransaction(async (tx: any) => {
             const [claimSnap, latestIntent] = await Promise.all([tx.get(eventRef), tx.get(intentRef)]);
             const claimData = claimSnap.data() || {};
-            if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+            if (!ownsStripeWebhookClaim(claimData, claimToken)) {
               throw new Error('Webhook claim lost before checkout intent review mutation.');
             }
             if (latestIntent.exists) tx.update(intentRef, {
@@ -1777,7 +1777,7 @@ async function startServer() {
         await db.runTransaction(async (tx: any) => {
           const [claimSnap, latestIntent] = await Promise.all([tx.get(eventRef), tx.get(intentRef)]);
           const claimData = claimSnap.data() || {};
-          if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+          if (!ownsStripeWebhookClaim(claimData, claimToken)) {
             throw new Error('Webhook claim lost before checkout intent processing mutation.');
           }
           if (!latestIntent.exists) throw new Error('Checkout intent disappeared before processing.');
@@ -1799,7 +1799,7 @@ async function startServer() {
             await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
@@ -1829,7 +1829,7 @@ async function startServer() {
             await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
@@ -1859,7 +1859,7 @@ async function startServer() {
             await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
@@ -1898,7 +1898,7 @@ async function startServer() {
             await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
@@ -1949,7 +1949,7 @@ async function startServer() {
             await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
@@ -1992,7 +1992,7 @@ async function startServer() {
                 await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
                   const fulfillment = await tx.get(fulfillmentRef);
@@ -2019,7 +2019,7 @@ async function startServer() {
               await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
                 const [jobSnap, fulfillmentSnap] = await Promise.all([
@@ -2071,7 +2071,7 @@ async function startServer() {
               await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
                 const [jobSnap, boostMarkerSnap, matchSnap, imMarkerSnap] = await Promise.all([
@@ -2166,7 +2166,7 @@ async function startServer() {
             await db.runTransaction(async (tx: any) => {
               const claimSnap = await tx.get(eventRef);
               const claimData = claimSnap.data() || {};
-              if (claimData.status !== 'processing' || claimData.claimToken !== claimToken) {
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
                 throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
               const latest = await tx.get(userDoc.ref);
@@ -2191,7 +2191,7 @@ async function startServer() {
       await db.runTransaction(async (tx: any) => {
         const latest = await tx.get(eventRef);
         const data = latest.data() || {};
-        if (data.status !== 'processing' || data.claimToken !== claimToken) throw new Error('Webhook claim lost before completion; reconciliation required.');
+        if (!ownsStripeWebhookClaim(data, claimToken)) throw new Error('Webhook claim lost before completion; reconciliation required.');
         tx.update(eventRef, { status: 'completed', claimToken: admin.firestore.FieldValue.delete() });
       });
       res.status(200).json({ received: true });
@@ -2210,7 +2210,7 @@ async function startServer() {
           await db.runTransaction(async (tx: any) => {
             const latest = await tx.get(failedRef);
             const data = latest.data() || {};
-            if (data.status !== 'processing' || data.claimToken !== claimToken) return;
+            if (!ownsStripeWebhookClaim(data, claimToken)) return;
             tx.update(failedRef, {
               status: 'failed',
               error: err.message,
