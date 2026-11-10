@@ -3626,8 +3626,9 @@ async function startServer() {
           if (!Number.isSafeInteger(doorsAllowed) || doorsAllowed < 1) {
             throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
           }
-          const storedUsage = usageSnap.exists ? Number(usageSnap.data()?.propertyCount) : 0;
-          const currentUsage = Math.max(Number.isSafeInteger(storedUsage) && storedUsage >= 0 ? storedUsage : 0, legacyCount);
+          // The per-user usage document is the transaction serialization point;
+          // derive the count from live properties so owner deletions release capacity.
+          const currentUsage = legacyCount;
           if (currentUsage >= doorsAllowed) {
             throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
           }
