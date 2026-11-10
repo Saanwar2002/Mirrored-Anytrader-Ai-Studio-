@@ -2053,3 +2053,5 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 4. Do not merge, deploy, sync AI Studio, or weaken release gates before all required tests and audits pass.
 
 - Invoice subscription ID extraction now accepts both legacy string and expanded-object forms from `invoice.subscription` and the newer `parent.subscription_details.subscription` path. It no longer stringifies an expanded Stripe object to `[object Object]`. Five focused regression cases cover these forms and missing subscription data.
+
+- Hardened the pure mapper so an explicit `customer.subscription.deleted` event always wins over any inconsistent payload status: it records `canceled` and revokes entitlement even if the payload unexpectedly says `active`. A focused regression test protects this invariant.
