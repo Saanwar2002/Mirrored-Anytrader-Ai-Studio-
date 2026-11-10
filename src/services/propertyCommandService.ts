@@ -2,15 +2,27 @@
  * Server-authoritative property creation.
  * The server derives ownership and enforces any Gotham purchased-door allowance.
  */
+const pendingPropertyCreationKeys = new Map<string, string>();
+
 export async function createPropertyViaCommand(
-  user: { getIdToken: () => Promise<string> },
-  payload: Record<string, unknown>
+  user: { uid?: string; getIdToken: () => Promise<string> },
+  payload: Record<string, unknown>,
+  suppliedIdempotencyKey?: string
 ): Promise<{ id: string; duplicate: boolean }> {
   const token = await user.getIdToken();
   if (!token) throw new Error("You must be signed in to create a property.");
-  const idempotencyKey = typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `property_${Date.now()}_${Math.random().toString(36).slice(2, 14)}`;
+  if (suppliedIdempotencyKey && !/^[A-Za-z0-9_-]{12,100}$/.test(suppliedIdempotencyKey)) {
+    throw new Error("Property creation idempotency key is invalid.");
+  }
+
+  const requestFingerprint = `${user.uid || token.slice(0, 24)}:${JSON.stringify(payload)}`;
+  const idempotencyKey = suppliedIdempotencyKey ||
+    pendingPropertyCreationKeys.get(requestFingerprint) ||
+    (typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `property_${Date.now()}_${Math.random().toString(36).slice(2, 14)}`);
+  if (!suppliedIdempotencyKey) pendingPropertyCreationKeys.set(requestFingerprint, idempotencyKey);
+
   const response = await fetch("/api/properties", {
     method: "POST",
     headers: {
@@ -23,6 +35,9 @@ export async function createPropertyViaCommand(
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || "Property could not be created.");
   if (!result.id) throw new Error("Property creation returned no identifier.");
+  if (pendingPropertyCreationKeys.get(requestFingerprint) === idempotencyKey) {
+    pendingPropertyCreationKeys.delete(requestFingerprint);
+  }
   return { id: String(result.id), duplicate: Boolean(result.duplicate) };
 }
 
