@@ -2464,3 +2464,15 @@ Follow-on remediation for the Section 92/93 lease-loss ambiguity:
 - Updated files were fetched back from integration and confirmed to contain the new status and test.
 
 Commits: source `4874f78ce86d41f90b89c7f8a2d9437e344d2248`; test `b1b1d920a625b835a76e9639d431b20dc642e6e5`. **Tests remain unexecuted** (no local test runtime or CI run established here). This is observability and fencing—not a full automated Stripe transfer recovery system. A reconciler must still inspect the identified transfer and reconcile ride/ledger state under a fresh authorized claim before any retry. No live Stripe or Firebase mutation was performed.
+
+
+## Section 95 — Payment-ledger idempotency generation fencing (2026-11-10)
+
+Remediated FIN-04 in `src/server/paymentLedger.ts`:
+
+- A payment idempotency key is now bound to its `operationName`; reusing a completed or active key for another operation throws `ConflictError` instead of replaying an unrelated result.
+- Each claim gets a random `claimToken` generation. Completion now transactionally re-reads the idempotency document and only writes the result if the same generation still owns it. A stale executor whose five-minute claim was taken over cannot mark the successor completed.
+- Failure cleanup is likewise transactional and token-conditional; a stale failure cannot delete a successor's claim. A superseded executor gets a conflict requiring outcome reconciliation rather than a false success.
+- Added tests for operation-name collisions and stale executor completion/cleanup after successor claim replacement.
+
+Commits: implementation `a56a227e5f73a25056207b42dae4dae58b91bb81`; test updates `1294ddd636555a75a2b4d82720e1c6b595b39032` and `4d34e6166ef949ab52e719bc65126bd5dd21bb20`. Files fetched back next for verification. No live financial operations were run. Tests remain pending execution/CI.
