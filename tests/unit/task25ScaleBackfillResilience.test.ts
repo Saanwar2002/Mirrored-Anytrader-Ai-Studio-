@@ -1033,13 +1033,13 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
     const queue = new IntelligenceTaskQueue(2, 60000, 'worker_retry_test');
     queue.setFirestoreDb(adminDb);
 
-    const idempotencyKey = buildIdempotencyKey('job_emu_25_003', 'JOB_EXTRACTION', 'v1');
+    const idempotencyKey = buildIdempotencyKey('job_emu_25_006_retry_policy', 'JOB_EXTRACTION', 'v1');
     const task = await queue.enqueueTaskAsync(
       'job_extraction',
       'job',
-      'job_emu_25_003',
+      'job_emu_25_006_retry_policy',
       idempotencyKey,
-      { job: { jobId: 'job_emu_25_003' } }
+      { job: { jobId: 'job_emu_25_006_retry_policy' } }
     );
 
     // Register a handler that fails with transient 503 error
