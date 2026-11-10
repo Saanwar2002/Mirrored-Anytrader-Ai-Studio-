@@ -2172,3 +2172,12 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Source refetch confirms the webhook invokes the helper inside the transaction before writing the processing claim.
 - Latest branch head: `0eceba1ca377c3b097f1c47d8895d60b4f6c52c3`; comparison: 246 ahead / 0 behind `main`.
 - Latest push run `42807383747` (run 674) failed before any steps with runner ID 0. No test result is available.
+
+
+## Section 74 — Invoice entitlement after terminal membership events (2026-11-10)
+
+- Cross-checked the Stripe lifecycle patch against `src/services/invoiceService.ts`. The invoice eligibility function also treated the stored tier label (`tierId` / `tier`) as sufficient Pro entitlement, even after a terminal membership webhook had set `subscriptionStatus` to `canceled`, `unpaid`, or `incomplete_expired` and cleared the invoice flags.
+- Updated the invoice eligibility check so an explicitly Stripe-managed membership (`subscriptionType === "tier"`) cannot retain Pro invoice access solely from a stale tier label after a terminal status.
+- Kept non-terminal states unchanged (including `past_due`, `incomplete`, and `paused`) pending the product grace policy, and kept independent Video Pro entitlement as a separate route to invoice eligibility.
+- Added focused tests for all three terminal statuses, non-terminal preservation, independent Video Pro access, and legacy tier-only profiles.
+- The new tests are authored but unexecuted because the current GitHub Actions runs fail before runner steps start.
