@@ -2201,3 +2201,12 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Added service-level tests for authenticated initiation, server-side authorization error propagation, and revocation.
 - Source refetch confirms the modal no longer imports Firestore `updateDoc`; transfer initiation/revocation now use the API command service. Tests remain unexecuted pending Actions runner restoration.
 - Before the documentation update, the branch was 261 ahead / 0 behind `main`, at `51004ab7c264c1e66ee1cfe08a707e2b9e0d022a`. `main` remains unchanged.
+
+
+## Section 78 — Reject ambiguous Stripe subscription product aliases (2026-11-10)
+
+- During webhook lifecycle review, found that product resolution preferred a dedicated product ID whenever present, even if the same Stripe subscription ID was also linked to the generic membership field on the same user with a conflicting membership discriminator.
+- This could silently classify a membership subscription event as Gold Driver/Gotham (or vice versa) if Firestore contained a cross-product duplicate ID. Resolution now fails closed when the generic field's legacy discriminator does not correspond to the dedicated product field.
+- A matching legacy Gold Driver/Gotham alias plus its dedicated product field remains accepted; multiple dedicated product links and cross-user links remain rejected.
+- Added regression tests for conflicting membership/dedicated mapping and valid matching legacy alias.
+- Tests are authored but unexecuted while Actions runner provisioning remains unavailable.
