@@ -17,7 +17,7 @@ describe("Stripe subscription lifecycle patch mapping", () => {
   });
 
   it("builds a landlord checkout fulfillment patch without trader membership entitlements", () => {
-    const patch = buildLandlordCheckoutFulfillmentPatch("sub_landlord", "landlord", active);
+    const patch = buildLandlordCheckoutFulfillmentPatch("sub_landlord", active);
     expect(patch).toMatchObject({
       subscriptionId: "sub_landlord",
       subscriptionType: "landlord",
