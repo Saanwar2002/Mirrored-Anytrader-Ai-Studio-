@@ -1998,3 +1998,5 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Focused tests cover all five products, active and terminal entitlement changes, non-terminal status preservation, deleted events, cancellation scheduling, period-end persistence, Video Pro credential separation, and Gotham door-count non-mutation.
 - Event ordering markers and Firestore server timestamps remain owned by the webhook transaction.
 - Tests are authored but have not been executed in this GitHub-only workflow. Full CI remains a required release gate.
+
+- Additional explicit regression coverage confirms that `cancel_at_period_end=true` retains active entitlement for every product until Stripe reports a terminal state.
