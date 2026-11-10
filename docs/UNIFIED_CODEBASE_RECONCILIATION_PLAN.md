@@ -1685,3 +1685,18 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
 
 - Static source inspection only; no build/tests/emulator/Stripe events.
 - Integration-only documentation update; main, AI Studio, and deployment untouched.
+
+## Section 53 — Gold Driver commission now applied in payout calculation (2026-11-10)
+
+### Change
+- Updated `src/server/driverPayoutOrchestration.ts`: server payout commission is now 10% only when the driver profile carries the Stripe-fulfilment entitlement tuple `isGoldDriver === true`, a non-empty `driverSubscriptionId`, and `driverSubscriptionStatus === "active"`. Otherwise the established platform commission remains 12%.
+- The payout transfer metadata now records the applied commission rate and driver tier; the completed ride ledger fields persist `appliedCommissionRate` and `appliedDriverTier` for auditability.
+- Driver share is calculated as (1 - effectiveCommissionRate) in integer pence; tips remain 100% driver-paid. Existing idempotency remains keyed by the final transfer amount, so a changed rate changes the deterministic transfer key.
+
+### Security basis / caveat
+- Firestore `users/{userId}` rules permit self-updates only to an allowlist that excludes `isGoldDriver`, `driverSubscriptionId`, and `driverSubscriptionStatus`; Stripe webhook/admin server writes remain authoritative. Gold entitlement requires all three markers rather than trusting the client-provided `commissionRate` value.
+- This fixes the previously identified payout-engine mismatch, but does not yet prove the driver-facing fare preview UI displays the same 10% rate. UI parity and cancellation/status lifecycle synchronization remain follow-up items; if Stripe subscription status is stale, the payout entitlement can remain stale until lifecycle handling is implemented.
+
+### Verification
+- Source-level change committed to `integration/pr-consolidation-20261109`; no local TypeScript build, unit test, emulator, or Stripe transfer test was run in this environment.
+- Main and AI Studio remain untouched; no merge/deployment performed.
