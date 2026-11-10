@@ -4904,8 +4904,37 @@ async function startServer() {
         { stripe: stripeClient }
       );
 
-      // Curing premature release marking:
-      // If Stripe transfer failed, roll back the milestone status so it does not remain marked as released!
+      // A Stripe API error can be ambiguous: the transfer may have been created even if
+      // the response was lost. Keep the milestone's original operation key and released
+      // state locked for reconciliation; a new caller key must not create a second transfer.
+      if (stripeTransferResult.transferStatus === "reconciliation_required") {
+        await firestoreDb.runTransaction(async (tx: any) => {
+          const qRef = firestoreDb.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+          const qSnap = await tx.get(qRef);
+          if (!qSnap.exists) return;
+          const qData = qSnap.data();
+          const milestones = (qData?.milestones || []).map((m: any) => {
+            if (m.id !== (result.milestoneId || milestoneId) || m.releaseOperationId !== idempotencyKey) return m;
+            return {
+              ...m,
+              status: "funds_released",
+              releaseStatus: "reconciliation_required",
+              lastTransferError: stripeTransferResult.error,
+            };
+          });
+          tx.update(qRef, { milestones });
+        });
+
+        return res.status(502).json({
+          success: false,
+          error: "Stripe transfer outcome is ambiguous. The milestone remains locked to its original operation key pending reconciliation; do not retry with a new idempotency key.",
+          stripeTransferStatus: "reconciliation_required",
+          stripeError: stripeTransferResult.error,
+        });
+      }
+
+      // A preflight failure is known to have occurred before the Stripe transfer call.
+      // Only this definite-no-transfer case may safely restore the milestone to funded.
       if (stripeTransferResult.transferStatus === "failed") {
         await firestoreDb.runTransaction(async (tx: any) => {
           const qRef = firestoreDb.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
