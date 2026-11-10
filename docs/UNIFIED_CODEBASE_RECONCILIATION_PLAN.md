@@ -2427,3 +2427,16 @@ A bounded source comparison of the latest Library ZIP against `integration/pr-co
 **FIN-02 refined:** the archived webhook only records aggregate refunded amount and cannot establish refund-level completeness. The integration branch currently lacks this event branch in the inspected server entry point. Locate any alternate integration refund ingestion path and establish the intended source of truth before designing a paginated Stripe refunds fetch; avoid duplicate event ingestion and never call Stripe/live financial APIs in tests.
 
 No application code or live financial data changed. Next: review the exact payout/server financial diffs, inventory archive paths against integration, then execute the AI Studio/Firebase pre-change gate before any remediation.
+
+
+## Section 92 — Driver payout claim-token exception paths (FIN-01/FIN-03/FIN-05) (2026-11-10)
+
+Read-through of integration `src/server/driverPayoutOrchestration.ts` confirms a positive invariant and two material exception-path gaps:
+
+- **Preserved positive control:** claim is acquired transactionally on the fresh ride snapshot; the Stripe transfer uses deterministic `payout:ride:{rideId}:{driverId}:{transferAmountPence}`; successful finalization re-reads the ride and requires the exact `payoutClaimToken` before setting `payoutTransferred: true`.
+- **Failure path is not fenced:** the outer transfer catch writes `payoutTransferred:false`, `payoutStatus:failed`, error and retry count with an unconditional `rideDoc.ref.update`. If this worker's lease expired and another worker acquired a newer token, the stale worker can overwrite the newer worker's state. Stripe idempotency limits duplicate transfer creation for identical request parameters, but does not make stale Firestore writes safe.
+- **Dry-run leaves a processing lease:** after claim acquisition, `dryRun` increments simulated results and continues without releasing/resetting the claim. The ride remains `payoutStatus:processing` until lease expiry (five minutes), causing avoidable contention.
+- **Stripe success followed by lost token:** finalization throws `LEASE_TOKEN_LOST`; catch then performs the same unfenced failed update. Transfer may already exist, so recovery must reconcile the deterministic Stripe idempotency outcome/transfer ID and avoid representing the payout as safely failed or retryable without that reconciliation.
+- **ZIP comparison remains pending:** integration's token-fenced success path is verified in source; no ZIP source was copied. A line-level diff and test comparison are still required before selecting the canonical version.
+
+Remediation/test design: fence *all* post-claim writes (success, failure, dry-run release) using transactional token ownership; never let a stale claimant mutate a newer lease. On ambiguous Stripe success, retain an explicit reconciliation-needed state and stable operation identity, then reconcile before retry. Add tests for stale worker catch after takeover, Stripe-success/finalize-token-loss, dry-run lease cleanup, and no stale status overwrite. No code change or Stripe operation was executed.
