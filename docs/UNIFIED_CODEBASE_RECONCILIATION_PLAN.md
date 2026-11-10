@@ -2329,3 +2329,15 @@ The test is authored in the integration branch. This review did not execute the 
 - The two PRs overlap on `server.ts` and `src/server/pricingCatalog.ts` (and PR #5's larger payment/test surface); treat them as separate stale candidates and inspect exact patches against current integration before any selective recovery.
 - `main` remains unchanged. No application-code, production Firebase, live data or AI Studio changes were made in this checkpoint.
 - Next safe work remains: finish the full ZIP-to-integration differing-path manifest and AI Studio/Firebase pre-change verification; then address the small, explicit invitation emulator test gaps from Section 84. Do not start PR integration until the per-path decision matrix and tests are reviewed.
+
+
+## Section 86 — AI Studio ZIP access and financial-source baseline comparison (2026-11-10)
+
+- The Library contains two AnyTrader full-code ZIPs. The newest available is `anytrader (Full Code Backup)_112216(1).zip`, created **2026-11-09 01:33:29 UTC**, size **23,607,762 bytes**. The 2026-11-08 backup is older. The 2026-11-09 archive was materialized and inspected; ZIP integrity check passed (705 entries, no corrupt member). No re-upload is needed at this checkpoint.
+- Snapshot provenance limitation: this is the newest ZIP available in Library, but its timestamp alone does not prove it is the current live AI Studio workspace. Treat it as the latest *available snapshot*, not as an independently verified live workspace export.
+- Git blob comparison for selected financial files against integration:
+  - `src/server/paymentLedger.ts`: ZIP blob `fc99e5652b9b2e7993f04bec5224d85ef8737b49` = integration blob; exact match.
+  - `src/services/stripeIntegrationService.ts`: ZIP blob `2f1e869aa7a5e94d8a46f1101890defc6a70c64d` = integration blob; exact match.
+  - `src/server/driverPayoutOrchestration.ts`: ZIP blob `903c950f480a16923d04ac900da061448245a8e7` differs from integration blob `6091e4a183caca9a30af16e12aae0472aecdf122`; this file requires focused diff review before any change.
+- This is a targeted baseline comparison, **not** the complete 705-entry ZIP-to-integration manifest. No application code, live Firebase state, production financial data, main branch or AI Studio workspace was changed.
+- Next: enumerate ZIP paths and compare the remaining payment/webhook/refund/escrow sources and tests against integration; review the payout orchestration difference; complete AI Studio/Firebase pre-change gate; then proceed to read-only reconciliation audit and approved remediation/test work.
