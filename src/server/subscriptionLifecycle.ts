@@ -36,7 +36,7 @@ export function buildSubscriptionLifecyclePatch(product: SubscriptionProduct, su
     patch.gothamCancelAtPeriodEnd = Boolean(subscription.cancel_at_period_end);
     if (entitled) patch.isGothamSubscriber = true;
     else if (terminal) patch.isGothamSubscriber = false;
-    if (periodEndIso) { patch.gothamCurrentPeriodEnd = periodEndIso; patch.currentPeriodEnd = periodEndIso; }
+    if (periodEndIso) patch.gothamCurrentPeriodEnd = periodEndIso;
     // Purchased door count is not derived from Stripe's aggregate line quantity.
   }
   return patch;
