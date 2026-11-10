@@ -3676,29 +3676,49 @@ async function startServer() {
       const user = (req as any).user;
       const isAdmin = await checkIsAdmin(user);
       const propertyRef = db.collection("properties").doc(req.params.id);
-      const callerRef = db.collection("users").doc(authUid);
       const result = await db.runTransaction(async (tx: any) => {
-        const [propertySnap, callerSnap] = await Promise.all([tx.get(propertyRef), tx.get(callerRef)]);
+        const propertySnap = await tx.get(propertyRef);
         if (!propertySnap.exists) throw new NotFoundError("Property not found.");
         const property = propertySnap.data() || {};
-        const isOwner = property.ownerId === authUid || property.userId === authUid || property.landlordId === authUid;
+        const ownerIds = [property.ownerId, property.userId, property.landlordId].filter((value: any) => typeof value === "string" && value.length > 0);
+        const isOwner = ownerIds.includes(authUid);
         if (!isOwner && !isAdmin) throw new ForbiddenError("You are not authorized to delete this property.");
-        const quotaOwnerId = String(property.ownerId || property.userId || property.landlordId || "");
+        const quotaOwnerId = isOwner ? authUid : String(ownerIds[0] || "");
         const quotaOwnerRef = quotaOwnerId ? db.collection("users").doc(quotaOwnerId) : null;
         const usageRef = quotaOwnerId ? db.collection("gotham_property_usage").doc(quotaOwnerId) : null;
         const [quotaOwnerSnap, usageSnap] = quotaOwnerRef && usageRef
           ? await Promise.all([tx.get(quotaOwnerRef), tx.get(usageRef)])
           : [null, null];
-        if (quotaOwnerSnap?.exists && usageSnap?.exists) {
+        if (quotaOwnerSnap?.exists) {
           const ownerProfile = quotaOwnerSnap.data() || {};
           const isGothamAccount = ownerProfile.subscriptionType === "gotham_saas" || ownerProfile.isGothamSubscriber === true;
-          if (isGothamAccount) {
-            const currentUsage = Number(usageSnap.data()?.propertyCount);
-            if (!Number.isSafeInteger(currentUsage) || currentUsage < 0) {
-              throw new ForbiddenError("Gotham property usage is invalid; deletion requires reconciliation.");
+          if (isGothamAccount && usageRef) {
+            let currentUsage: number;
+            if (usageSnap?.exists) {
+              currentUsage = Number(usageSnap.data()?.propertyCount);
+              if (!Number.isSafeInteger(currentUsage) || currentUsage < 0) {
+                throw new ForbiddenError("Gotham property usage is invalid; deletion requires reconciliation.");
+              }
+              currentUsage = Math.max(0, currentUsage - 1);
+            } else {
+              // If no reservation counter exists yet, backfill after excluding the
+              // property being deleted so the delete and first create serialize.
+              const [ownerQuery, userQuery, landlordQuery] = await Promise.all([
+                tx.get(db.collection("properties").where("ownerId", "==", quotaOwnerId)),
+                tx.get(db.collection("properties").where("userId", "==", quotaOwnerId)),
+                tx.get(db.collection("properties").where("landlordId", "==", quotaOwnerId))
+              ]);
+              const existingIds = new Set<string>();
+              for (const snap of [ownerQuery, userQuery, landlordQuery]) {
+                snap.docs.forEach((doc: any) => {
+                  if (doc.id !== propertyRef.id) existingIds.add(doc.id);
+                });
+              }
+              currentUsage = existingIds.size;
             }
             tx.set(usageRef, {
-              propertyCount: Math.max(0, currentUsage - 1),
+              userId: quotaOwnerId,
+              propertyCount: currentUsage,
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
           }
