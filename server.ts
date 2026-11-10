@@ -41,7 +41,7 @@ import {
 import { AbuseDefenseEngine } from "./src/server/abuseDefense.ts";
 import { BusinessLogicDefense } from "./src/server/businessLogicDefense.ts";
 import { domainEvents } from "./src/server/domainEvents.ts";
-import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer } from "./src/server/pricingCatalog.ts";
+import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer, getDynamicFirestoreConfigs } from "./src/server/pricingCatalog.ts";
 import { resolveTrustedCanonicalIdentity } from "./src/server/identity.ts";
 import { executeCreateJobCommand, resolveCreateJobQuota } from "./src/server/createJobCommand.ts";
 import { executeQuoteCommand, executeAcceptQuoteCommand } from "./src/server/quoteCommands.ts";
@@ -2125,6 +2125,96 @@ async function startServer() {
       res.status(500).json({ error: 'Webhook processing failed' });
     }
   })
+
+  // Free membership selection is server-authoritative; clients cannot write subscription entitlements.
+  app.post("/api/select-free-tier", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const userId = String((req as any).user?.uid || "");
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+      const tierName = String(req.body?.tierName || "").trim().toLowerCase();
+      const userRef = db.collection("users").doc(userId);
+      const userSnap = await userRef.get();
+      if (!userSnap.exists) throw new NotFoundError("User profile not found.");
+      const userData = userSnap.data() || {};
+      const role = String(userData.role || "").toLowerCase();
+      const { globalTiers } = await getDynamicFirestoreConfigs(db);
+
+      const terminalStatuses = ["canceled", "unpaid", "incomplete_expired"];
+      if (role === "homeowner" || role === "customer") {
+        if (!["standard", "standard homeowner"].includes(tierName)) {
+          throw new ForbiddenError("Homeowners may select only the Standard free tier without a paid subscription.");
+        }
+        const configuredPrice = globalTiers?.providerModels?.homeowners?.tiers?.standard?.price;
+        if (configuredPrice !== undefined && Number(configuredPrice) !== 0) {
+          throw new ForbiddenError("The Standard Homeowner tier is not currently configured as free.");
+        }
+        if (userData.subscriptionType === "landlord" && userData.subscriptionId &&
+            !terminalStatuses.includes(String(userData.homeownerSubscriptionStatus || ""))) {
+          throw new ConflictError("Cancel the active Landlord subscription before selecting the free tier.");
+        }
+        await db.runTransaction(async (tx: any) => {
+          const latest = await tx.get(userRef);
+          if (!latest.exists) throw new NotFoundError("User profile not found.");
+          const current = latest.data() || {};
+          if (current.subscriptionType === "landlord" && current.subscriptionId &&
+              !terminalStatuses.includes(String(current.homeownerSubscriptionStatus || ""))) {
+            throw new ConflictError("Cancel the active Landlord subscription before selecting the free tier.");
+          }
+          tx.update(userRef, {
+            homeownerTierId: "standard",
+            homeownerSubscriptionStatus: "free",
+            homeownerCancelAtPeriodEnd: false,
+            homeownerCurrentPeriodEnd: admin.firestore.FieldValue.delete(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        });
+        return res.json({ success: true, fields: {
+          homeownerTierId: "standard",
+          homeownerSubscriptionStatus: "free",
+          homeownerCancelAtPeriodEnd: false
+        }});
+      }
+
+      if (role !== "tradesperson" || !["payg", "free explorer", "free explorer plan"].includes(tierName)) {
+        throw new ForbiddenError("This account cannot select the requested free tier.");
+      }
+      if (userData.subscriptionType === "tier" && userData.subscriptionId &&
+          !terminalStatuses.includes(String(userData.subscriptionStatus || ""))) {
+        throw new ConflictError("Cancel the active membership subscription before selecting the free tier.");
+      }
+      await db.runTransaction(async (tx: any) => {
+        const latest = await tx.get(userRef);
+        if (!latest.exists) throw new NotFoundError("User profile not found.");
+        const current = latest.data() || {};
+        if (current.subscriptionType === "tier" && current.subscriptionId &&
+            !terminalStatuses.includes(String(current.subscriptionStatus || ""))) {
+          throw new ConflictError("Cancel the active membership subscription before selecting the free tier.");
+        }
+        tx.update(userRef, {
+          tierId: "Free Explorer",
+          tier: "payg",
+          subscriptionStatus: "free",
+          isPro: false,
+          isProInvoiceSubscriber: false,
+          cancelAtPeriodEnd: false,
+          currentPeriodEnd: admin.firestore.FieldValue.delete(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      });
+      res.json({ success: true, fields: {
+        tierId: "Free Explorer",
+        tier: "payg",
+        subscriptionStatus: "free",
+        isPro: false,
+        isProInvoiceSubscriber: false,
+        cancelAtPeriodEnd: false
+      }});
+    } catch (error: any) {
+      console.error("Select Free Tier Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
 
   // Stripe Checkout Session (Server-Authoritative Pricing & Stripe Connect Routing)
   app.post("/api/create-checkout-session", requireAuth, paymentLimiter, async (req, res) => {
