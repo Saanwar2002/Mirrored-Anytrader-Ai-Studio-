@@ -1,4 +1,5 @@
 import express from "express";
+import { isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -2662,9 +2663,15 @@ async function startServer() {
       if (!subId) {
         return res.status(409).json({ error: "No Stripe subscription is linked to this account for the selected product." });
       }
-      const isExplicitMockSubscription = String(subId).startsWith("mock_") &&
-        process.env.NODE_ENV !== "production" &&
-        process.env.ALLOW_MOCK_PAYMENTS === "true";
+      const hasMockSubscriptionId = isMockSubscriptionId(subId);
+      const isExplicitMockSubscription = isExplicitMockSubscriptionAllowed(
+        subId,
+        process.env.NODE_ENV,
+        process.env.ALLOW_MOCK_PAYMENTS
+      );
+      if (hasMockSubscriptionId && !isExplicitMockSubscription) {
+        return res.status(409).json({ error: "Mock subscription IDs are only valid in non-production with ALLOW_MOCK_PAYMENTS=true." });
+      }
 
       let stripe;
       try {
