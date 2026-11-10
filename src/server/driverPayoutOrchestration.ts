@@ -380,6 +380,9 @@ export async function executeDriverPayoutOrchestrationCommand(
           const ledgerSnap = await db
             .collection("payment_ledger")
             .where("transactionId", "==", paymentIntentId || `ride_${rideId}`)
+            // Only an explicitly typed ride receipt can prove a ride collection.
+            // Refunds, escrow events, and legacy untyped rows must fail closed.
+            .where("type", "==", "RIDE_PAYMENT")
             .limit(1)
             .get();
 
@@ -387,10 +390,12 @@ export async function executeDriverPayoutOrchestrationCommand(
             const entry = ledgerSnap.docs[0].data();
             const entryStatus = entry?.status;
             const isCaptured = entryStatus === "completed" || entry?.captured === true;
-            const entryCurrency = (entry?.currency || "gbp").toLowerCase();
+            const entryCurrency = typeof entry?.currency === "string" ? entry.currency.toLowerCase() : "";
             const entryAmountPence = typeof entry?.amount === "number" ? entry.amount : null;
 
-            if (!isCaptured) {
+            if (entry?.type !== "RIDE_PAYMENT") {
+              reconciliationFailureReason = "Ledger entry is not an eligible RIDE_PAYMENT receipt";
+            } else if (!isCaptured) {
               reconciliationFailureReason = `Ledger entry status '${entryStatus}' is not completed/captured`;
             } else if (entryCurrency !== "gbp") {
               reconciliationFailureReason = `Ledger entry currency '${entryCurrency}' is not 'gbp'`;
