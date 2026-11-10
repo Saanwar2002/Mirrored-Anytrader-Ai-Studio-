@@ -149,6 +149,7 @@ describe("Payment Ledger & Invariants", () => {
     const store = new Map<string, any>();
     const db = {
       collection: (_name: string) => ({ doc: (id: string) => ({
+        id,
         update: async (v: any) => store.set(id, {...store.get(id), ...v}),
         set: async (v: any) => store.set(id,v),
         delete: async () => store.delete(id),
