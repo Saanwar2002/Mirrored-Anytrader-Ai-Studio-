@@ -432,6 +432,9 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       await assertFails(updateDoc(propertyRef, { transferHistory: [{ fromOwnerUid: "user_transfer_owner", toOwnerUid: "attacker_uid" }] }));
       await assertFails(updateDoc(propertyRef, { homeownerId: "attacker_uid" }));
       await assertFails(updateDoc(propertyRef, { previousOwnersCount: 999 }));
+      await assertFails(updateDoc(propertyRef, { transferTargetName: "Forged recipient" }));
+      await assertFails(updateDoc(propertyRef, { transferInitiatedAt: new Date().toISOString() }));
+      await assertFails(updateDoc(propertyRef, { transferInitiatorUid: "attacker_uid" }));
 
       await assertSucceeds(updateDoc(propertyRef, { name: "Owner-editable property name" }));
     });
