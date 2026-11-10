@@ -384,6 +384,18 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       });
     };
 
+    it("15A. Authenticated homeowners cannot bypass the server-only property creation command", async () => {
+      const ownerDb = testEnv.authenticatedContext("user_property_creator", { role: "customer" }).firestore();
+      await assertFails(setDoc(doc(ownerDb, "properties", "client_created_property"), {
+        ownerId: "user_property_creator",
+        userId: "user_property_creator",
+        name: "Client-side bypass attempt",
+        address: { line1: "1 Test Street", city: "London", postcode: "N1 1AA" },
+        propertyType: "residential",
+        status: "active",
+      }));
+    });
+
     it("16. Property private access works only for authorized users", async () => {
       await seedPrivateProperty("prop_auth_1", "user_alice");
       const ownerDb = testEnv.authenticatedContext("user_alice").firestore();
