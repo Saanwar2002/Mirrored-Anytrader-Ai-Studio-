@@ -3731,3 +3731,25 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 151 is documentation only; PaymentLedgerEngine and financial records unchanged.
 - No tests, emulator, typecheck, build, or CI run.
 - Next: inspect existing `/api/driver/settle-fees` and webhook event handlers together to map current settlement attempt records, evidence and failure recovery, then define migration-safe settlement state transitions.
+
+
+## Section 152 — Driver fee settlement route has no durable attempt or webhook fulfillment; sandbox clears aggregate debt
+
+### `server.ts` routes verified on integration
+- `POST /api/driver/settle-fees` derives driver UID from verified token, but accepts body `amount` as fallback (£9.75) if Firestore read fails; otherwise uses aggregate `users.pendingPlatformFees`. It creates card Checkout for the aggregate, metadata `driverId` and `type: fee_settlement`, amount in GBP pence. It does not persist settlement attempt, receivable allocations, PaymentIntent/client reference binding, or Session ID.
+- If Stripe is unavailable in permitted sandbox mode, route returns a sandbox success URL without creating any payment evidence.
+- `POST /api/driver/confirm-fee-settlement` is blocked in production and requires `ALLOW_MOCK_PAYMENTS=true`; nevertheless it reads aggregate pending fees and sets `pendingPlatformFees: 0` with no supplied Checkout Session, PaymentIntent, amount/currency verification, or ledger allocation. This destroys the projection balance rather than settling itemized receivables.
+- `PlatformFeeSuccess` frontend path was previously traced to call this confirmation even in sandbox, and backend errors do not necessarily prevent a success toast (Section 126).
+- Generic `checkout.session.completed` webhook requires persisted generic payment_intents record, exact session binding and client reference. Taxi fee Checkout bypasses that record; webhook has no fee_settlement fulfillment branch (Sections 140/126). Thus a genuine paid fee Checkout has no authoritative settlement allocation/fulfillment.
+
+### Required repair
+1. Replace aggregate-only Checkout with persisted `driver_fee_settlement_attempts/{attemptId}`: immutable amount, currency, driver, allocated receivable IDs/amounts, idempotency key, Stripe PI/Session binding, status and timestamps.
+2. Amount must be sum of selected open receivables, never client body fallback or hardcoded £9.75; fail closed if authoritative records unavailable.
+3. Bind Checkout Session to attempt ID in metadata + client_reference_id and persist returned Session. Add webhook branch that validates exact Session/attempt/driver/amount/currency/payment_status and Stripe PI paid evidence, then transactionally allocates only that attempt's receivables exactly once.
+4. Sandbox must use explicit test fixture/evidence and mark only test receivables; it must never zero production-like aggregate balances or report a real settlement.
+5. Aggregate pending fees becomes projection from open receivables; failed/cancelled attempts retain debt and allow safe retry. Success UI waits for verified backend result and surfaces failures.
+
+### Status
+- Section 152 is documentation only; settlement route, frontend, webhook and user aggregates untouched.
+- No tests, emulator, typecheck, build, or CI run.
+- Next: examine Stripe webhook event lifecycle/claim retries for the precise event set and failure behavior, then establish an executable phased implementation plan (ledger schema → accrual command → settlement attempt/webhook → projection/UI).
