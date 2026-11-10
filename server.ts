@@ -3589,6 +3589,16 @@ async function startServer() {
       const propertyRef = db.collection("properties").doc();
       const userRef = db.collection("users").doc(userId);
       const usageRef = db.collection("gotham_property_usage").doc(userId);
+      const requestRef = idempotencyKey
+        ? db.collection("property_creation_requests").doc(userId + "_" + idempotencyKey)
+        : null;
+      if (requestRef) {
+        const previousRequest = await requestRef.get();
+        if (previousRequest.exists) {
+          const previous = previousRequest.data() || {};
+          return res.status(200).json({ success: true, id: String(previous.propertyId || ""), duplicate: true });
+        }
+      }
       const entitlementSnap = await userRef.get();
       if (!entitlementSnap.exists) throw new NotFoundError("User profile not found.");
       const entitlementProfile = entitlementSnap.data() || {};
@@ -3630,10 +3640,6 @@ async function startServer() {
           throw new ForbiddenError("Gotham subscription is not currently entitled to add properties.");
         }
       }
-      const requestRef = idempotencyKey
-        ? db.collection("property_creation_requests").doc(userId + "_" + idempotencyKey)
-        : null;
-
       const result = await db.runTransaction(async (tx: any) => {
         const [userSnap, usageSnap, requestSnap] = await Promise.all([
           tx.get(userRef),
