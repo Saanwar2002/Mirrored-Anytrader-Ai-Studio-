@@ -3563,3 +3563,26 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 144 is documentation only; Firestore rules and UI remain unchanged.
 - No emulator, tests, typecheck, build, or CI run.
 - Next: inspect the driver's `handleCashPayment` implementation and the existing trusted ride command pattern, then specify a server cash-finalization command that can replace both client flows safely.
+
+
+## Section 145 — Driver cash handler itself writes fee aggregate, rider debt and metrics from client; force-completion bypasses acknowledgement
+
+### `src/components/driver/DriverTerminal.tsx` trace
+- `handleCashPayment(forceComplete)` derives fare from client state/config (`fareConfig`, distance, duration, wait seconds, tip); uses `activeRide.fareEstimate` when present and computes platform fee from client commission/fixed-fee config.
+- On short cash without force, it writes `awaiting_cash_confirm`, reported cash and discrepancy directly to ride, then waits for passenger snapshot.
+- On normal/forced completion it writes `completed`, `finalFare`, `platformFeeOwed`, cash amounts, `pendingChargesApplied`, force reason and timestamp to ride directly.
+- It separately increments passenger `users.pendingCharges` for discrepancy (or clears it to zero in the alternate branch), increments driver `users.pendingPlatformFees` and mileage, and increments driver daily earnings/jobs metrics. These effects are not one transaction and no immutable per-ride fee record is created.
+- `isAlreadyApplied` is a client-side snapshot check of `pendingChargesApplied`; it only gates one passenger increment, not driver fee accrual, mileage, metrics, or ride completion. Repeated handler calls/listener snapshots can repeat those other effects.
+- `forceComplete` lets the driver proceed without passenger acknowledgement; the reason is client-provided state. It is not an authorized server dispute/override decision.
+- Rules from Section 144 deny these ride/user writes for ordinary driver clients, so this implementation is inconsistent with current branch rules as well as unsafe as a financial authority.
+
+### Design decision
+- Driver must submit a completion proposal (reported cash, wait, force reason) to server; server calculates/validates amount using persisted trip inputs and versioned pricing policy, authorizes any forced/disputed completion, and records a stable ride operation ID.
+- Passenger acknowledgement is a distinct state/command. Acknowledgement confirms reported discrepancy only; it must not create a Stripe payment or erase debt.
+- Transaction should finalize ride and create one fee receivable entry keyed to ride completion, then update only derived projections/outbox. Earnings metrics must be idempotent projections or outbox consumers, not independent increments from UI.
+- Zero/partial cash and dispute paths need explicit state machine and reconciliation; no clearing rider debt aggregate to zero without itemized debt settlement evidence.
+
+### Status
+- Section 145 is documentation only; no driver UI, rules, pricing, ride, metrics, or financial data changed.
+- No tests, emulator, typecheck, build, or CI were run.
+- Next: inspect existing server command patterns for authorization, idempotency and transaction write discipline; select a reusable implementation shape for a ride cash-finalization command.
