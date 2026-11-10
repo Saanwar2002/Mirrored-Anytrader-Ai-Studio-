@@ -33,6 +33,7 @@ describe("Stripe subscription lifecycle patch mapping", () => {
   });
 
   it.each([
+    ["landlord", { homeownerSubscriptionStatus: "canceled" }],
     ["membership", { isPro: false, isProInvoiceSubscriber: false }],
     ["gold_driver", { isGoldDriver: false }],
     ["exclusive_leads", { hasExclusiveAddon: false, isExclusiveActive: false }],
@@ -45,6 +46,7 @@ describe("Stripe subscription lifecycle patch mapping", () => {
 
   it.each(["past_due", "incomplete", "paused", "unknown"])("preserves entitlement fields for %s", (status) => {
     const fields = {
+      landlord: ["homeownerSubscriptionStatus"],
       membership: ["isPro", "isProInvoiceSubscriber"],
       gold_driver: ["isGoldDriver"],
       exclusive_leads: ["hasExclusiveAddon", "isExclusiveActive"],
