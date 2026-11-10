@@ -2697,3 +2697,36 @@ Stripe API reference: refund listing supports filtering by `payment_intent` and 
 Commits: lookup helper `b13a85ab595777716f4e8b4644219b61321025f1`; operation evidence `a2c9474723ebbf45af645173d89f7246955bac16`; checkout currency `62ef0430c9a56961b6a20230e594b0acff530e9b`; regression tests `621b44a7255c7f98d2ad771a37ba1318f1464dfd`.
 
 **Verification boundary:** source fetch-back and static review only; no tests, typecheck or build executed. No Stripe API request or Firestore operation was made. This primitive is not yet wired to an operator/admin workflow and does not automatically change operation status. A `not_found` result must remain unresolved until the operator verifies the payment/charge context and any pending external activity.
+
+## Section 114 — Refund-to-ledger reconciliation boundary and safe resolution contract (2026-11-10)
+
+Read-only source audit of the Section 113 lookup helper, the durable refund operation, its mocked operation tests and the financial ledger found:
+
+- The durable worker operation is stored at `instant_match_refunds/{instantMatchId}`. Its expected payment identity is `paymentIntentId`, with `amount`, lowercase `currency`, `idempotencyKey`, `reason`, `status`, and optional `stripeRefundId` / `stripeRefundStatus`.
+- The corresponding `instant_matches/{instantMatchId}` mirrors the refund status and Stripe refund ID. The Stripe refund is created with `instantMatchId` and `operationType=ANYTRADER_INSTANT_MATCH_EXPIRY` metadata.
+- The Section 113 helper is strictly read-only. It checks all refund pages for one PaymentIntent and exact operation metadata, then validates PaymentIntent, amount and currency. It intentionally does not read Firestore, persist a result, or resolve an operation.
+- `PaymentLedgerEngine.LedgerEntry` already permits type `REFUND`, but source inspection found no refund-entry writer in `paymentLedger.ts`. Instant Match refunds are therefore not currently represented by the general `payment_ledger` writer path. This is a source-level finding, not a query of production records.
+- The current helper's `matched` outcome means exactly one Stripe refund matches the local evidence; it does not mean the refund succeeded. The Stripe status must be interpreted separately. `not_found` is not proof that no refund was created if pagination was incomplete (the helper throws in that case), and it never authorizes a retry. `conflict` must remain a human-review outcome.
+
+### Safe resolution contract for the future operator workflow
+
+1. Read the match and refund operation documents; require the operation's PaymentIntent ID, integer amount and lowercase currency to be valid. Do not reconstruct missing historical evidence from client fields.
+2. Run the Section 113 complete, read-only Stripe scan using that exact local evidence.
+3. Persist an immutable reconciliation audit record containing the local operation ID, PaymentIntent ID, expected amount/currency, outcome, pages scanned, observed Stripe refund IDs/statuses, actor, timestamp and correlation/request ID. Never persist secrets or raw Stripe objects.
+4. Apply status handling only through a separately authorized, idempotent operator command:
+   - one exact Stripe refund with `succeeded`: eligible to mark the durable refund operation and match as succeeded, after transactionally re-reading both documents and verifying their identity/evidence has not changed;
+   - one exact refund with `pending` or another non-terminal status: keep the operation unresolved/processing and record the observed Stripe status;
+   - one exact refund with `failed` or `canceled`: manual review; do not automatically create a replacement;
+   - `not_found`: remain `reconciliation_required`; no automatic retry, because the lookup alone cannot prove that no external request remains in flight or that the original request did not have an ambiguous outcome;
+   - `conflict`, multiple matches, missing historical evidence, or changed local identity: manual review; never choose one record heuristically.
+5. Only after the refund has been authoritatively confirmed should a single deterministic refund ledger entry be written, transactionally deduplicated by the Stripe refund ID (and linked to the original PaymentIntent / Instant Match operation). Do not yet choose amount sign, payer/payee attribution, or fee-reversal treatment without reconciling the existing ledger's accounting convention and Stripe balance effects. The ledger interface's `REFUND` enum alone is not an accounting specification.
+6. The operator endpoint must use verified authentication plus the repository's server-side admin authorization helper (not a client-supplied role flag), validate path/body identifiers against the loaded documents, rate-limit access, and expose no refund create/update/cancel operation. Audit both successful and rejected resolution attempts.
+
+### Next implementation sequence
+
+- Inspect existing admin authorization and admin route/test conventions in detail; build a dedicated service module with injected Firestore/Stripe dependencies before adding an HTTP route.
+- Add unit tests for every status mapping, stale-document fencing, repeated operator submissions, identity mismatch, missing evidence, and ledger-entry deduplication.
+- Determine the canonical double-entry/refund accounting convention before writing any `REFUND` ledger record. Keep Instant Match operational status and accounting posting separate but linked.
+- Do not expose an operator endpoint or write to the ledger until those invariants and tests are in place.
+
+**Verification boundary:** this section records source inspection only. No source code, runtime data or financial state was changed; no Stripe API or Firebase production operation was performed; tests, typecheck, build and CI remain unexecuted. GitHub billing approval remains pending. Main remains untouched.
