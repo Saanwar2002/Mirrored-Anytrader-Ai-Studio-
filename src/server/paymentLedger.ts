@@ -50,31 +50,28 @@ export class PaymentLedgerEngine {
 
     const idempotencyRef = db.collection("payment_idempotency").doc(idempotencyKey);
     
-    // 1. Attempt transaction to claim the lock
+    // A unique generation fences stale executors after lease takeover.
+    const claimToken = crypto.randomUUID();
     const claimResult = await db.runTransaction(async (transaction: any) => {
       const doc = await transaction.get(idempotencyRef);
       if (doc.exists) {
         const data = doc.data();
+        if (data.operationName !== operationName) {
+          throw new ConflictError("Idempotency key is already bound to a different financial operation.");
+        }
         if (data.status === "completed") {
-          console.log(`[Idempotency Hit] Operation '${operationName}' already executed for key: ${idempotencyKey}`);
           return { shouldExecute: false, result: data.response as T, wasReplayed: true };
         }
         if (data.status === "in_progress") {
-          // Check if it's a stale processing claim (e.g., > 5 minutes old) to allow recovery after worker crash
           const startedAt = data.startedAt ? new Date(data.startedAt).getTime() : Date.now();
           const ageMs = Date.now() - startedAt;
           if (ageMs < 5 * 60 * 1000) {
             throw new ConflictError("A concurrent request with the same idempotency key is already processing.");
           }
-          console.warn(`[Idempotency Recovery] Overriding stale processing lock for key: ${idempotencyKey} (age: ${Math.round(ageMs/1000)}s)`);
         }
       }
-
-      // Mark in progress
       transaction.set(idempotencyRef, {
-        operationName,
-        status: "in_progress",
-        startedAt: new Date().toISOString(),
+        operationName, status: "in_progress", startedAt: new Date().toISOString(), claimToken,
       });
       return { shouldExecute: true };
     });
@@ -83,36 +80,31 @@ export class PaymentLedgerEngine {
       return { result: claimResult.result as T, wasReplayed: true };
     }
 
-    // 2. Execute side effect outside transaction
     try {
       const result = await executor();
-      
-      // 3. Record completed result
       const sanitizedResponse = result !== undefined ? JSON.parse(JSON.stringify(result)) : null;
-      if (typeof idempotencyRef.update === "function") {
-        await idempotencyRef.update({
-          status: "completed",
-          completedAt: new Date().toISOString(),
-          response: sanitizedResponse,
+      // Completion is fenced: an expired executor cannot complete a successor's claim.
+      await db.runTransaction(async (transaction: any) => {
+        const fresh = await transaction.get(idempotencyRef);
+        if (!fresh.exists || fresh.data()?.claimToken !== claimToken || fresh.data()?.operationName !== operationName) {
+          throw new ConflictError("Idempotency claim was superseded; executor result requires reconciliation.");
+        }
+        transaction.update(idempotencyRef, {
+          status: "completed", completedAt: new Date().toISOString(), response: sanitizedResponse,
         });
-      } else if (typeof idempotencyRef.set === "function") {
-        await idempotencyRef.set({
-          operationName,
-          status: "completed",
-          completedAt: new Date().toISOString(),
-          response: sanitizedResponse,
-        }, { merge: true });
-      }
-
+      });
       return { result, wasReplayed: false };
     } catch (err) {
-      // Release lock on failure
-      if (typeof idempotencyRef.delete === "function") {
-        await idempotencyRef.delete().catch((e: any) => console.error("Failed to release idempotency lock:", e));
-      } else if (typeof idempotencyRef.update === "function") {
-        await idempotencyRef.update({ status: "failed" }).catch(() => {});
-      } else if (typeof idempotencyRef.set === "function") {
-        await idempotencyRef.set({ status: "failed" }, { merge: true }).catch(() => {});
+      // Only the current generation may release/fail its own lock.
+      try {
+        await db.runTransaction(async (transaction: any) => {
+          const fresh = await transaction.get(idempotencyRef);
+          if (fresh.exists && fresh.data()?.claimToken === claimToken) {
+            transaction.delete(idempotencyRef);
+          }
+        });
+      } catch (cleanupErr: any) {
+        console.error("Failed to conditionally release idempotency claim:", cleanupErr);
       }
       throw err;
     }
