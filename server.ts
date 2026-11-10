@@ -2627,14 +2627,14 @@ async function startServer() {
 
       if (subscriptionType === "exclusive_leads") {
         subId = userData.exclusiveSubscriptionId;
-        const currentEnd = userData.exclusiveCurrentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        const currentEnd = userData.exclusiveCurrentPeriodEnd;
         fieldUpdates.exclusiveCancelAtPeriodEnd = true;
-        fieldUpdates.exclusiveCurrentPeriodEnd = currentEnd;
+        if (currentEnd) fieldUpdates.exclusiveCurrentPeriodEnd = currentEnd;
       } else if (subscriptionType === "video_pro") {
         subId = userData.videoProSubscriptionId;
-        const currentEnd = userData.videoProCurrentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        const currentEnd = userData.videoProCurrentPeriodEnd;
         fieldUpdates.videoProCancelAtPeriodEnd = true;
-        fieldUpdates.videoProCurrentPeriodEnd = currentEnd;
+        if (currentEnd) fieldUpdates.videoProCurrentPeriodEnd = currentEnd;
       } else if (subscriptionType === "gotham_saas") {
         subId = userData.gothamSubscriptionId;
         fieldUpdates.gothamCancelAtPeriodEnd = true;
@@ -2646,17 +2646,19 @@ async function startServer() {
         }
       } else if (subscriptionType === "driver_gold") {
         subId = userData.driverSubscriptionId || userData.subscriptionId;
-        const currentEnd = userData.driverCurrentPeriodEnd || userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        const currentEnd = userData.driverCurrentPeriodEnd || userData.currentPeriodEnd;
         fieldUpdates.driverCancelAtPeriodEnd = true;
         fieldUpdates.cancelAtPeriodEnd = true;
-        fieldUpdates.driverCurrentPeriodEnd = currentEnd;
-        fieldUpdates.currentPeriodEnd = currentEnd;
+        if (currentEnd) {
+          fieldUpdates.driverCurrentPeriodEnd = currentEnd;
+          fieldUpdates.currentPeriodEnd = currentEnd;
+        }
       } else {
         // Default membership tier
         subId = userData.subscriptionId;
-        const currentEnd = userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        const currentEnd = userData.currentPeriodEnd;
         fieldUpdates.cancelAtPeriodEnd = true;
-        fieldUpdates.currentPeriodEnd = currentEnd;
+        if (currentEnd) fieldUpdates.currentPeriodEnd = currentEnd;
       }
 
       if (!subId) {
@@ -2670,11 +2672,11 @@ async function startServer() {
       try {
         stripe = getStripe();
       } catch (e) {
-        // Only explicit mock subscriptions may use the development fallback.
-        if (subscriptionType === "gotham_saas" && !String(subId || "").startsWith("mock_")) {
-          return res.status(503).json({ error: "Stripe is unavailable; Gotham cancellation was not changed." });
+        // Only explicitly marked mock subscriptions in a non-production mock-enabled
+        // environment may bypass Stripe. Real subscriptions never receive false success.
+        if (!isExplicitMockSubscription) {
+          return res.status(503).json({ error: "Stripe is unavailable; cancellation was not changed." });
         }
-        // Fallback for mock/development environment
         await db.collection("users").doc(authUid).update(fieldUpdates);
         return res.json({
           success: true,
@@ -2685,7 +2687,7 @@ async function startServer() {
         });
       }
 
-      if (subId && !subId.startsWith("mock_")) {
+      if (!isExplicitMockSubscription) {
         // Call Stripe API to set cancel_at_period_end = true
         const updatedSub = await stripe.subscriptions.update(subId, {
           cancel_at_period_end: true
@@ -2782,11 +2784,11 @@ async function startServer() {
       try {
         stripe = getStripe();
       } catch (e) {
-        // Only explicit mock subscriptions may use the development fallback.
-        if (subscriptionType === "gotham_saas" && !String(subId || "").startsWith("mock_")) {
-          return res.status(503).json({ error: "Stripe is unavailable; Gotham reactivation was not changed." });
+        // Only explicitly marked mock subscriptions in a non-production mock-enabled
+        // environment may bypass Stripe. Real subscriptions never receive false success.
+        if (!isExplicitMockSubscription) {
+          return res.status(503).json({ error: "Stripe is unavailable; reactivation was not changed." });
         }
-        // Fallback for mock/development environment
         await db.collection("users").doc(authUid).update(fieldUpdates);
         return res.json({
           success: true,
@@ -2796,7 +2798,7 @@ async function startServer() {
         });
       }
 
-      if (subId && !subId.startsWith("mock_")) {
+      if (!isExplicitMockSubscription) {
         await stripe.subscriptions.update(subId, {
           cancel_at_period_end: false
         });
