@@ -2054,6 +2054,74 @@ async function startServer() {
             }
           }
         }
+      // Synchronize Gotham entitlements from Stripe's current subscription state.
+      // Invoice events are treated only as triggers: an invoice payment alone never grants access.
+      if (
+        event.type === "customer.subscription.updated" ||
+        event.type === "customer.subscription.deleted" ||
+        event.type === "invoice.payment_failed" ||
+        event.type === "invoice.payment_succeeded" ||
+        event.type === "invoice.paid"
+      ) {
+        const payload = event.data.object as any;
+        const isSubscriptionDeleted = event.type === "customer.subscription.deleted";
+        const subscriptionId = isSubscriptionDeleted || event.type.startsWith("customer.subscription.")
+          ? String(payload.id || "")
+          : String(payload.subscription || payload.parent?.subscription_details?.subscription || "");
+        if (subscriptionId) {
+          // A deleted event is terminal; for all other events retrieve the live Stripe
+          // object so delayed/out-of-order webhook deliveries cannot restore stale access.
+          const subscription = isSubscriptionDeleted
+            ? payload as Stripe.Subscription
+            : await stripeClient.subscriptions.retrieve(subscriptionId);
+          const users = await db.collection("users")
+            .where("gothamSubscriptionId", "==", subscriptionId)
+            .limit(2)
+            .get();
+          if (users.size > 1) {
+            throw new Error("Gotham subscription is linked to multiple users; manual reconciliation required.");
+          }
+          if (users.size === 1) {
+            const userDoc = users.docs[0];
+            const subscriptionStatus = String(subscription.status || (isSubscriptionDeleted ? "canceled" : "unknown"));
+            const isEntitled = subscriptionStatus === "active" || subscriptionStatus === "trialing";
+            const periodEnd = Number((subscription as any).current_period_end || 0);
+            const itemQuantity = Array.isArray((subscription as any).items?.data)
+              ? (subscription as any).items.data.reduce((sum: number, item: any) => {
+                  const quantity = Number(item.quantity);
+                  return sum + (Number.isSafeInteger(quantity) && quantity > 0 ? quantity : 0);
+                }, 0)
+              : 0;
+            const eventCreated = Number(event.created || 0);
+            await db.runTransaction(async (tx: any) => {
+              const latest = await tx.get(userDoc.ref);
+              if (!latest.exists) return;
+              const current = latest.data() || {};
+              // Do not let an older delivery overwrite a newer lifecycle decision.
+              if (Number(current.gothamSubscriptionLastEventCreated || 0) > eventCreated) return;
+              if (current.gothamSubscriptionId !== subscriptionId) return;
+              const patch: Record<string, any> = {
+                gothamSubscriptionStatus: subscriptionStatus,
+                isGothamSubscriber: isEntitled,
+                gothamCancelAtPeriodEnd: Boolean((subscription as any).cancel_at_period_end),
+                gothamSubscriptionLastEventCreated: eventCreated,
+                gothamSubscriptionLastEventId: event.id,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              };
+              if (periodEnd > 0) {
+                const endDate = new Date(periodEnd * 1000).toISOString();
+                patch.gothamCurrentPeriodEnd = endDate;
+                patch.currentPeriodEnd = endDate;
+              }
+              // Keep the checkout-authoritative allowance unless Stripe exposes a
+              // positive item quantity (e.g. a subsequently amended subscription).
+              if (itemQuantity > 0) patch.gothamDoorsCount = itemQuantity;
+              tx.update(userDoc.ref, patch);
+            });
+          }
+        }
+      }
+
       // Mark as completed idempotently
       await eventRef.update({ status: 'completed' });
       res.status(200).json({ received: true });
