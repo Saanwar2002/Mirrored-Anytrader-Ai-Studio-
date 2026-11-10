@@ -2860,3 +2860,31 @@ A second pass through `src/server/driverPayoutOrchestration.ts` and its unit tes
 **Safety decision:** do not create a ledger receipt from Checkout Session metadata, do not set `paymentStatus: "paid"` before the exact Stripe evidence and ride identity checks, and do not weaken the existing payout contract to compensate for the broken checkout/webhook binding. The current positive `RIDE_PAYMENT` fallback test remains a contract test only.
 
 **Verification boundary:** read-only source and test inspection on the integration branch. No code or tests were changed or executed in this step. No Stripe, Firestore production, customer payment or payout operation was performed. Main remains untouched; GitHub billing approval remains pending.
+
+
+## Section 121 — Taxi checkout webhook fulfillment branch audit (2026-11-10)
+
+A further exact-branch trace inspected the shared webhook's complete one-off payment fulfillment dispatch, the taxi route, and the existing generic checkout implementation. This narrows the failure point and confirms the gap is not solved by adding only the shared intent binding.
+
+### Additional verified findings
+
+- The shared webhook validates the payment_intents/{intentId} binding before product fulfillment. It then dispatches subscription sessions through subscription-specific branches and one-off payment sessions through explicit metadata branches.
+- In the inspected one-off payment dispatch, handlers exist for ad_wallet_topup, mediation_stake, and boost (with Instant Match creation nested under boost). There is no taxi_trip handler and no ride-payment fulfillment branch. Thus, even if a taxi session were amended to pass the generic intent gate, its metadata would still not cause ride paid-state mutation, ride fulfillment-marker creation, or a RIDE_PAYMENT receipt.
+- The generic POST /api/create-checkout-session route demonstrates the repository's intended binding sequence: create a server-side payment_intents record in pending state before Stripe session creation; send metadata.intentId and client_reference_id; then persist the returned Checkout Session ID, currency, PaymentIntent ID and session_created status. The taxi command currently bypasses this sequence.
+- The taxi route refuses to continue without Stripe in production or when mock payments are not explicitly enabled. In permitted development mock mode, it can still call the command with a null Stripe client; the command returns a local success URL without creating a Stripe Session or an authorization record. This is a development-only path, not proof of a paid ride, and must never be treated as payment evidence.
+- The current generic webhook marks an unpaid checkout.session.completed event as completed with skippedReason: payment_not_paid and returns HTTP 200. Any future taxi flow must explicitly define its supported asynchronous payment methods/events rather than assume that this branch retries an unpaid completed session after payment settles. The existing taxi session currently restricts payment methods to card, but that does not remove the need for explicit event semantics and tests.
+
+### Revised implementation boundary
+
+The repair must be a coordinated change across the taxi command, shared webhook dispatch, ride/payment persistence and tests. The safe shape is:
+
+1. Add a server-generated taxi intent before creating the Checkout Session, with immutable passenger/ride/driver/fare/tip/GBP/Connect-destination facts and exact integer-pence amount. Use a cryptographically strong or collision-resistant ID consistent with repository conventions; do not use client input as the document identity.
+2. Bind the Stripe Session using metadata.intentId and client_reference_id, and persist its returned Session and PaymentIntent IDs. If the route cannot durably finish the binding write, do not report a usable checkout URL as fully initialized; retain a recoverable reconciliation state.
+3. Add a dedicated taxi_trip webhook fulfillment branch after the shared binding gate. It must verify the intent's taxi type and immutable facts against the paid Stripe session and a fresh authoritative ride/driver read. Verify exact amount, currency, PaymentIntent ID and Connect destination. Do not trust session metadata as the authority for those values.
+4. In a transaction fenced by the existing webhook claim, atomically apply the ride payment evidence, a session/event fulfillment marker, and a deterministic PaymentIntent-keyed RIDE_PAYMENT event. Re-read all relevant documents in the transaction and reject conflicting prior bindings. Preserve the ride's operational lifecycle status.
+5. Keep the event retryable/reconcilable on a missing or incomplete pre-checkout binding; do not mark an unfulfilled taxi event permanently complete. Define explicit behavior for unpaid and asynchronous payment events.
+6. Add command, webhook and payout-eligibility tests before enabling the route. Include duplicate and concurrent webhook delivery, Stripe session creation succeeding while Firestore binding persistence fails, webhook arrival before binding persistence, and changed ride/driver/Connect account between checkout and webhook.
+
+**Decision:** do not make a partial edit to tripPaymentAuthorization.ts alone. That would create a valid generic intent binding but still leave the paid taxi session without ride fulfillment. Implement and validate the command + webhook dispatch + transactional fulfillment as one reviewed change set. Until then, the payout fallback remains fail-closed and the taxi checkout path remains an identified correctness blocker; this audit itself does not disable or change the route.
+
+**Verification boundary:** exact integration-branch source fetch and static control-flow inspection only. No code or tests were changed or executed. No Stripe API, Firestore production data, customer payment or payout was accessed. Main remains untouched; GitHub billing approval remains pending.
