@@ -2086,12 +2086,6 @@ async function startServer() {
             const subscriptionStatus = String(subscription.status || (isSubscriptionDeleted ? "canceled" : "unknown"));
             const isEntitled = subscriptionStatus === "active" || subscriptionStatus === "trialing";
             const periodEnd = Number((subscription as any).current_period_end || 0);
-            const itemQuantity = Array.isArray((subscription as any).items?.data)
-              ? (subscription as any).items.data.reduce((sum: number, item: any) => {
-                  const quantity = Number(item.quantity);
-                  return sum + (Number.isSafeInteger(quantity) && quantity > 0 ? quantity : 0);
-                }, 0)
-              : 0;
             const eventCreated = Number(event.created || 0);
             await db.runTransaction(async (tx: any) => {
               const latest = await tx.get(userDoc.ref);
@@ -2113,9 +2107,8 @@ async function startServer() {
                 patch.gothamCurrentPeriodEnd = endDate;
                 patch.currentPeriodEnd = endDate;
               }
-              // Keep the checkout-authoritative allowance unless Stripe exposes a
-              // positive item quantity (e.g. a subsequently amended subscription).
-              if (itemQuantity > 0) patch.gothamDoorsCount = itemQuantity;
+              // Gotham is priced as one aggregate subscription line item; Stripe's
+              // line-item quantity is always 1 and must never replace purchased door count.
               tx.update(userDoc.ref, patch);
             });
           }
