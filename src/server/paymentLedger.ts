@@ -575,6 +575,10 @@ export class PaymentLedgerEngine {
             quoteId,
             milestoneId: milestoneId || "m0",
             traderId,
+            // Durable lookup identity for read-only Stripe reconciliation after an ambiguous response.
+            releaseOperationId: idempotencyKey,
+            stripeIdempotencyKey,
+            operationType: "ANYTRADER_ESCROW_RELEASE",
           },
         },
         {
