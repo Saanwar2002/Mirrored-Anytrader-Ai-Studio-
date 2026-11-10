@@ -2453,3 +2453,14 @@ Implemented on integration (not main):
 Commits: implementation `3661242ca93c5e165e12b2b5a6c3e982ee44b9b7`; tests `df82e492466055238b6902b14f15df7445ec198e`. Both files were fetched back after commit and the expected edits confirmed. GitHub workflow-run lookup returned no runs for these commits; tests have **not** been executed in this environment. Treat this as code committed, not CI-validated.
 
 Remaining correctness work: ambiguous transfer recovery is still not fully solved. If Stripe created a transfer but the client lost the response, the deterministic idempotency key should be reconciled before retry; claim fencing prevents stale Firestore writes but cannot by itself prove external transfer outcome. Add explicit test for Stripe success followed by claim loss during finalization and ensure the recovery state is observable. Do not deploy or invoke live Stripe.
+
+
+## Section 94 — Observable payout transfer ambiguity (2026-11-10)
+
+Follow-on remediation for the Section 92/93 lease-loss ambiguity:
+
+- The payout result's `PayoutDetail.status` now includes `reconciliation_required`. When Stripe's transfer call returned an ID but the post-transfer Firestore finalization detects `LEASE_TOKEN_LOST`, the catch does **not** write into the successor's ride state. Instead, the returned detail explicitly carries the Stripe `transferId`, amount/destination context, and a reconciliation-before-retry explanation. This avoids disguising a confirmed external transfer as an ordinary retryable failure and gives an operator a concrete transfer identity to investigate.
+- Added unit regression case 20: Stripe returns `tr_ambiguous_456`, the lease is replaced during the call, and assertions verify `reconciliation_required`, transfer ID visibility, `payoutTransferred:false`, and preservation of successor `payoutClaimToken`/`processing` state (no stale `stripeTransferId` write).
+- Updated files were fetched back from integration and confirmed to contain the new status and test.
+
+Commits: source `4874f78ce86d41f90b89c7f8a2d9437e344d2248`; test `b1b1d920a625b835a76e9639d431b20dc642e6e5`. **Tests remain unexecuted** (no local test runtime or CI run established here). This is observability and fencing—not a full automated Stripe transfer recovery system. A reconciler must still inspect the identified transfer and reconcile ride/ledger state under a fresh authorized claim before any retry. No live Stripe or Firebase mutation was performed.
