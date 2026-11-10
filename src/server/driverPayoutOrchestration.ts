@@ -483,6 +483,19 @@ export async function executeDriverPayoutOrchestrationCommand(
 
       // 8. Dry Run Evaluation
       if (dryRun) {
+        // Release only our own lease; never clear a competing worker's claim.
+        await db.runTransaction(async (t: any) => {
+          const freshSnap = await t.get(rideDoc.ref);
+          const freshData = freshSnap.data() || {};
+          if (freshData.payoutClaimToken !== claimToken) {
+            throw new Error("LEASE_TOKEN_LOST_DURING_DRY_RUN");
+          }
+          t.update(rideDoc.ref, {
+            payoutStatus: "pending",
+            payoutLockedAt: admin.firestore.FieldValue.delete(),
+            payoutClaimToken: admin.firestore.FieldValue.delete(),
+          });
+        });
         logger.log(`[Payout Orchestrator] [Dry Run] Would disburse £${driverEarningsGbp.toFixed(2)} to driver ${assignedDriverId} for ride ${rideId}.`);
         processedCount++;
         totalDisbursed += driverEarningsGbp;
@@ -587,14 +600,35 @@ export async function executeDriverPayoutOrchestrationCommand(
           transferId: stripeTransferId,
         });
       } catch (transferErr: any) {
-        logger.error(`[Payout Orchestrator] Stripe Transfer failed for ride ${rideId}:`, transferErr.message);
-        await rideDoc.ref.update({
-          payoutTransferred: false, // Explicitly false!
-          payoutStatus: "failed",
-          payoutLastError: transferErr.message,
-          payoutFailedAt: admin.firestore.FieldValue.serverTimestamp(),
-          payoutRetryCount: admin.firestore.FieldValue.increment(1),
+        logger.error(`[Payout Orchestrator] Stripe Transfer/finalization failed for ride ${rideId}:`, transferErr.message);
+        // Failure state is also lease-owned. A stale worker must not overwrite a
+        // successor's state; a lost lease after Stripe success remains reconciliation-required.
+        let failureStateWritten = false;
+        await db.runTransaction(async (t: any) => {
+          const freshSnap = await t.get(rideDoc.ref);
+          const freshData = freshSnap.data() || {};
+          if (freshData.payoutClaimToken !== claimToken) {
+            logger.warn(`[Payout Orchestrator] Claim lost for ride ${rideId}; refusing stale failure-state write.`);
+            return;
+          }
+          t.update(rideDoc.ref, {
+            payoutTransferred: false,
+            payoutStatus: transferErr.message === "LEASE_TOKEN_LOST" ? "reconciliation_required" : "failed",
+            payoutLastError: transferErr.message,
+            payoutFailedAt: admin.firestore.FieldValue.serverTimestamp(),
+            payoutRetryCount: admin.firestore.FieldValue.increment(1),
+          });
+          failureStateWritten = true;
         });
+        if (!failureStateWritten) {
+          details.push({
+            rideId, driverId: assignedDriverId, stripeAccountId,
+            amount: driverEarningsGbp, status: "unverified",
+            reason: "Claim lost; payout state left untouched pending reconciliation",
+          });
+          failedCount++;
+          continue;
+        }
         failedCount++;
         details.push({
           rideId,
