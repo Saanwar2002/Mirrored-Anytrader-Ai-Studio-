@@ -2383,3 +2383,15 @@ Next: complete bounded diff review for payout orchestration, its tests, and Stri
 - Integration is now **305 commits ahead / 0 behind** main after the plan-only commits. Main remains untouched; no AI Studio, Firebase live rules, production records, or money movement was changed.
 
 Next: inspect `PaymentLedgerEngine.executeIdempotentOperation` binding semantics and escrow transfer Stripe idempotency/reconciliation; identify refund source and all webhook finalization writes; line-review ZIP payout/test deltas; finish whole-archive path manifest. Tests and AI Studio/Firebase pre-change gate remain required before implementation.
+
+
+## Section 89 — Idempotency binding audit (FIN-04) (2026-11-10)
+
+Read-only inspection of `PaymentLedgerEngine.executeIdempotentOperation` confirms:
+
+- The `payment_idempotency/{idempotencyKey}` record stores `operationName`, status, timestamps and serialized response, but **does not bind the key to a canonical owner/resource/payload fingerprint**.
+- If a record is already `completed`, the method returns its stored response as a replay without validating that the new caller's operation name or inputs match the original request. `operationName` is logged/stored but not compared.
+- Stale `in_progress` claims (older than five minutes) are replaced, and executor side effects run outside the claim transaction. Completion is an unconditional document update; this creates a second stale-worker/fencing concern if a prior executor is still alive after takeover.
+- Failure deletes/releases the idempotency record, which can be unsafe after an ambiguous external side effect unless the operation itself is independently reconciled/idempotent.
+
+**FIN-04 confirmed at source level; FIN-01 pattern also applies here.** Proposed safe remediation: persist a canonical binding (operation, tenant/owner, resource IDs, normalized payload hash), reject key reuse on any binding mismatch, and claim with a unique generation/token; finalize only transactionally if that generation remains current. Define recovery behavior for ambiguous side effects before changing the current delete-on-failure behavior. Add replay-same-input, key-different-resource, key-different-payload, operation mismatch, concurrent claimant, stale takeover/old worker completion, and ambiguous external outcome tests. No code/test changes made in this audit.
