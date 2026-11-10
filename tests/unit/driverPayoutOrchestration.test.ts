@@ -15,8 +15,10 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
   let createdTransfers: any[];
   let transactionMutex: Promise<any>;
 
-  const applyFieldValue = (v: any) => {
+  const applyFieldValue = (v: any, fieldName?: string) => {
     if (v && typeof v === "object") {
+      // Resolve the lease timestamp in this Firestore mock, rather than leaving a FieldValue sentinel.
+      if (fieldName === "payoutLockedAt") return Date.now();
       if ("operand" in v) return v.operand;
       // Firebase Admin sentinel method names identify delete vs server timestamp.
       // FieldValue.isEqual is not reliable across independently-created sentinel instances.
@@ -64,7 +66,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
                         update: async (fields: any) => {
                           if (!mockStore[path]) mockStore[path] = {};
                           for (const [k, v] of Object.entries(fields)) {
-                            const resolved = applyFieldValue(v);
+                            const resolved = applyFieldValue(v, k);
                             if (resolved === undefined) {
                               delete mockStore[path][k];
                             } else if (v && typeof v === "object" && "operand" in v) {
@@ -99,7 +101,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
             update: async (fields: any) => {
               if (!mockStore[path]) mockStore[path] = {};
               for (const [k, v] of Object.entries(fields)) {
-                const resolved = applyFieldValue(v);
+                const resolved = applyFieldValue(v, k);
                 if (resolved === undefined) {
                   delete mockStore[path][k];
                 } else if (v && typeof v === "object" && "operand" in v) {
@@ -135,7 +137,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
               const path = Object.keys(mockStore).find((p) => p.endsWith(`/${ref.id}`));
               if (path) {
                 for (const [k, v] of Object.entries(fields)) {
-                  const resolved = applyFieldValue(v);
+                  const resolved = applyFieldValue(v, k);
                   if (resolved === undefined) {
                     delete mockStore[path][k];
                   } else if (v && typeof v === "object" && "operand" in v) {
