@@ -2318,3 +2318,14 @@ The test is authored in the integration branch. This review did not execute the 
 - Preserve the existing AI Studio PL-01–PL-15 protections and the integration's stricter invitation and property-transfer controls.
 - Add the missing inviter/admin list assertions and mixed-case legacy-invitation behavior test to the emulator suite, then run the complete emulator/security gate when CI runner provisioning is available.
 - Continue the broader full ZIP path/hash manifest and AI Studio/Firebase pre-change verification. No application code, Firebase live rules, production data, main branch, or AI Studio workspace was changed during this read-only review.
+
+
+## Section 85 — Branch and overlapping PR recheck after security checkpoint (2026-11-10)
+
+- Section 84 was committed to the existing integration branch as commit `fffb187900376a11945b1817a1371e1fedb5295c`; the file was refetched and the complete section was verified present.
+- Recomparison after that commit reports integration **302 commits ahead / 0 behind** `main`. The earlier 301 count in Section 84 was the immediately pre-checkpoint comparison; this 302 count is the current post-commit observation.
+- PR #5 remains open, draft and unmerged. Its source branch `fix/pr2-mediation-stake-idempotency` is now **102 commits ahead / 276 behind** integration (diverged; 24 changed paths). Do not merge, rebase or cherry-pick wholesale.
+- PR #2 remains open, draft and unmerged. Its source branch `fix/anytrader-payment-metadata-authority` is **20 commits ahead / 302 behind** integration (diverged; 4 changed paths). Do not merge, rebase or cherry-pick wholesale.
+- The two PRs overlap on `server.ts` and `src/server/pricingCatalog.ts` (and PR #5's larger payment/test surface); treat them as separate stale candidates and inspect exact patches against current integration before any selective recovery.
+- `main` remains unchanged. No application-code, production Firebase, live data or AI Studio changes were made in this checkpoint.
+- Next safe work remains: finish the full ZIP-to-integration differing-path manifest and AI Studio/Firebase pre-change verification; then address the small, explicit invitation emulator test gaps from Section 84. Do not start PR integration until the per-path decision matrix and tests are reviewed.
