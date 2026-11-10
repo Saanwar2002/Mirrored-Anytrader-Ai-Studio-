@@ -2730,3 +2730,19 @@ Read-only source audit of the Section 113 lookup helper, the durable refund oper
 - Do not expose an operator endpoint or write to the ledger until those invariants and tests are in place.
 
 **Verification boundary:** this section records source inspection only. No source code, runtime data or financial state was changed; no Stripe API or Firebase production operation was performed; tests, typecheck, build and CI remain unexecuted. GitHub billing approval remains pending. Main remains untouched.
+
+
+## Section 115 — Admin authorization and ledger accounting convention audit (2026-11-10)
+
+Follow-up inspection of `server.ts`, `src/server/authorization.ts`, `src/server/paymentLedger.ts`, and the existing ledger unit tests refined the operator-workflow design:
+
+- `server.ts` exports `checkIsAdmin(user)`, which accepts only verified Firebase custom claims (`admin === true` / `isAdmin === true`) or a server-side `admins/{uid}` document. It does not trust the user's profile `role`.
+- The `requireAdmin` middleware performs that check, but also attempts to migrate verified admins by writing Firebase custom claims. For a reconciliation endpoint whose purpose is narrowly controlled audit/resolution, that incidental auth-side write is unnecessary. Prefer `requireAuth` followed by an explicit `await checkIsAdmin(req.user)` guard in the route (or a new non-mutating admin middleware), and test both claim and Firestore-admin paths plus denial.
+- `PaymentLedgerEngine.LedgerEntry` stores positive minor-unit `amount`, `platformFee`, and `netPayout`; escrow funding calculates a 12% fee and 88% net payout. The type union includes `REFUND`, but there is no refund writer in the inspected ledger module and no documented sign/reversal convention in its tests.
+- The existing ledger unit tests cover positive funding, fee arithmetic, idempotency and stale-claim fencing, but do not establish refund payer/payee attribution, fee reversal, balance-account mapping or a canonical refund sign convention. Therefore no Instant Match refund ledger posting should be implemented yet.
+
+### Revised next gate
+
+Before a refund writer is added, inspect all ledger consumers/reporting aggregations and Stripe balance transaction handling to determine whether the ledger is an event journal of positive amounts or a signed balance ledger, then document the accounting model. Preserve gross refund amount, any platform-fee reversal, original payer/payee, original PaymentIntent, Stripe refund ID and the original operation ID as distinct fields. Do not infer a commission reversal merely because a customer refund succeeded.
+
+**Verification boundary:** source inspection only; no source code, auth claims, Firestore or financial records were modified. No tests, typecheck, build or CI were executed. GitHub billing approval remains pending; main remains untouched.
