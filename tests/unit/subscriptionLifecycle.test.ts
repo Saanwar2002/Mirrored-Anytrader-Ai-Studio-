@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSubscriptionLifecyclePatch, resolveSubscriptionProductMatch } from "../../src/server/subscriptionLifecycle.ts";
+import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, resolveSubscriptionProductMatch } from "../../src/server/subscriptionLifecycle.ts";
 
 const active = { id: "sub_test", status: "active", cancel_at_period_end: false, current_period_end: 1_800_000_000 };
 
@@ -154,4 +154,26 @@ describe("Stripe subscription product resolution", () => {
     expect(result).toBeNull();
   });
 
+});
+
+describe("Stripe invoice subscription ID extraction", () => {
+  it("accepts the legacy string subscription field", () => {
+    expect(extractInvoiceSubscriptionId({ subscription: "sub_legacy" })).toBe("sub_legacy");
+  });
+
+  it("accepts an expanded subscription object", () => {
+    expect(extractInvoiceSubscriptionId({ subscription: { id: "sub_expanded" } })).toBe("sub_expanded");
+  });
+
+  it("accepts the current parent subscription-details field", () => {
+    expect(extractInvoiceSubscriptionId({ parent: { subscription_details: { subscription: "sub_parent" } } })).toBe("sub_parent");
+  });
+
+  it("accepts an expanded parent subscription object", () => {
+    expect(extractInvoiceSubscriptionId({ parent: { subscription_details: { subscription: { id: "sub_parent_expanded" } } } })).toBe("sub_parent_expanded");
+  });
+
+  it("returns an empty string for invoices without a subscription", () => {
+    expect(extractInvoiceSubscriptionId({})).toBe("");
+  });
 });
