@@ -2085,3 +2085,16 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Added focused tests for mock ID recognition, explicit opt-in, production rejection, missing/false opt-in, and real Stripe IDs.
 - Refetched `server.ts` after the second route edit: both routes use the shared guard (2 occurrences), there are no remaining inline `startsWith("mock_")` gates, and both reject invalid mock IDs before Stripe interaction.
 - Tests remain authored but unexecuted because Actions runner provisioning is still failing. Do not treat the guard or the wider branch as CI-validated.
+
+
+## Section 69 — Product-scoped cancellation and initial subscription sync (2026-11-10)
+
+- Added `getSubscriptionIdForProduct` so cancellation/reactivation select the dedicated ID for each product. Legacy generic IDs are accepted for Gold Driver/Gotham only when the profile's `subscriptionType` explicitly matches; this prevents accidentally sending a membership ID to Stripe for a product cancellation.
+- Gold Driver and Gotham cancellation now update only `driverCancelAtPeriodEnd` / `driverCurrentPeriodEnd` and `gothamCancelAtPeriodEnd` / `gothamCurrentPeriodEnd`. They no longer overwrite the generic membership cancellation flag or period end.
+- Gold Driver and Gotham UI now read their product-specific cancellation flags. Gold Driver date display no longer falls back to the generic membership period end.
+- Cancellation response payloads continue to return the product-specific period end for all supported products.
+- Added product-ID selection tests for dedicated IDs, legacy discriminator fallback, and preventing a membership ID from being used for another product.
+- Added `customer.subscription.created` to the webhook lifecycle event set (alongside updated/deleted and invoice paid/failed events) so a linked subscription can initialise product-specific status and period-end fields from Stripe's live state. Event selection is covered by focused positive/negative tests.
+- Latest observed branch head: `bed8f668d0a717eec948782394f48ba9f828e4ee`; comparison: 224 ahead / 0 behind `main`.
+- Latest push workflow run `42806129244` (run 652) failed with runner ID 0, blank runner name and no steps. CI remains blocked by runner provisioning/billing; none of the newly authored tests have run.
+- `main` remains unchanged. No deployment, production data change, or AI Studio synchronisation.
