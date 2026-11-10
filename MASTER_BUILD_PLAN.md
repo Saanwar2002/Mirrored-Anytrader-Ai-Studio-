@@ -159,15 +159,16 @@ For AnyTrader roles/portals only (homeowner, tradesperson, business/consultancy,
 
 ## 10. Immediate next task
 
-**Active reconciliation task (2026-11-10):** continue the financial/security reconciliation on `integration/pr-consolidation-20261109`. The previously recorded invitation-predicate task is historical and is superseded by the current reconciliation sequence; do not infer that it remains the active blocker.
+**Active reconciliation task (2026-11-10):** continue validation and close the Gotham subscription/property quota remediation on `integration/pr-consolidation-20261109`.
 
-1. Complete authoritative Stripe Gotham subscription lifecycle handling (renewal, payment failure, cancellation at period end, expiry/deletion and reactivation).
-2. Reconcile existing Gotham-owned property records into a server-maintained door-usage counter.
-3. Replace all direct client property-creation paths with one authenticated, validated, idempotent, transactionally quota-reserving server command. Preserve ordinary non-Gotham homeowner workflows.
-4. Deny direct client creation in `/properties` while preserving authorized read/update/delete/transfer behavior.
-5. Add boundary, forged-field, retry/idempotency, concurrency and Firestore emulator bypass tests.
-6. Run and inspect the complete CI gate; keep PR #5 draft/unmerged until all reconciliation and parity gates are satisfied.
+1. Complete review of Stripe lifecycle handling, especially live status/period-end semantics and failure behavior.
+2. Finish quota boundary tests: ordinary homeowner unaffected; active Gotham user can create exactly to purchased allowance; inactive/expired denied; cancellation-at-period-end retains entitlement only through the paid-through period.
+3. Add server-command tests for forged fields/ownership, idempotency replay, deletion counter decrement, legacy backfill, and concurrent create/delete at the quota boundary.
+4. Run emulator security rules, full unit/penetration suite, TypeScript typecheck, production build, release audit, and inspect CI results.
+5. Review all diffs and verify no property creation/deletion bypasses remain. Keep PR #5 draft/unmerged until reconciliation and parity gates pass.
 
-**Current call-graph evidence and implementation requirements:** see [Gotham Property Door-Quota Reconciliation Audit](GOTHAM_PROPERTY_QUOTA_AUDIT.md). Three direct creation paths were identified: `PropertyManager.tsx`, `Portfolio.tsx`, and `HomeHealthWidget.tsx`. The Gotham portal currently handles checkout, not direct property creation. Do not apply Gotham limits to ordinary homeowners.
+**Implementation already committed on integration:** Stripe Gotham lifecycle refresh and cancellation/reactivation hardening; authenticated property create/delete commands; strict property payload allowlist; per-user usage counter with first-use legacy backfill and transactional create/delete; all three property-creation UI call sites migrated; both existing UI delete call sites migrated; direct client create/delete denied in Firestore rules; direct-create/delete emulator bypass tests added. See [Gotham Property Door-Quota Reconciliation Audit](GOTHAM_PROPERTY_QUOTA_AUDIT.md) and the November 10 section in `DEVELOPMENT.md`.
+
+**Verification remains outstanding:** no new emulator/unit/typecheck/build/release-audit/CI result has been observed for these commits. Live AI Studio/Firebase parity and deployment configuration remain unverified. Do not merge or deploy.
 
 **Safeguards:** keep `main`, AI Studio, and production untouched; do not modify AnyRoller/taxi behavior; do not weaken security tests/rules; do not merge or deploy without complete green CI and owner approval.
