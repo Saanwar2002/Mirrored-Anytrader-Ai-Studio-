@@ -3608,3 +3608,25 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 146 is documentation only; no command route, pricing logic, UI, rules, or financial records changed.
 - No tests, emulator, typecheck, build, or CI were run.
 - Next: inspect canonical pricing resolver and ride config types to establish which fare inputs can be safely captured/validated server-side without importing driver UI state.
+
+
+## Section 147 — Cash pricing inputs are not currently a single server-authoritative snapshot
+
+### Integration-branch evidence
+- DriverTerminal local `fareConfig` defaults: base £3.50, distance £1.30/mile, time £0.15/min, wait £0.25/min, minimum £5, commission 12%; values are hydrated from `platform_config/rides`.
+- Commission is additionally overridden by Remote Config `platformCommissionRate` when present; fixed trip fee and surge options are separately hydrated. UI uses `Number(value) || default`, so explicit zero values are replaced by defaults.
+- Cash handler computes vehicle subtotal as `max(minFare, baseFare + distance*distanceRate + duration*timeRate)`, then adds wait and tip; however, it prefers `activeRide.fareEstimate` when present. It computes platform fee on base fare (excluding tip) plus fixed trip fee, but no canonical server pricing snapshot/version is persisted by this handler.
+- Passenger and driver UI can have different cached config snapshots; Remote Config and Firestore can disagree. Existing earlier Section 137 already records driver simulation omits time and the broader formula divergence.
+- `resolveAuthoritativeLineItem` in `src/server/pricingCatalog.ts` is designed for product/subscription/milestone checkout; it is not a taxi-fare resolver and should not be reused as one without a separate ride-specific contract.
+
+### Consequence / prerequisites
+1. Before server cash finalization, define a ride pricing policy/schema with explicit units (GBP decimal inputs vs integer pence output), policy version, fare components, commission basis, fixed fee and surge handling.
+2. At ride creation/acceptance, persist authoritative pricing snapshot or enough immutable inputs to recompute (distance/time source, stops, wait, tier/commission eligibility, tip and applied surge). Define whether the quoted fare is guaranteed or final meter fare.
+3. Server must reject non-finite/negative values and avoid truthy fallbacks for valid zero policy values. Calculate in integer pence with documented rounding at each component.
+4. Reconcile passenger quote, driver meter, completion, card Checkout (12% hardcoded path), payout (88% base + 100% tip), and fee accrual against one explicit versioned contract before replacing cash handler.
+5. Treat remote/admin pricing changes as prospective policy versions; never retroactively recalculate already-finalized rides without a ledger adjustment.
+
+### Status
+- Section 147 is documentation only; no fare config, Remote Config, pricing, ride, or ledger data changed.
+- No tests, emulator, typecheck, build, or CI were run.
+- Next: trace ride creation and checkout/payout calculations to specify exact persisted pricing fields and rounding, then draft one canonical TaxiPricingPolicy schema with fixtures.
