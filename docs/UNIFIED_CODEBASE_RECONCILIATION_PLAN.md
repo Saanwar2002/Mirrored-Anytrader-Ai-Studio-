@@ -2770,3 +2770,22 @@ A source-level audit of the current integration-branch versions of `src/server/p
 6. Keep the proposed Instant Match refund posting blocked until the payment-verification fallback is made refund-safe and the Connect refund/fee accounting treatment is evidenced. Do not make a ledger schema change based solely on the current enum or positive-amount examples.
 
 **Verification boundary:** fetched and reviewed integration-branch source only. No code, tests, typecheck, build, CI, Stripe API, Firestore or production financial records were changed or queried. The source audit does not establish historical ledger consistency or real Stripe balance effects. Main remains untouched; GitHub billing approval remains pending.
+
+
+## Section 117 — Distinguish Instant Match platform-fee refunds from Connect escrow refunds (2026-11-10)
+
+A focused integration-branch trace through `src/server/pricingCatalog.ts`, the real checkout-session construction and webhook fulfillment in `server.ts`, and `instantMatchWorker.ts` resolves an important accounting distinction:
+
+- The Instant Match product (`price_instant_match`, currently catalogued at £2.99 with dynamic admin override support) is returned by the pricing catalog as a one-off `mode: "payment"` item with `isClientMoney: false`. Its result does not include `paymentIntentData`.
+- The real checkout route only adds `session_options.payment_intent_data` when the authoritative catalog result supplies it. Therefore this Instant Match checkout path does not set a Connect `transfer_data.destination` or `application_fee_amount`; it is a platform-owned charge for the Instant Match dispatch service, not the homeowner-to-tradesperson milestone escrow charge.
+- The successful checkout webhook creates the Instant Match record and associates its `stripePaymentIntentId` with the checkout PaymentIntent. The expiry worker later calls `stripe.refunds.create({ payment_intent, reason, metadata })` with its deterministic idempotency key. It does not set `reverse_transfer` or `refund_application_fee`; those Connect-specific options are not applicable to this observed standalone platform charge path.
+- By contrast, milestone escrow checkout is explicitly configured in `pricingCatalog.ts` with `application_fee_amount` and `transfer_data.destination`. That is a separate Connect destination-charge flow. Its refund/transfer reversal treatment must be designed independently and cannot be copied from Instant Match.
+
+### Accounting decision for Instant Match
+
+1. An exact successful Instant Match refund should be represented as reversal of the platform's original £2.99 (or the verified dynamic charge amount), linked to the original PaymentIntent and operation. Do not allocate a trader payout or reverse a Connect application fee for this flow: the inspected checkout result creates neither.
+2. Do not assume the Stripe processing fee is refunded or choose the platform's net cash impact from gross amount alone. Confirm the actual refund's Stripe balance transaction and fee details before modelling net accounting.
+3. Keep the separate Connect milestone refund path out of scope for the Instant Match writer. It requires its own source/API-contract review of transfer reversal and application-fee refund behavior, with evidence for partial and full refunds.
+4. For Instant Match reconciliation, persist the Stripe refund ID and status first; only an authoritative `succeeded` refund can become eligible for a deterministic refund event. The earlier Section 116 payout-fallback safeguard still applies: the refund event must never be treated as a positive collected-payment record.
+
+**Verification boundary:** source fetch-back and static trace only. No checkout, Stripe API, Stripe balance transaction, Firestore or production operation was performed. No code or tests were changed or executed. The £2.99 catalog default is not asserted as the actual amount of every historical refund; the durable operation's verified amount/currency remain authoritative. Main remains untouched; GitHub billing approval remains pending.
