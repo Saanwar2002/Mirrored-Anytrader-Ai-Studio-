@@ -1729,9 +1729,13 @@ export default function Profile() {
     try {
       if (showCheckoutForTier.price > 0) {
         // Redirect to Stripe checkout for paid plans
+        const token = await user.getIdToken();
+        if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
         const response = await fetch("/api/create-checkout-session", {
           method: "POST",
-          headers: { "Content-Type": "application/json" ,
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
             "Idempotency-Key": crypto.randomUUID()
           },
           body: JSON.stringify({
@@ -1809,15 +1813,33 @@ export default function Profile() {
   const handleCancelSubscription = async () => {
     if (!user || !confirm("Are you sure you want to cancel your subscription? You will lose access to premium features at the end of your billing cycle.")) return;
     
-    const cancelField = (profile.role as string) === "homeowner" || (profile.role as string) === "customer" ? "homeownerCancelAtPeriodEnd" : "cancelAtPeriodEnd";
+    const isHomeowner = (profile.role as string) === "homeowner" || (profile.role as string) === "customer";
+    const subscriptionType = isHomeowner
+      ? "landlord"
+      : profile.subscriptionType === "driver_gold" ? "driver_gold" : "tier";
+    const cancelField = isHomeowner
+      ? "homeownerCancelAtPeriodEnd"
+      : subscriptionType === "driver_gold" ? "driverCancelAtPeriodEnd" : "cancelAtPeriodEnd";
 
     try {
-      await updateDoc(doc(db, "users", user.uid), { 
-        [cancelField]: true
+      const token = await user.getIdToken();
+      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
+      const response = await fetch("/api/cancel-subscription", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ subscriptionType })
       });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || "Subscription cancellation could not be scheduled.");
+      }
       setProfile((prev: any) => ({ ...prev, [cancelField]: true }));
     } catch (err) {
       console.error("Error canceling subscription:", err);
+      alert(err instanceof Error ? err.message : "Subscription cancellation could not be scheduled.");
     }
   };
 
