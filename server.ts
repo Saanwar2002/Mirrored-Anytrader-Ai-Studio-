@@ -3568,6 +3568,7 @@ async function startServer() {
         status: "active",
         ownerId: userId,
         userId,
+        homeownerId: userId,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
