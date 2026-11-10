@@ -2789,3 +2789,23 @@ A focused integration-branch trace through `src/server/pricingCatalog.ts`, the r
 4. For Instant Match reconciliation, persist the Stripe refund ID and status first; only an authoritative `succeeded` refund can become eligible for a deterministic refund event. The earlier Section 116 payout-fallback safeguard still applies: the refund event must never be treated as a positive collected-payment record.
 
 **Verification boundary:** source fetch-back and static trace only. No checkout, Stripe API, Stripe balance transaction, Firestore or production operation was performed. No code or tests were changed or executed. The £2.99 catalog default is not asserted as the actual amount of every historical refund; the durable operation's verified amount/currency remain authoritative. Main remains untouched; GitHub billing approval remains pending.
+
+
+## Section 118 — Fail-closed driver payout ledger fallback (2026-11-10)
+
+The driver payout fallback previously queried `payment_ledger` by `transactionId` only, selected the first result, and treated `status: "completed"` or `captured: true` plus a sufficient GBP amount as proof of ride collection. It did not constrain the financial event type. This could allow a refund or unrelated escrow record sharing a PaymentIntent identifier to satisfy the payout gate.
+
+### Change made on integration
+
+- `src/server/driverPayoutOrchestration.ts` now additionally filters the fallback query by `type == "RIDE_PAYMENT"`.
+- It explicitly rejects a returned entry whose type is not `RIDE_PAYMENT`.
+- Missing currency is no longer silently defaulted to GBP in this fallback; the entry must explicitly declare GBP.
+- `tests/unit/driverPayoutOrchestration.test.ts` now includes a regression asserting that a completed, GBP-denominated `REFUND` entry with an otherwise sufficient amount cannot authorize a driver transfer.
+- A positive-path test asserts that an explicitly typed completed `RIDE_PAYMENT` receipt with GBP and sufficient integer pence can satisfy the ledger fallback when PaymentIntent retrieval is unavailable.
+- The pre-existing wrong-currency/untyped ledger fixture remains rejected, consistent with fail-closed behavior.
+
+### Important source limitation
+
+The current integration-branch `server.ts` no longer contains the `ledg_ride_` writer found by repository-wide search results (those search hits resolve to a different indexed revision). The current branch still declares `RIDE_PAYMENT` in the `LedgerEntry` union, but the inspected branch source does not establish a live writer for this event type. Therefore the new positive-path test validates the contract for an explicitly typed receipt; it does not prove production currently emits such receipts. Until a canonical writer is located or added and verified, PaymentIntent retrieval remains the authoritative normal path and missing/legacy/untyped ledger records intentionally fail closed.
+
+**Verification boundary:** both changed source/test files were fetched back from `integration/pr-consolidation-20261109` and their expected changes confirmed. The unit tests, lint/typecheck, build and CI have not been run in this environment. No production Firestore or Stripe data was accessed. No live payout/refund was initiated. Main remains untouched; GitHub billing approval remains pending.
