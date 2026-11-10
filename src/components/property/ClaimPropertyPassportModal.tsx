@@ -48,7 +48,7 @@ export function ClaimPropertyPassportModal({ initialCode = "", onClose, onSucces
       setVerifiedProperty(property);
     } catch (err) {
       console.error("Error verifying transfer code:", err);
-      setError("Failed to verify code. Please check your internet connection.");
+      setError(err instanceof Error ? err.message : "Failed to verify code. Please check your internet connection.");
     } finally {
       setVerifying(false);
     }
