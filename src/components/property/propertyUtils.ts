@@ -111,9 +111,11 @@ export function calculatePropertyHealthScore(property: any, completedJobs: any[]
  */
 export function generateTransferCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = 'TRF-';
-  for (let i = 0; i < 6; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  const randomBytes = new Uint8Array(6);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(randomBytes);
+  } else {
+    for (let i = 0; i < randomBytes.length; i++) randomBytes[i] = Math.floor(Math.random() * 256);
   }
-  return code;
+  return 'TRF-' + Array.from(randomBytes, value => chars[value % chars.length]).join('');
 }
