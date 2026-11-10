@@ -40,7 +40,7 @@ export async function expireAndRefundInstantMatch(db: admin.firestore.Firestore,
     if (!existing && match.status !== "searching") return { action: "stop" as const };
     const idempotencyKey = "instant-match-expiry:" + matchRef.id;
     tx.set(matchRef, { status: "expired", expiredAt: match.expiredAt || new Date().toISOString(), refundStatus: "processing" }, { merge: true });
-    tx.set(refundRef, { instantMatchId: matchRef.id, paymentIntentId, idempotencyKey, reason, status: "processing", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    tx.set(refundRef, { instantMatchId: matchRef.id, paymentIntentId, amount: match.chargeAmountPence, currency: String(match.currency || "").toLowerCase(), idempotencyKey, reason, status: "processing", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     return { action: "refund" as const, paymentIntentId, idempotencyKey };
   });
   if (operation.action !== "refund") return;
