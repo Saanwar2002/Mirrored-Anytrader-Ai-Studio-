@@ -47,6 +47,21 @@ export function buildSubscriptionLifecyclePatch(product: SubscriptionProduct, su
 }
 
 
+export function buildLandlordCheckoutFulfillmentPatch(
+  subscriptionId: string,
+  tierName: string,
+  subscription: Record<string, any>
+): Record<string, any> {
+  if (!subscriptionId) throw new Error("Landlord checkout fulfillment requires a Stripe subscription ID.");
+  return {
+    subscriptionId,
+    subscriptionType: "landlord",
+    isLandlord: true,
+    homeownerTierId: tierName,
+    ...buildSubscriptionLifecyclePatch("landlord", subscription)
+  };
+}
+
 export interface SubscriptionProductMatch {
   product: {
     key: SubscriptionProduct;
