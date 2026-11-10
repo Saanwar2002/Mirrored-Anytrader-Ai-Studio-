@@ -3726,6 +3726,90 @@ async function startServer() {
     }
   });
 
+  // Transfer initiation is server-authoritative; clients cannot mint or mutate transfer metadata.
+  app.post("/api/properties/:id/transfer", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const userId = String((req as any).user?.uid || "");
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+      const propertyId = String(req.params.id || "").trim();
+      if (!propertyId) throw new BadRequestError("Property ID is required.");
+      const buyerName = typeof req.body?.buyerName === "string" ? req.body.buyerName.trim().slice(0, 120) : "";
+      const buyerEmail = typeof req.body?.buyerEmail === "string" ? req.body.buyerEmail.trim().toLowerCase() : "";
+      const validityDays = Number(req.body?.validityDays);
+      if (![14, 30, 60].includes(validityDays)) throw new BadRequestError("Transfer validity must be 14, 30, or 60 days.");
+      if (buyerEmail && !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(buyerEmail)) {
+        throw new BadRequestError("A valid buyer email address is required.");
+      }
+
+      const propertyRef = db.collection("properties").doc(propertyId);
+      const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      const code = "TRF-" + Array.from({ length: 6 }, () => alphabet[crypto.randomInt(0, alphabet.length)]).join("");
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + validityDays * 24 * 60 * 60 * 1000).toISOString();
+      await db.runTransaction(async (tx: any) => {
+        const propertySnap = await tx.get(propertyRef);
+        if (!propertySnap.exists) throw new NotFoundError("Property not found.");
+        const property = propertySnap.data() || {};
+        const ownerIds = [property.ownerId, property.userId].filter((value: any) => typeof value === "string" && value.length > 0);
+        if (!ownerIds.includes(userId)) throw new ForbiddenError("Only the current property owner can initiate a transfer.");
+        const duplicateCode = await tx.get(db.collection("properties")
+          .where("transferCode", "==", code)
+          .where("transferStatus", "==", "pending")
+          .limit(1));
+        if (!duplicateCode.empty) throw new ConflictError("Could not generate a unique transfer code. Please try again.");
+        tx.update(propertyRef, {
+          transferStatus: "pending",
+          transferCode: code,
+          transferExpiresAt: expiresAt,
+          transferTargetName: buyerName || null,
+          transferTargetEmail: buyerEmail || null,
+          transferInitiatedAt: now.toISOString(),
+          transferInitiatorUid: userId,
+          updatedAt: now.toISOString()
+        });
+      });
+      res.status(201).json({ success: true, code, expiresAt });
+    } catch (error: any) {
+      console.error("Initiate Property Transfer Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Revocation is also owner-authorized and server-only.
+  app.post("/api/properties/:id/transfer/revoke", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const userId = String((req as any).user?.uid || "");
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+      const propertyId = String(req.params.id || "").trim();
+      if (!propertyId) throw new BadRequestError("Property ID is required.");
+      const propertyRef = db.collection("properties").doc(propertyId);
+      await db.runTransaction(async (tx: any) => {
+        const propertySnap = await tx.get(propertyRef);
+        if (!propertySnap.exists) throw new NotFoundError("Property not found.");
+        const property = propertySnap.data() || {};
+        const ownerIds = [property.ownerId, property.userId].filter((value: any) => typeof value === "string" && value.length > 0);
+        if (!ownerIds.includes(userId)) throw new ForbiddenError("Only the current property owner can revoke a transfer.");
+        if (property.transferStatus !== "pending") throw new ConflictError("There is no pending transfer to revoke.");
+        tx.update(propertyRef, {
+          transferStatus: "none",
+          transferCode: null,
+          transferExpiresAt: null,
+          transferTargetName: null,
+          transferTargetEmail: null,
+          transferInitiatedAt: null,
+          transferInitiatorUid: null,
+          updatedAt: new Date().toISOString()
+        });
+      });
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Revoke Property Transfer Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
   // Property deletion also flows through the server so Gotham usage counters stay exact.
   app.delete("/api/properties/:id", requireAuth, async (req, res) => {
     try {
