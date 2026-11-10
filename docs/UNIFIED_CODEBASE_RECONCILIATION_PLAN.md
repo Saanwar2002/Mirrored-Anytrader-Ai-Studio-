@@ -2670,3 +2670,4 @@ Follow-up race review found that the Firestore snapshot listener and 10-second t
 Commit: `749d830a61acdb53a169d85cd61ea13281e6f2c8`.
 
 **Verification boundary:** source-level fetch-back only. No Firestore emulator test or worker-level mocked regression test has yet been added or executed. Existing random-ID attempt records remain readable by the existing query; all new attempts use deterministic IDs. This does not retroactively deduplicate historical duplicate attempts.
+Regression coverage added in `tests/unit/instantMatchAttemptCreation.test.ts` for first creation, repeated-trigger deduplication, terminal match rejection and attempt-number sequencing. Commit: `c6ca6d789ed22e04a3f5e49b4d848e2c1f6cf19a`. These are mocked unit tests only and have not yet been executed. The listener/poll attempt-creation race is therefore addressed in source and has test coverage authored, but remains runtime-unverified.
