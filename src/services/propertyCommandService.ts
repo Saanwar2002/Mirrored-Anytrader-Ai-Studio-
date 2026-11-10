@@ -78,3 +78,34 @@ export async function claimPropertyTransfer(
   if (!response.ok || !result.id) throw new Error(result.error || "Property transfer could not be completed.");
   return { id: String(result.id), duplicate: Boolean(result.duplicate) };
 }
+
+export async function initiatePropertyTransfer(
+  user: { getIdToken: () => Promise<string> },
+  propertyId: string,
+  input: { buyerName?: string; buyerEmail?: string; validityDays: number }
+): Promise<{ code: string; expiresAt: string }> {
+  const token = await user.getIdToken();
+  if (!token) throw new Error("You must be signed in to initiate a property transfer.");
+  const response = await fetch(`/api/properties/${encodeURIComponent(propertyId)}/transfer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(input)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.code) throw new Error(result.error || "Property transfer could not be initiated.");
+  return { code: String(result.code), expiresAt: String(result.expiresAt || "") };
+}
+
+export async function revokePropertyTransfer(
+  user: { getIdToken: () => Promise<string> },
+  propertyId: string
+): Promise<void> {
+  const token = await user.getIdToken();
+  if (!token) throw new Error("You must be signed in to revoke a property transfer.");
+  const response = await fetch(`/api/properties/${encodeURIComponent(propertyId)}/transfer/revoke`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Property transfer could not be revoked.");
+}
