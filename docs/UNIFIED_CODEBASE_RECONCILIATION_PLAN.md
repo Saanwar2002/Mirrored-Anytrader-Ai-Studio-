@@ -2440,3 +2440,16 @@ Read-through of integration `src/server/driverPayoutOrchestration.ts` confirms a
 - **ZIP comparison remains pending:** integration's token-fenced success path is verified in source; no ZIP source was copied. A line-level diff and test comparison are still required before selecting the canonical version.
 
 Remediation/test design: fence *all* post-claim writes (success, failure, dry-run release) using transactional token ownership; never let a stale claimant mutate a newer lease. On ambiguous Stripe success, retain an explicit reconciliation-needed state and stable operation identity, then reconcile before retry. Add tests for stale worker catch after takeover, Stripe-success/finalize-token-loss, dry-run lease cleanup, and no stale status overwrite. No code change or Stripe operation was executed.
+
+
+## Section 93 — First narrow payout remediation (2026-11-10)
+
+Implemented on integration (not main):
+
+- `src/server/driverPayoutOrchestration.ts`: payout failure/finalization catch now performs a Firestore transaction, checks that the fresh document still has this worker's exact `payoutClaimToken`, and only then writes failure state/retry counter. If claim ownership is gone, it leaves the successor's state untouched and reports an unverified/reconciliation-needed detail. A `LEASE_TOKEN_LOST` finalization error is recorded as `reconciliation_required`, rather than ordinary retryable `failed`.
+- Dry-run now transactionally releases its own claim (sets `payoutStatus: pending`, deletes lock timestamp and token) before returning simulated success; a lost claim causes a fail-closed error instead of clearing another worker's lease.
+- `tests/unit/driverPayoutOrchestration.test.ts`: added regression cases for dry-run lease release and stale-worker Stripe failure after a successor claim.
+
+Commits: implementation `3661242ca93c5e165e12b2b5a6c3e982ee44b9b7`; tests `df82e492466055238b6902b14f15df7445ec198e`. Both files were fetched back after commit and the expected edits confirmed. GitHub workflow-run lookup returned no runs for these commits; tests have **not** been executed in this environment. Treat this as code committed, not CI-validated.
+
+Remaining correctness work: ambiguous transfer recovery is still not fully solved. If Stripe created a transfer but the client lost the response, the deterministic idempotency key should be reconciled before retry; claim fencing prevents stale Firestore writes but cannot by itself prove external transfer outcome. Add explicit test for Stripe success followed by claim loss during finalization and ensure the recovery state is observable. Do not deploy or invoke live Stripe.
