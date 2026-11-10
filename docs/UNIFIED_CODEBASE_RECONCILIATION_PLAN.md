@@ -3630,3 +3630,35 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 147 is documentation only; no fare config, Remote Config, pricing, ride, or ledger data changed.
 - No tests, emulator, typecheck, build, or CI were run.
 - Next: trace ride creation and checkout/payout calculations to specify exact persisted pricing fields and rounding, then draft one canonical TaxiPricingPolicy schema with fixtures.
+
+
+## Section 148 — Ride Checkout and payout use incompatible fare/fee contracts
+
+### Card Checkout (`src/server/tripPaymentAuthorization.ts`)
+- Reads ride from `ride_requests` (fallback legacy `rides`) and authorizes passenger, assigned driver, or admin.
+- Base amount is selected from `finalFare ?? fare ?? estimatedFare ?? totalFare ?? price`; it does not include `fareEstimate`. This makes precedence important and a fallback to legacy fields possible when finalFare is absent.
+- Tip is accepted from request body, sanitized to £0–£500, and added to Checkout total; thus it is not strictly read from an immutable ride snapshot.
+- Platform fee is hard-coded at 12% of effective base fare, rounded to pence; tip is excluded. This diverges from configurable driver commission/fixed trip fee and payout tier logic.
+- Checkout creates a Connect destination payment with amount in integer pence; this route does not itself finalize ride payment or create a canonical payment-intent/fee ledger entry (previous sections 119–140).
+
+### Driver payout (`src/server/driverPayoutOrchestration.ts`)
+- Requires protected `ride.finalFare` > 0; explicitly refuses client-editable fareEstimate fallback.
+- Tip is read from ride `tipAmount`, then driver earnings are calculated with tier/commission logic; prior trace establishes 88% base + 100% tip at standard 12%, and gold tier/overrides can change commission.
+- Payout records platform commission separately and writes payout completion only after Stripe transfer succeeds (transaction checks claim token); earlier sections note claim acquisition and ledger reconciliation concerns.
+
+### Reconciliation conclusion
+- Checkout: base `finalFare` + request tip; fee = fixed 12% of base.
+- Payout: ride `finalFare` + persisted tip; driver net uses effective tier commission, platform fee is payout-derived.
+- Cash: UI fare estimate/config + wait + tip; fee uses UI commission/fixed fee and can differ from Checkout/payout.
+- These paths can disagree on tip source, commission rate, fixed fee, and fare authority. A cash command cannot safely be implemented by copying any one path.
+
+### Required contract before implementation
+- One finalized ride snapshot: `baseFarePence`, `tipPence`, `totalFarePence`, `pricingPolicyVersion`, `commissionRateBps`, `platformFeePence`, `driverEarningsPence`, source/measurement and finalization timestamps.
+- Checkout must consume that snapshot (including persisted tip) rather than client tip; payout must use exactly the same base/tip/commission snapshot; cash receivable accrual must share its fee basis.
+- If policy/tier differs by payment mode, represent it explicitly in versioned policy and snapshot; don't hardcode 12% in Checkout.
+- Migration/reconciliation for legacy rides must fail closed or use an auditable admin repair command; never silently select estimated/client-editable fare.
+
+### Status
+- Section 148 is documentation only; checkout, payout, cash, Stripe, and ledger code untouched.
+- No tests, emulator, typecheck, build, or CI run.
+- Next: trace fee tier resolution and rounding/pence conversions to see whether payout has a reusable pure calculator; document extraction before any shared calculator implementation.
