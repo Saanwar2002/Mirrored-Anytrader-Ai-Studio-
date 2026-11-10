@@ -18,3 +18,16 @@ export function evaluateGothamPropertyQuota(
   }
   return { allowed: true, nextUsage: currentUsage + 1 };
 }
+
+
+export type GothamPropertyUsageDecrement =
+  | { allowed: true; nextUsage: number }
+  | { allowed: false; reason: "invalid_usage" | "underflow" };
+
+export function decrementGothamPropertyUsage(currentUsage: number): GothamPropertyUsageDecrement {
+  if (!Number.isSafeInteger(currentUsage) || currentUsage < 0) {
+    return { allowed: false, reason: "invalid_usage" };
+  }
+  if (currentUsage < 1) return { allowed: false, reason: "underflow" };
+  return { allowed: true, nextUsage: currentUsage - 1 };
+}
