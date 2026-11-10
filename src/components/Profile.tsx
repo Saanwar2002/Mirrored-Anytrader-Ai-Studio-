@@ -1769,35 +1769,24 @@ export default function Profile() {
           throw new Error(data.error || "Failed to initiate checkout");
         }
       } else {
-        // Auto-subscribe for free tiers
-        const nextBillingDate = new Date();
-        nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
-
-        const isHomeowner = (profile.role as string) === "homeowner" || (profile.role as string) === "customer";
-        const tierField = isHomeowner ? "homeownerTierId" : "tierId";
-        const statusField = isHomeowner ? "homeownerSubscriptionStatus" : "subscriptionStatus";
-        const periodEndField = isHomeowner ? "homeownerCurrentPeriodEnd" : "currentPeriodEnd";
-        const cancelField = isHomeowner ? "homeownerCancelAtPeriodEnd" : "cancelAtPeriodEnd";
-
-        const updatePayload: any = { 
-          [tierField]: showCheckoutForTier.name,
-          [statusField]: 'trialing',
-          [periodEndField]: nextBillingDate.toISOString(),
-          [cancelField]: false
-        };
-
-        if (!isHomeowner) {
-          const canonical = normalizeTraderTier(showCheckoutForTier.name);
-          updatePayload.tier = canonical;
-          updatePayload.isPro = canonical !== 'payg';
-          updatePayload.isProInvoiceSubscriber = canonical !== 'payg';
+        // Free-tier changes go through the server because subscription fields are server-owned.
+        const token = await user.getIdToken();
+        if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
+        const response = await fetch("/api/select-free-tier", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ tierName: showCheckoutForTier.name })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.success || !result.fields) {
+          throw new Error(result.error || "Free tier could not be selected.");
         }
-
-        await updateDoc(doc(db, "users", user.uid), updatePayload);
-        
-        setProfile((prev: any) => ({ 
-          ...prev, 
-          ...updatePayload
+        setProfile((prev: any) => ({
+          ...prev,
+          ...result.fields
         }));
         
         setShowCheckoutForTier(null);
