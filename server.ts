@@ -1,7 +1,7 @@
 import express from "express";
 import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
-import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
+import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -1897,21 +1897,40 @@ async function startServer() {
             else canonicalTier = 'payg';
             const userRef = db.collection("users").doc(userId);
             const markerRef = db.collection("stripe_fulfillments").doc(`membership_${session.id}`);
+            const landlordPatch = isLandlord
+              ? buildLandlordCheckoutFulfillmentPatch(
+                  subscriptionId,
+                  rawTier,
+                  await stripeClient.subscriptions.retrieve(subscriptionId) as any
+                )
+              : null;
             await db.runTransaction(async (tx: any) => {
               const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
               if (!userSnap.exists) throw new Error("Membership subscription user does not exist.");
               if (markerSnap.exists) return;
               const current = userSnap.data() || {};
-              if (current.subscriptionId && current.subscriptionId !== subscriptionId && current.subscriptionStatus === "active") {
-                throw new Error("A different active membership subscription is already linked; manual reconciliation required.");
+              if (current.subscriptionId && current.subscriptionId !== subscriptionId) {
+                const currentStatus = current.subscriptionType === "landlord"
+                  ? current.homeownerSubscriptionStatus
+                  : current.subscriptionStatus;
+                if (["active", "trialing", "past_due", "incomplete", "paused"].includes(String(currentStatus || ""))) {
+                  throw new Error("A different active subscription is already linked; manual reconciliation required.");
+                }
               }
-              tx.update(userRef, {
-                subscriptionStatus: "active", subscriptionId, tierId: rawTier, tier: canonicalTier,
-                isLandlord: isLandlord || canonicalTier === 'landlord',
-                subscriptionType: isLandlord ? 'landlord' : (canonicalTier !== 'payg' ? 'tier' : 'standard'),
-                isPro: canonicalTier !== 'payg', isProInvoiceSubscriber: canonicalTier !== 'payg',
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-              });
+              if (landlordPatch) {
+                tx.update(userRef, {
+                  ...landlordPatch,
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              } else {
+                tx.update(userRef, {
+                  subscriptionStatus: "active", subscriptionId, tierId: rawTier, tier: canonicalTier,
+                  isLandlord: false,
+                  subscriptionType: canonicalTier !== 'payg' ? 'tier' : 'standard',
+                  isPro: canonicalTier !== 'payg', isProInvoiceSubscriber: canonicalTier !== 'payg',
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              }
               tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, tier: canonicalTier, type: "membership_subscription", createdAt: admin.firestore.FieldValue.serverTimestamp() });
             });
           } else if (session.mode === 'payment') {
@@ -2308,6 +2327,17 @@ async function startServer() {
               priorityDispatch: 50,
               driverCancelAtPeriodEnd: false,
               driverCurrentPeriodEnd: mockDriverPeriodEnd,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (authoritativeResult.mode === 'subscription' && (meta.subscriptionType === 'landlord' || meta.tier === 'landlord')) {
+            const mockLandlordSubscriptionId = "mock_sub_landlord_" + Math.random().toString(36).substring(7);
+            const mockLandlordPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+            await db.collection("users").doc(userId).set({
+              ...buildLandlordCheckoutFulfillmentPatch(
+                mockLandlordSubscriptionId,
+                meta.tierName || "landlord",
+                { status: "active", cancel_at_period_end: false, current_period_end: Math.floor(mockLandlordPeriodEnd.getTime() / 1000) }
+              ),
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
           } else if (authoritativeResult.mode === 'subscription') {
