@@ -25,3 +25,17 @@ export async function createPropertyViaCommand(
   if (!result.id) throw new Error("Property creation returned no identifier.");
   return { id: String(result.id), duplicate: Boolean(result.duplicate) };
 }
+
+export async function deletePropertyViaCommand(
+  user: { getIdToken: () => Promise<string> },
+  propertyId: string
+): Promise<void> {
+  const token = await user.getIdToken();
+  if (!token) throw new Error("You must be signed in to delete a property.");
+  const response = await fetch(`/api/properties/${encodeURIComponent(propertyId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Property could not be deleted.");
+}
