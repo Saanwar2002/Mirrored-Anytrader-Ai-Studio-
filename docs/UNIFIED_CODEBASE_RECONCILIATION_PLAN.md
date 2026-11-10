@@ -3753,3 +3753,25 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 152 is documentation only; settlement route, frontend, webhook and user aggregates untouched.
 - No tests, emulator, typecheck, build, or CI run.
 - Next: examine Stripe webhook event lifecycle/claim retries for the precise event set and failure behavior, then establish an executable phased implementation plan (ledger schema → accrual command → settlement attempt/webhook → projection/UI).
+
+
+## Section 153 — Stripe webhook retry semantics and missing asynchronous Checkout events
+
+### `server.ts` webhook claim lifecycle
+- Signature is verified before event processing. Event claim is stored in `processed_stripe_events/{event.id}` with `status: processing`, server timestamp `claimedAt`, worker ID and random claim token.
+- `shouldClaimStripeWebhookEvent` controls replay/stale takeover. Claim ownership is checked before mutations; processing failures return HTTP 500 so Stripe can retry, while completed events are acknowledged.
+- `checkout.session.completed` with `payment_status !== paid` is marked completed/skipped and claim token removed. This does not later fulfill an async payment when the same Session becomes paid.
+- For paid generic Checkout, missing intent metadata/client_reference_id or absent persisted intent throws; binding pending throws retryable error; mismatch marks intent review-required then throws. This is a strict binding model but excludes fee settlement Checkout which does not persist generic intent.
+- Current event branch inspected does not include `checkout.session.async_payment_succeeded` or `checkout.session.async_payment_failed`; no asynchronous Checkout recovery was identified in this handler. Fee settlement additionally has no attempt/fulfillment branch (Section 152).
+
+### Design implications
+1. Add supported async Checkout events to same exact attempt binding and idempotent fulfillment path; never treat `completed` unpaid as final for async methods.
+2. For fee settlement, bind to dedicated attempt (not generic `payment_intents` if its schema is not applicable); verify Session ID, driver, currency, exact amount, PI status/amount_received, and expected attempt status.
+3. Do not mark an event completed until its payment state is either fulfilled or intentionally terminal with a recoverable/reconciliation marker. Unpaid completion must leave a durable pending attempt that async success can advance.
+4. Webhook event idempotency and business operation idempotency are separate: multiple Stripe event IDs for one Session must converge on one attempt/receivable allocation.
+5. Add retry tests for event order, claim expiry/takeover, duplicate delivery, paid-after-unpaid, and fulfillment crash between transaction and acknowledgement.
+
+### Status
+- Section 153 is documentation only; webhook code and event records unchanged.
+- No Stripe test events, tests, emulator, typecheck, build, or CI run.
+- Next: turn the evidence into a phased implementation checklist with dependency order and acceptance criteria, then start a safe first phase (pure pence calculator + tests) once repository test conventions are checked.
