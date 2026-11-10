@@ -1267,12 +1267,12 @@ export default function BillingManager() {
                       {profile?.driverCancelAtPeriodEnd ? (
                         <p className="text-[11px] text-amber-700 font-bold flex items-center gap-1">
                           <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
-                          Cancels on {formatPeriodDate(profile?.driverCurrentPeriodEnd || profile?.currentPeriodEnd)} (Gold benefits active until then)
+                          Cancels on {formatPeriodDate(profile?.driverCurrentPeriodEnd)} (Gold benefits active until then)
                         </p>
-                      ) : (profile?.driverCurrentPeriodEnd || profile?.currentPeriodEnd) ? (
+                      ) : (profile?.driverCurrentPeriodEnd) ? (
                         <p className="text-[11px] text-slate-500 font-medium flex items-center gap-1">
                           <Calendar className="w-3 h-3 text-slate-400 shrink-0" />
-                          Renews on {formatPeriodDate(profile?.driverCurrentPeriodEnd || profile?.currentPeriodEnd)}
+                          Renews on {formatPeriodDate(profile?.driverCurrentPeriodEnd)}
                         </p>
                       ) : null}
                     </div>
