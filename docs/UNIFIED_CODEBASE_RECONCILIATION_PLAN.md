@@ -1700,3 +1700,9 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
 ### Verification
 - Source-level change committed to `integration/pr-consolidation-20261109`; no local TypeScript build, unit test, emulator, or Stripe transfer test was run in this environment.
 - Main and AI Studio remain untouched; no merge/deployment performed.
+
+## Section 54 — Gold payout regression coverage added (2026-11-10)
+
+- Added tests 16–17 to `tests/unit/driverPayoutOrchestration.test.ts`: active Gold entitlement must transfer 90% of base fare plus 100% of tip, and write Gold/rate audit fields; stale/incomplete Gold markers must retain the 12% standard rate.
+- These tests assert £50 fare + £5 tip → £50 driver transfer / £5 platform fee for active Gold, versus £44 driver share / £6 platform fee for standard (no tip).
+- Test source committed; execution still pending because no local checkout/test runner has been established in this GitHub-only session.
