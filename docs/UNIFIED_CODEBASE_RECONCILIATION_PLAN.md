@@ -1810,3 +1810,12 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
 ### Status
 - Inspection/documentation only; no application code or Firestore rules changed.
 - Integration branch only. Main, AI Studio sync, Firebase production, and deployment untouched.
+
+
+
+### Follow-up repository-wide search correction (2026-11-10)
+- A broader GitHub code search found two additional direct root-property create paths that were not in the initial focused component inventory:
+  - `src/components/Portfolio.tsx` around lines 269–287: creates a root property with `ownerId`, address, property type, contact details, access instructions, and active status. It also deletes root properties directly around line 336.
+  - `src/components/HomeHealthWidget.tsx` around lines 320–334: when no active property is selected, creates a root property with `ownerId`, `userId`, `homeownerId`, property/boiler/condition fields and active status.
+- Therefore the migration must cover at least three UI create paths: PropertyManager, Portfolio, and HomeHealthWidget. Portfolio and PropertyManager duplicate much of the property creation UX and need a shared trusted API/service to avoid policy drift.
+- GitHub code search indexes the default branch; fetched file contents above were explicitly read from integration. Treat the search as a discovery aid, not an exhaustive proof of integration contents. Continue searching integration tree/call sites and server/Admin SDK/import flows before tightening rules.
