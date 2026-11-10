@@ -1,4 +1,5 @@
 import express from "express";
+import { buildSubscriptionLifecyclePatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import crypto from "crypto";
@@ -2094,10 +2095,6 @@ async function startServer() {
           }
           if (linked.length === 1) {
             const { product, userDoc } = linked[0];
-            const subscriptionStatus = String(subscription.status || (isSubscriptionDeleted ? "canceled" : "unknown"));
-            const isEntitled = subscriptionStatus === "active" || subscriptionStatus === "trialing";
-            const isTerminal = isSubscriptionDeleted || ["canceled", "unpaid", "incomplete_expired"].includes(subscriptionStatus);
-            const periodEnd = Number((subscription as any).current_period_end || 0);
             const eventCreated = Number(event.created || 0);
             await db.runTransaction(async (tx: any) => {
               const latest = await tx.get(userDoc.ref);
@@ -2107,62 +2104,13 @@ async function startServer() {
               // Event ordering is tracked independently for each product subscription.
               if (Number(current[product.lastCreated] || 0) > eventCreated) return;
               const patch: Record<string, any> = {
+                ...buildSubscriptionLifecyclePatch(product.key, subscription as any, isSubscriptionDeleted),
                 [product.lastCreated]: eventCreated,
                 [product.lastId]: event.id,
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
               };
-              if (product.key === "membership") {
-                patch.subscriptionStatus = subscriptionStatus;
-                patch.cancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
-                if (isEntitled) {
-                  patch.isPro = true;
-                  patch.isProInvoiceSubscriber = true;
-                } else if (isTerminal) {
-                  patch.isPro = false;
-                  patch.isProInvoiceSubscriber = false;
-                }
-                if (periodEnd > 0) patch.currentPeriodEnd = new Date(periodEnd * 1000).toISOString();
-              } else if (product.key === "gold_driver") {
-                patch.driverSubscriptionStatus = subscriptionStatus;
-                patch.driverCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
-                if (isEntitled) patch.isGoldDriver = true;
-                else if (isTerminal) patch.isGoldDriver = false;
-                if (periodEnd > 0) patch.driverCurrentPeriodEnd = new Date(periodEnd * 1000).toISOString();
-              } else if (product.key === "exclusive_leads") {
-                patch.exclusiveCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
-                if (isEntitled) {
-                  patch.hasExclusiveAddon = true;
-                  patch.isExclusiveActive = true;
-                } else if (isTerminal) {
-                  patch.hasExclusiveAddon = false;
-                  patch.isExclusiveActive = false;
-                }
-                if (periodEnd > 0) patch.exclusiveCurrentPeriodEnd = new Date(periodEnd * 1000).toISOString();
-              } else if (product.key === "video_pro") {
-                patch.videoProCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
-                if (isEntitled) {
-                  patch.hasVerifiedVideoProSubscription = true;
-                } else if (isTerminal) {
-                  patch.hasVerifiedVideoProSubscription = false;
-                }
-                // Video verification is a separate credential; subscription expiry must
-                // not erase or rewrite an independently verified video record.
-                if (periodEnd > 0) patch.videoProCurrentPeriodEnd = new Date(periodEnd * 1000).toISOString();
-              } else {
-                patch.gothamSubscriptionStatus = subscriptionStatus;
-                patch.gothamCancelAtPeriodEnd = Boolean((subscription as any).cancel_at_period_end);
-                if (isEntitled) patch.isGothamSubscriber = true;
-                else if (isTerminal) patch.isGothamSubscriber = false;
-                if (periodEnd > 0) {
-                  const endDate = new Date(periodEnd * 1000).toISOString();
-                  patch.gothamCurrentPeriodEnd = endDate;
-                  patch.currentPeriodEnd = endDate;
-                }
-                // Never overwrite purchased door count with Stripe's aggregate line quantity.
-              }
-              // past_due, incomplete and paused remain status-only: entitlement is
-              // deliberately unchanged until a product-specific grace policy is approved.
               tx.update(userDoc.ref, patch);
+            });
             });
           }
         }
