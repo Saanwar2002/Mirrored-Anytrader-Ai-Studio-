@@ -267,11 +267,15 @@ export default function TradesDashboard({ isSubView }: { isSubView?: boolean }) 
     setExclusiveCheckoutError(null);
     try {
       const activePrice = getExclusivePrice();
+      const token = await user.getIdToken();
+      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
       const response = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" ,
-            "Idempotency-Key": crypto.randomUUID()
-          },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "Idempotency-Key": crypto.randomUUID()
+        },
         body: JSON.stringify({
           userId: user.uid,
           tierName: "Exclusive Leads Add-on",
