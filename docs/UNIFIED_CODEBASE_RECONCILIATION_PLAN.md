@@ -3391,3 +3391,33 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 137 is documentation only; no source code, tests, route, UI, rules, or pricing values changed.
 - No unit tests, emulator, typecheck, build, or CI were run in this step.
 - Next: trace all completion/settlement fee paths and identify whether any immutable fare/commission snapshot already exists; then implement the isolated config command with explicit legacy field mapping and versioning.
+
+
+## Section 138 — Cash completion has repeatable client-side fee writes and passenger-side acknowledgement; no immutable fee snapshot was found in the inspected paths
+
+### Exact integration-branch evidence
+- `src/components/driver/DriverTerminal.tsx` blob `40db85db97f62c425787fd64b77ea241d3dd8eb8`:
+  - `handleCashPayment(forceComplete)` calculates `baseFare = fareEstimate/vehicleSubtotal + waitFare`, `totalFare = baseFare + tip`, and `platformFee = baseFare * current fareConfig.commissionRate + fixedTripFee` in the browser.
+  - Short collection writes `awaiting_cash_confirm`, `reportedCashCollected`, and `reportedCashDiscrepancy` directly to `ride_requests`; force completion uses a client-held reason and the same handler.
+  - Completion writes ride `finalFare`, `platformFeeOwed`, paid-wait seconds, reported collection/discrepancy and a client-side `pendingChargesApplied` marker; it separately increments `users/{driverUid}.pendingPlatformFees`. A repeated invocation can re-run the balance increment; the marker is not a server-enforced idempotency key.
+  - A Firestore listener seeing `cash_confirmed` while local ride state is completed calls `handleCashPayment(true)` again, confirming a repeat-trigger path.
+  - The displayed commission uses whichever current config/Remote Config override is in component state, not a persisted ride-specific rate.
+- `src/components/passenger/PassengerBooking.tsx` blob `ef0fc1e0c03d777cd460863241a86b2c54d318ec`:
+  - Passenger acknowledgement directly changes ride status to `cash_confirmed`; if a reported discrepancy exists, it applies passenger-side pending charge data from the client.
+  - The passenger UI can transition `awaiting_payment` or `awaiting_cash_confirm` to `completed` in its local transition helper; status progression is not a server-authorized financial command.
+- `src/server/tripPaymentAuthorization.ts` blob `979287a17a7537362fc9b59a8d7f2535f02f9292`:
+  - Card checkout calculates a fixed 12% fee on effective base fare in this path, independently of admin `commissionRate`, and does not establish the cash ride's fee snapshot.
+- `src/server/driverPayoutOrchestration.ts` blob `144ab708d22c816929cb1ab57dfeb128ccede112`:
+  - Payout metadata carries a commission value/rate at payout time; it is not proof that the originating ride's commission and fee were frozen when the ride completed.
+
+### Required financial lifecycle
+1. Server command should own the terminal transition, calculate/check fare and fee from validated ride inputs and a persisted pricing snapshot, and atomically persist a unique completion operation plus immutable cash receipt/fee ledger entry and ride status.
+2. Driver's reported cash amount is an input evidence field, never authority for gross fare, platform fee, or shortfall. Passenger acknowledgement is a separate authenticated transition and must not repeat accrual.
+3. Balance aggregation must be idempotent or derived from ledger entries. A client boolean such as `pendingChargesApplied` cannot prevent duplicate fee increments.
+4. The ride must bind to a quote/pricing version before dispatch; cash completion must use that snapshot. Config versioning without ride snapshots would still let historical fee calculations drift.
+5. Preserve status distinctions (cash due, awaiting passenger acknowledgement, acknowledged, shortfall disputed/force-completion requested, completed) in the server state machine and define allowed actors/transitions explicitly. Never let a timeout in a browser automatically authorize financial completion.
+
+### Status
+- Section 138 is documentation only; no code, tests, route, UI, Firestore rules, ledger, or balance changed.
+- No tests, emulator, typecheck, build, or CI were run in this step.
+- Next: inventory all existing fee/receivable ledger writers and settlement readers, then design one idempotent server cash-completion command with ride snapshot and reconciliation against legacy pending balances.
