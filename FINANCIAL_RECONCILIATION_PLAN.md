@@ -162,3 +162,12 @@ The current integration branch does have an active refund-creation side effect, 
 Neither call supplies a Stripe idempotency key. The worker marks the match expired before the refund call, does not persist a refund ID or durable refund-operation status, and catches/logs errors without a retryable state. The two triggers can overlap; a crash or ambiguous response can leave an expired match with an unknown refund outcome. This is refund initiation, not refund-level ingestion/reconciliation.
 
 Required remediation: one durable per-match refund operation shared by both triggers, with claim-token fencing, stable Stripe idempotency identity, pending/ambiguous/confirmed/manual-review states, persisted Stripe refund ID, and retry/reconciliation that checks the Stripe outcome before creating anything. Add mocked Stripe/Firestore regression tests. No code change or live Stripe/Firebase operation was performed during this audit.
+
+
+## FIN-02 / Instant Match — production payment identity gap (10 November 2026)
+
+Tracing the Stripe checkout fulfillment path reveals that production-created Instant Match documents do not store the Checkout Session's PaymentIntent ID. The `checkout.session.completed` transaction creates the match with job/customer, `chargeAmountPence`, tier, status and timestamps, while the worker's refund branches require `match.stripePaymentIntentId`. Thus the current worker cannot identify the payment to refund for the normal webhook-created match. The mock checkout path also omits this field and is not evidence of a production payment identity.
+
+Additionally, `initiateNextAttempt` expires a match immediately when it finds no eligible traders, without entering either refund branch. This is a separate missed-refund path from the duplicate/ambiguous Stripe request risk already recorded above.
+
+Remediation order: (1) establish the authoritative PaymentIntent from the verified Stripe Checkout Session and persist it atomically with match fulfillment; handle a missing/not-yet-associated PaymentIntent explicitly rather than inventing an ID; (2) route both attempt exhaustion and zero-eligible-trader expiry through one durable refund-operation coordinator; (3) add claim fencing, a stable Stripe idempotency key, persisted refund ID and reconciliation-required handling for ambiguous results; (4) test all terminal paths and concurrent triggers with mocks. No live Stripe/Firebase access or source-code change was performed for this finding; tests remain unexecuted.
