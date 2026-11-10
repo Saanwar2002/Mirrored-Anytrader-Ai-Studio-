@@ -3586,3 +3586,25 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 145 is documentation only; no driver UI, rules, pricing, ride, metrics, or financial data changed.
 - No tests, emulator, typecheck, build, or CI were run.
 - Next: inspect existing server command patterns for authorization, idempotency and transaction write discipline; select a reusable implementation shape for a ride cash-finalization command.
+
+
+## Section 146 — Existing trusted ride command pattern: server derives driver identity and atomically claims ride + driver status
+
+### `src/server/driverAuthorization.ts` / `executeAcceptRideCommand`
+- The established pattern accepts a verified caller object and a narrow command body; it rejects a supplied `driverId` that differs from caller UID.
+- Inside one Firestore transaction it reads the caller's `users` profile, checks authoritative driver role/activity/approval, reads the ride, validates available state/no prior assignment/not passenger self-claim, then writes assigned driver/status and `driver_status` busy/currentRideId.
+- It dispatches `RIDE_ACCEPTED` after the transaction. The command is exposed from `server.ts` via an authenticated backend route (route source should be rechecked when implementing).
+- This is a useful structure for cash completion: caller identity from auth, narrow validated payload, transaction reads before writes, persisted ride state as authority, and one atomic multi-document state transition. It is not itself a financial idempotency template: acceptance's transaction guards availability, whereas cash completion needs a stable operation ID and unique immutable ledger entry.
+
+### Cash command shape recommended (design only)
+- `POST /api/rides/:rideId/cash-completion` or an equivalent typed route; caller role/participant determined from Firebase token + persisted ride.
+- Driver proposal command: reported cash, wait seconds, optional force/dispute request (not client fare or commission). Server validates allowed status and computes fare from canonical server pricing/ride snapshot.
+- Passenger acknowledgement command: acknowledge exact discrepancy snapshot/version; cannot supply or alter amount.
+- Finalization transaction: read ride, user profiles/config needed, operation marker and fee ledger key; reject stale proposal/duplicate or return prior result; write finalized ride, immutable fee receivable, and outbox/projection marker atomically. Keep any required reads before writes per Firestore transaction constraints.
+- If driver and passenger commands are separate, preserve explicit states (proposed → acknowledged or force-review → finalized); do not let a driver command silently impersonate passenger acknowledgement. A privileged force path requires server authorization/audit, not just a reason string.
+- Rollout prerequisite: reconcile Firestore rules with server-only fields, remove direct UI financial writes, and use emulator tests to verify participant authorization, race/replay behavior, and no client bypass.
+
+### Status
+- Section 146 is documentation only; no command route, pricing logic, UI, rules, or financial records changed.
+- No tests, emulator, typecheck, build, or CI were run.
+- Next: inspect canonical pricing resolver and ride config types to establish which fare inputs can be safely captured/validated server-side without importing driver UI state.
