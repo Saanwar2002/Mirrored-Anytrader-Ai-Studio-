@@ -385,5 +385,43 @@ describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", (
       expect(ledger.stripeTransferId).toBe("tr_verified_success_888");
       expect(ledger.transferStatus).toBe("completed");
     });
+
+    it("Test 13: Treats a Stripe transfer exception as ambiguous and preserves the stable operation for reconciliation", async () => {
+      const releaseResult = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: homeownerId,
+        idempotencyKey: "rel_ambiguous_transfer_13",
+      });
+      const mockStripe = {
+        transfers: {
+          create: vi.fn().mockRejectedValue(new Error("socket hang up after request")),
+        },
+      };
+
+      const transferResult = await PaymentLedgerEngine.executeStripeEscrowTransfer(
+        db,
+        {
+          jobId,
+          quoteId,
+          milestoneId,
+          idempotencyKey: "rel_ambiguous_transfer_13",
+          traderId: releaseResult.traderId,
+          netPayoutPence: releaseResult.netPayoutPence,
+        },
+        { stripe: mockStripe }
+      );
+
+      expect(transferResult.transferStatus).toBe("reconciliation_required");
+      expect(transferResult.stripeIdempotencyKey).toBe(
+        `release:${jobId}:${quoteId}:${milestoneId}:rel_ambiguous_transfer_13`
+      );
+      const quote = store[`jobs/${jobId}/quotes/${quoteId}`];
+      expect(quote.milestones[0].releaseOperationId).toBe("rel_ambiguous_transfer_13");
+      expect(quote.milestones[0].status).toBe("funds_released");
+      const ledger = store[`payment_ledger/${releaseResult.ledgerEntryId}`];
+      expect(ledger.transferStatus).toBe("reconciliation_required");
+    });
   });
 });
