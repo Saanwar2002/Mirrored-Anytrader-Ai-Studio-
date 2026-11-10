@@ -2888,3 +2888,30 @@ The repair must be a coordinated change across the taxi command, shared webhook 
 **Decision:** do not make a partial edit to tripPaymentAuthorization.ts alone. That would create a valid generic intent binding but still leave the paid taxi session without ride fulfillment. Implement and validate the command + webhook dispatch + transactional fulfillment as one reviewed change set. Until then, the payout fallback remains fail-closed and the taxi checkout path remains an identified correctness blocker; this audit itself does not disable or change the route.
 
 **Verification boundary:** exact integration-branch source fetch and static control-flow inspection only. No code or tests were changed or executed. No Stripe API, Firestore production data, customer payment or payout was accessed. Main remains untouched; GitHub billing approval remains pending.
+
+
+## Section 122 — Taxi checkout tip versus payout source-of-truth mismatch (2026-11-10)
+
+A focused comparison of the taxi payment command and driver payout orchestrator identified a second, independent financial-integrity condition that the coordinated repair must resolve.
+
+### Verified source behavior
+
+- In src/server/tripPaymentAuthorization.ts, the checkout command derives the base fare from the ride document, but derives the tip from Number(body.tipAmount) and clamps it to £0–£500. It then charges the combined base fare plus this request-supplied tip.
+- The command does not persist that sanitized tip to the ride document or to a server-created payment_intents authorization record (no such record is currently created by the command).
+- In src/server/driverPayoutOrchestration.ts, the payout worker independently calculates the driver amount from authoritative ride.finalFare and Number(ride.tipAmount). It does not derive the tip from the Checkout Session or the PaymentIntent metadata.
+- Therefore, for any checkout request whose body tip differs from ride.tipAmount, the amount collected and the amount later used in the payout calculation can diverge. The current source does not establish that the two values are kept equal by another step.
+- The checkout command calculates the 12% application fee on base fare only, while the checkout total includes base fare plus tip. This aligns with the documented payout split (88% of base fare plus 100% of tip), but only if the exact tip charged is also the tip subsequently persisted and used by payout.
+
+### Required repair invariant
+
+The coordinated taxi checkout/webhook repair must choose one explicit tip authority and enforce it end to end:
+
+1. If tips are intended to be selected by the passenger at checkout, persist the sanitized integer-pence tip in the server-created taxi intent and, only after exact successful Stripe verification, transactionally persist that same amount on the ride as the paid tip. The webhook must reject any mismatch between intent, paid session amount, and the ride's already-bound payment facts; do not let a later checkout silently replace a tip already paid or attached to another PaymentIntent.
+2. If the ride's existing tipAmount is intended to be authoritative before checkout, ignore body.tipAmount and charge only the persisted ride value. Document that contract and test that client input cannot alter the charge.
+3. In either model, use integer pence for base, tip, total, application fee and payout arithmetic. Reject non-finite, negative, unsafe or excessive inputs explicitly; avoid floating-point rounding as the cross-service identity check.
+4. Preserve the current commission contract: 12% of base fare only; driver amount 88% of base fare plus the full verified tip. Verify the actual collected gross amount against base + tip and the PaymentIntent currency before any ride paid-state or ledger write.
+5. Add regression cases where request tip differs from ride.tipAmount, is absent, is negative, is non-finite, exceeds the cap, and is replayed against an already-paid ride. Assert that the amount collected, ride tip persisted, ledger gross amount and payout computation all use the same verified tip.
+
+**Decision:** no implementation should write a RIDE_PAYMENT receipt or mark a taxi ride paid until this tip source-of-truth contract is explicit. A ledger receipt with the correct gross charge but a payout calculated from a different ride tip would make the downstream payment evidence internally inconsistent.
+
+**Verification boundary:** exact integration-branch source fetch and static comparison only. No source code or tests were changed or executed. No Stripe API, Firestore production data, customer payment or payout was accessed. Main remains untouched; GitHub billing approval remains pending.
