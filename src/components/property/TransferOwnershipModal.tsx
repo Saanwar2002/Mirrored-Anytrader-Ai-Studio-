@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { db, doc, updateDoc, handleFirestoreError, OperationType } from "@/src/firebase";
+import { initiatePropertyTransfer, revokePropertyTransfer } from "@/src/services/propertyCommandService";
 import { useAuth } from "../AuthProvider";
 import { QRCodeSVG } from "qrcode.react";
 import { X, ArrowRight, ShieldCheck, Copy, Check, Share2, AlertTriangle, Clock, RefreshCw, KeyRound, UserCheck, Trash2, Mail, ExternalLink, Printer } from "lucide-react";
@@ -39,25 +39,17 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
 
     setSubmitting(true);
     try {
-      const expiresAt = new Date(Date.now() + validityDays * 24 * 60 * 60 * 1000).toISOString();
-      const code = generatedCode || generateTransferCode();
-
-      await updateDoc(doc(db, "properties", property.id), {
-        transferStatus: "pending",
-        transferCode: code,
-        transferExpiresAt: expiresAt,
-        transferTargetName: buyerName.trim() || null,
-        transferTargetEmail: buyerEmail.trim() || null,
-        transferInitiatedAt: new Date().toISOString(),
-        transferInitiatorUid: user.uid,
-        updatedAt: new Date().toISOString()
+      const result = await initiatePropertyTransfer(user, property.id, {
+        buyerName,
+        buyerEmail,
+        validityDays
       });
+      setGeneratedCode(result.code);
 
       toast.success("🔑 Ownership Transfer Code active! Share it with the buyer or solicitor.");
       if (onUpdated) onUpdated();
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `properties/${property.id}`);
-      toast.error("Failed to generate transfer code.");
+      toast.error(err instanceof Error ? err.message : "Failed to generate transfer code.");
     } finally {
       setSubmitting(false);
     }
@@ -67,19 +59,11 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
     if (!property?.id) return;
     setSubmitting(true);
     try {
-      await updateDoc(doc(db, "properties", property.id), {
-        transferStatus: "none",
-        transferCode: null,
-        transferExpiresAt: null,
-        transferTargetName: null,
-        transferTargetEmail: null,
-        updatedAt: new Date().toISOString()
-      });
+      await revokePropertyTransfer(user, property.id);
       toast.success("Transfer code revoked. Property remains securely in your account.");
       if (onUpdated) onUpdated();
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `properties/${property.id}`);
-      toast.error("Failed to cancel transfer.");
+      toast.error(err instanceof Error ? err.message : "Failed to cancel transfer.");
     } finally {
       setSubmitting(false);
     }
