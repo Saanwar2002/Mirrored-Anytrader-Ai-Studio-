@@ -3471,3 +3471,27 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 140 is documentation only; no webhook, intent, ledger, settlement, route, client, or balance changed.
 - No tests, emulator, typecheck, build, or CI were run in this step.
 - Next: enumerate all `payment_intents` creators and their metadata/type branches, then define a narrow fee receivable/settlement schema and tests before changing live financial code.
+
+
+## Section 141 — Payment-intent inventory: generic checkout creates bound records; taxi and driver fee Checkout remain outside that contract
+
+### Exact integration-branch evidence
+- `server.ts` has one generic `/api/create-checkout-session` intent creation flow:
+  - Creates `payment_intents/{chk_intent_*}` before Stripe Session creation, storing authenticated `userId`, server-resolved metadata/mode/amount and pending status.
+  - After Session creation, persists `checkoutSessionId`, Session currency, PaymentIntent ID and `session_created` status. The webhook later validates this exact record (Sections 140 and 125).
+  - The generated ID currently uses timestamp + Math.random rather than a cryptographically random identifier; Firestore document uniqueness prevents collision overwrite only if collision handling is explicit. Review this separately before broadening its use.
+- Separate `/api/rides/create-trip-payment` calls `executeCreateTripPaymentCommand`; Section 119–123 established that this flow does not create a `payment_intents` record or a ride-payment ledger entry and has no taxi fulfillment branch.
+- Separate `/api/driver/settle-fees` creates Checkout directly and records only `driverId` + `type: fee_settlement`; no payment intent or settlement attempt.
+- `/api/create-setup-session` is a Setup-mode flow (not a paid checkout fulfillment) and should not be counted as a payment-intent creator.
+- Search results also show `payment_intents` reads in webhook/verification paths, but the branch-specific server source inspection surfaced the generic Checkout creator as the only writer of the collection. Repository-wide search is default-branch indexed and may be stale; this is a scoped finding, not a claim that every other file/branch has no writer.
+
+### Conclusions
+1. Keep the generic intent contract as the baseline for future fee settlement, but do not assume the existing fee/taxi routes inherit it.
+2. Introduce a dedicated server command for fee settlement: derive driver identity, read ledger-backed outstanding entries, atomically reserve exact entry IDs/amount/version, create persisted attempt and bound payment intent, then create Checkout. Fail closed if any trusted read or Stripe call fails; compensate a stranded attempt without releasing already-settled fees.
+3. Reconcile generic intent ID generation and failed Session creation cleanup before using the route for high-value receivable settlement.
+4. No current change to generic Checkout or the fee/taxi routes is justified until fee accrual/ledger and settlement-allocation semantics are agreed and tested.
+
+### Status
+- Section 141 is documentation only; no route, intent, Stripe session, ledger, or user balance changed.
+- No tests, emulator, typecheck, build, or CI were run in this step.
+- Next: review `PaymentLedgerEngine.recordEscrowFunding` and transaction/idempotency semantics alongside the existing webhook fulfillment markers; then specify precise fee receivable entries, reservation state transitions, and reversal/retry behavior.
