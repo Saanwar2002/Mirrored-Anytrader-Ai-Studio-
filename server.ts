@@ -1,5 +1,5 @@
 import express from "express";
-import { isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
+import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -2625,36 +2625,32 @@ async function startServer() {
       };
 
       if (subscriptionType === "exclusive_leads") {
-        subId = userData.exclusiveSubscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         const currentEnd = userData.exclusiveCurrentPeriodEnd;
         fieldUpdates.exclusiveCancelAtPeriodEnd = true;
         if (currentEnd) fieldUpdates.exclusiveCurrentPeriodEnd = currentEnd;
       } else if (subscriptionType === "video_pro") {
-        subId = userData.videoProSubscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         const currentEnd = userData.videoProCurrentPeriodEnd;
         fieldUpdates.videoProCancelAtPeriodEnd = true;
         if (currentEnd) fieldUpdates.videoProCurrentPeriodEnd = currentEnd;
       } else if (subscriptionType === "gotham_saas") {
-        subId = userData.gothamSubscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.gothamCancelAtPeriodEnd = true;
-        fieldUpdates.cancelAtPeriodEnd = true;
         const currentEnd = userData.gothamCurrentPeriodEnd || userData.currentPeriodEnd;
         if (currentEnd) {
           fieldUpdates.gothamCurrentPeriodEnd = currentEnd;
-          fieldUpdates.currentPeriodEnd = currentEnd;
         }
       } else if (subscriptionType === "driver_gold") {
-        subId = userData.driverSubscriptionId || userData.subscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         const currentEnd = userData.driverCurrentPeriodEnd || userData.currentPeriodEnd;
         fieldUpdates.driverCancelAtPeriodEnd = true;
-        fieldUpdates.cancelAtPeriodEnd = true;
         if (currentEnd) {
           fieldUpdates.driverCurrentPeriodEnd = currentEnd;
-          fieldUpdates.currentPeriodEnd = currentEnd;
         }
       } else {
         // Default membership tier
-        subId = userData.subscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         const currentEnd = userData.currentPeriodEnd;
         fieldUpdates.cancelAtPeriodEnd = true;
         if (currentEnd) fieldUpdates.currentPeriodEnd = currentEnd;
@@ -2687,7 +2683,7 @@ async function startServer() {
           success: true,
           mock: true,
           cancelAtPeriodEnd: true,
-          currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd,
+          currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd || fieldUpdates.gothamCurrentPeriodEnd || fieldUpdates.driverCurrentPeriodEnd,
           message: "Subscription set to cancel at the end of the current billing cycle without renewing."
         });
       }
@@ -2708,13 +2704,9 @@ async function startServer() {
         } else if (subscriptionType === "gotham_saas") {
           fieldUpdates.gothamCancelAtPeriodEnd = true;
           fieldUpdates.gothamCurrentPeriodEnd = periodEndIso;
-          fieldUpdates.cancelAtPeriodEnd = true;
-          fieldUpdates.currentPeriodEnd = periodEndIso;
         } else if (subscriptionType === "driver_gold") {
           fieldUpdates.driverCancelAtPeriodEnd = true;
           fieldUpdates.driverCurrentPeriodEnd = periodEndIso;
-          fieldUpdates.cancelAtPeriodEnd = true;
-          fieldUpdates.currentPeriodEnd = periodEndIso;
         } else {
           fieldUpdates.cancelAtPeriodEnd = true;
           fieldUpdates.currentPeriodEnd = periodEndIso;
@@ -2726,7 +2718,7 @@ async function startServer() {
       res.json({
         success: true,
         cancelAtPeriodEnd: true,
-        currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd,
+        currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd || fieldUpdates.gothamCurrentPeriodEnd || fieldUpdates.driverCurrentPeriodEnd,
         message: "Subscription will cancel at the end of the current billing cycle. You will retain all benefits until your renewal date."
       });
     } catch (error: any) {
@@ -2760,21 +2752,19 @@ async function startServer() {
       };
 
       if (subscriptionType === "exclusive_leads") {
-        subId = userData.exclusiveSubscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.exclusiveCancelAtPeriodEnd = false;
       } else if (subscriptionType === "video_pro") {
-        subId = userData.videoProSubscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.videoProCancelAtPeriodEnd = false;
       } else if (subscriptionType === "gotham_saas") {
-        subId = userData.gothamSubscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.gothamCancelAtPeriodEnd = false;
-        fieldUpdates.cancelAtPeriodEnd = false;
       } else if (subscriptionType === "driver_gold") {
-        subId = userData.driverSubscriptionId || userData.subscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.driverCancelAtPeriodEnd = false;
-        fieldUpdates.cancelAtPeriodEnd = false;
       } else {
-        subId = userData.subscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.cancelAtPeriodEnd = false;
       }
 
