@@ -452,11 +452,15 @@ export default function EmergencyJobWizard() {
       }
 
       // Initiate Stripe Checkout for boost
+      const token = await user?.getIdToken();
+      if (!token) throw new Error("Please sign in to purchase an emergency boost.");
       const response = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" ,
-            "Idempotency-Key": crypto.randomUUID()
-          },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "Idempotency-Key": crypto.randomUUID()
+        },
         body: JSON.stringify({
           userId: user?.uid,
           price_data: {
