@@ -67,9 +67,21 @@ export function resolveSubscriptionProductMatch(
   if (dedicated.length > 1) {
     throw new Error("Stripe subscription ID is linked across multiple products; manual reconciliation required.");
   }
-  if (dedicated.length === 1) return dedicated[0];
 
   const generic = matches.find((match) => match.product.idField === "subscriptionId");
+  if (dedicated.length === 1) {
+    if (generic) {
+      const userData = generic.userDoc.data ? generic.userDoc.data() : {};
+      const legacyType = String(userData.subscriptionType || "");
+      const legacyProduct: SubscriptionProduct =
+        legacyType === "driver_gold" ? "gold_driver" :
+        legacyType === "gotham_saas" ? "gotham_saas" : "membership";
+      if (legacyProduct !== dedicated[0].product.key) {
+        throw new Error("Stripe subscription ID is linked to conflicting product fields; manual reconciliation required.");
+      }
+    }
+    return dedicated[0];
+  }
   if (!generic) return null;
 
   const userData = generic.userDoc.data ? generic.userDoc.data() : {};
