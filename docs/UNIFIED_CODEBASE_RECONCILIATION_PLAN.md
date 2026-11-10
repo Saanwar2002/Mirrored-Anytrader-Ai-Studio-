@@ -2023,3 +2023,31 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Regression tests cover legacy Gold Driver/Gotham fallback, membership default, dedicated-ID precedence, duplicate-user/product collisions and no-match behavior.
 
 - Added stale-legacy-ID protection: when a legacy generic Gold Driver/Gotham ID remains on a user record but a different dedicated product ID is present, events for the old generic ID are ignored instead of revoking or restoring the newer subscription's entitlement.
+
+
+## Section 66 — Lifecycle mapping hardening and legacy subscription resolution (2026-11-10)
+
+### Additional code review findings and changes
+
+- Removed the generic `currentPeriodEnd` write from Gotham lifecycle patches. Gotham now updates only `gothamCurrentPeriodEnd`; this avoids overwriting a separate membership billing date. A regression assertion covers the field boundary.
+- Reviewed the existing cancellation/reactivation routes and found they explicitly support legacy Gold Driver and Gotham subscription IDs stored in generic `subscriptionId` with a product discriminator.
+- The webhook resolver now uses `subscriptionType` to classify legacy `driver_gold` and `gotham_saas` generic IDs, defaults other generic IDs to membership, and prefers a dedicated product-specific ID when the same subscription ID is linked through both fields.
+- The resolver deduplicates a same-user generic/dedicated match, rejects cross-user and multiple-dedicated-product collisions, and ignores a legacy generic ID when a different newer dedicated Gold Driver/Gotham ID has superseded it.
+- Added pure resolver regression cases for legacy Gold Driver/Gotham, membership default, dedicated-ID precedence, cross-user/product collisions, no match, and superseded legacy IDs.
+- Removed an extra closing `});` in the webhook handler's product lifecycle block that was introduced during the earlier extraction. Source was refetched after the fix and the transaction now closes once.
+
+### Current branch and CI status
+
+- Branch: `integration/pr-consolidation-20261109`.
+- Latest observed branch head: `0766879fc13873fd73c960a840173c0a74866ff6`; comparison: 200 commits ahead / 0 behind `main`.
+- Latest push workflow run observed: `42804864272` (run 628), failed. Recent consecutive runs 621–628 also failed.
+- The prior run investigation established the common failure mode: runner ID 0, no runner name, no steps, and no downloadable job logs. The repeated failures are consistent with runner provisioning/billing being unavailable, not a code-level test result.
+- No tests have been executed successfully on this head. The pure mapping and resolver tests are committed but remain unexecuted until GitHub Actions can provision a runner.
+- `main` remains unchanged; no deployment or production mutation was performed.
+
+### Next actions
+
+1. Once Actions runner capacity is restored, rerun the complete `security-and-build-gate` and inspect every step/result.
+2. Add/execute an end-to-end webhook test harness for the product resolver, duplicate event claim, replaced IDs, same-second event ordering, invoice-triggered refresh, and terminal deletion.
+3. Continue the outstanding reconciliation sections for Gotham quota concurrency/idempotency, PR #2 membership/boost/refund/webhook safeguards, PR #5 reconciliation, and Stripe product lifecycle/grace policy.
+4. Do not merge, deploy, sync AI Studio, or weaken release gates before all required tests and audits pass.
