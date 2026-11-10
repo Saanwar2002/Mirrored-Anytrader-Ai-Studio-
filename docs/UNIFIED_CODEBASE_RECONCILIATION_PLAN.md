@@ -1753,3 +1753,28 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
 2. Gotham licence/door cap: verify server-side property CRUD enforces subscription door entitlement, not only checkout metadata/UI. Add regression tests for cap bypass and tier changes if missing.
 3. Review Stripe lifecycle mapping and current entitlement field names against actual checkout fulfilment and existing cancellation/reactivation endpoints before coding; avoid guessing or blanket revocation.
 4. Run focused tests plus full CI after changes. Integration branch only; no main merge, AI Studio Pull/Push, or deployment absent explicit approval.
+
+
+
+## Section 58 — Gotham property entitlement enforcement: confirmed bypass and architecture decision (2026-11-10)
+
+### Source evidence
+- Re-inspected integration `server.ts`: Gotham Stripe checkout fulfilment stores `isGothamSubscriber`, `gothamSubscriptionId`, `gothamSubscriptionStatus`, `gothamDoorsCount`, tier, and billing-cycle fields (around lines 1855–1887). This is purchase persistence only.
+- Inspected `firestore.rules` `/properties/{propertyId}` (around lines 736–784). Authenticated owners/users can directly `create` property documents if `ownerId` or `userId` equals their UID; this rule does not consult Gotham subscription status or door allowance. The client can therefore create multiple property records without a server-enforced licensed-door count, assuming it meets the ownership fields.
+- Property create is not currently an authoritative server API in the inspected `server.ts` routes; property records are written directly through Firestore. A simple server route addition alone would not close the bypass while direct Firestore create remains allowed.
+
+### Finding / required architecture
+- **Confirmed:** Gotham door count is not enforced at the Firestore property-create boundary. Do not describe paid door licensing as enforced.
+- To enforce a count safely, property creation must become a trusted server-mediated operation (or another design with an atomic authoritative quota). Server must authenticate UID, read current subscription/door allowance, count or reserve licensed slots under concurrency-safe transaction/locking, and create the property + quota reservation atomically. Direct client create must then be denied for ordinary users; trusted server/admin paths remain deliberate.
+- Existing property migrations, transfers, deletions, admin creation, landlord roles, and legacy users need an explicit grandfathering/slot-release policy before changing rules. Avoid an unsafe rules-only approximation: Firestore rules cannot perform an arbitrary collection count, and client-only checks are bypassable.
+
+### Next implementation sequence
+1. Trace all property creation call sites, existing property schemas, and admin/import paths; determine whether one canonical server command can replace them.
+2. Define quota accounting (count existing active properties vs explicit slot documents; how delete/transfer releases a slot; how tier/quantity changes and subscription expiry affect existing inventory).
+3. Implement server-authoritative create + atomic quota reservation and migrate client call sites; deny direct owner create in rules after migration coverage.
+4. Add emulator tests for under-limit, at-limit, concurrent creates, spoofed owner, non-subscriber, deletion/slot release, admin/legacy migration, and tier increase/decrease.
+5. Independently implement/test Stripe lifecycle synchronization (Section 57); do not let subscription cancellation unexpectedly erase existing property records.
+
+### Verification / promotion safety
+- Inspection only; no quota enforcement code or rules changed in this section.
+- Integration only. Main, AI Studio sync, production Firebase, and deployment untouched.
