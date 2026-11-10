@@ -3804,9 +3804,11 @@ async function startServer() {
       if (matches.size !== 1) return res.status(404).json({ error: "Invalid or expired transfer code." });
       const propertyDoc = matches.docs[0];
       const property = propertyDoc.data() || {};
-      const expiry = property.transferExpiresAt ? new Date(property.transferExpiresAt).getTime() : 0;
-      if (expiry && expiry < Date.now()) {
-        return res.status(410).json({ error: "This transfer code has expired." });
+      if (property.transferExpiresAt) {
+        const expiry = new Date(property.transferExpiresAt).getTime();
+        if (!Number.isFinite(expiry) || expiry < Date.now()) {
+          return res.status(410).json({ error: "This transfer code has expired or is invalid." });
+        }
       }
       res.json({
         success: true,
@@ -3895,8 +3897,19 @@ async function startServer() {
         const propertyDoc = matches.docs[0];
         const propertyRef = propertyDoc.ref;
         const property = propertyDoc.data() || {};
-        const expiry = property.transferExpiresAt ? new Date(property.transferExpiresAt).getTime() : 0;
-        if (expiry && expiry < Date.now()) throw new ForbiddenError("This property transfer code has expired.");
+        if (property.transferExpiresAt) {
+          const expiry = new Date(property.transferExpiresAt).getTime();
+          if (!Number.isFinite(expiry) || expiry < Date.now()) {
+            throw new ForbiddenError("This property transfer code has expired or is invalid.");
+          }
+        }
+        if (property.transferTargetEmail) {
+          const expectedEmail = String(property.transferTargetEmail).trim().toLowerCase();
+          const claimantEmail = String(user.email || "").trim().toLowerCase();
+          if (!user.email_verified || !claimantEmail || claimantEmail !== expectedEmail) {
+            throw new ForbiddenError("This transfer code is restricted to the verified buyer email specified by the owner.");
+          }
+        }
         const previousOwnerId = String(property.ownerId || property.userId || property.landlordId || "");
         if (!previousOwnerId) throw new ForbiddenError("Property has no verifiable previous owner.");
         if (previousOwnerId === userId) throw new BadRequestError("This property is already owned by your account.");
