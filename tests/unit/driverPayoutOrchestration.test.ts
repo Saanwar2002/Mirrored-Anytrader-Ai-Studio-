@@ -18,10 +18,12 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
   const applyFieldValue = (v: any) => {
     if (v && typeof v === "object") {
       if ("operand" in v) return v.operand;
-      if ("_methodName" in v && v._methodName === "serverTimestamp") return Date.now();
-      if ("_methodName" in v && v._methodName === "delete") return undefined;
-      // Handle admin.firestore.FieldValue sentinels
-      if (typeof v.isEqual === "function") return Date.now();
+      // Resolve Firestore sentinels by identity; treating delete() as a timestamp
+      // leaves stale lease fields behind and makes this mock diverge from Firestore.
+      if (typeof v.isEqual === "function") {
+        if (v.isEqual(admin.firestore.FieldValue.delete())) return undefined;
+        if (v.isEqual(admin.firestore.FieldValue.serverTimestamp())) return Date.now();
+      }
     }
     return v;
   };
