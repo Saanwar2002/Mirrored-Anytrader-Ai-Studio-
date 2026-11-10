@@ -1,8 +1,8 @@
 export type SubscriptionProduct = "membership" | "gold_driver" | "exclusive_leads" | "video_pro" | "gotham_saas";
 
 export function buildSubscriptionLifecyclePatch(product: SubscriptionProduct, subscription: Record<string, any>, isDeleted = false): Record<string, any> {
-  const status = String(subscription.status || (isDeleted ? "canceled" : "unknown"));
-  const entitled = status === "active" || status === "trialing";
+  const status = isDeleted ? "canceled" : String(subscription.status || "unknown");
+  const entitled = !isDeleted && (status === "active" || status === "trialing");
   const terminal = isDeleted || ["canceled", "unpaid", "incomplete_expired"].includes(status);
   const periodEnd = Number(subscription.current_period_end || 0);
   const periodEndIso = periodEnd > 0 ? new Date(periodEnd * 1000).toISOString() : undefined;
