@@ -1000,8 +1000,9 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         verifiedByAdmin: true,
       }));
 
-      // Buyer can claim transfer updating only allowed ownership fields
-      await assertSucceeds(updateDoc(doc(buyerDb, "properties/prop_transfer_esc"), {
+      // Ownership claims must use the authenticated server command so Gotham
+      // quota counters move atomically with the property ownership.
+      await assertFails(updateDoc(doc(buyerDb, "properties/prop_transfer_esc"), {
         ownerId: "user_claim_buyer",
         userId: "user_claim_buyer",
         transferStatus: "claimed",
