@@ -3662,11 +3662,13 @@ async function startServer() {
         if (isGothamAccount && !isGothamEntitled) {
           throw new ForbiddenError("Gotham subscription is not active. Property creation is unavailable until billing is restored.");
         }
-        if (isGothamEntitled) {
-          const doorsAllowed = Number(profile.gothamDoorsCount);
-          if (!Number.isSafeInteger(doorsAllowed) || doorsAllowed < 1) {
-            throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
-          }
+        const doorsAllowed = isGothamEntitled ? Number(profile.gothamDoorsCount) : 0;
+        if (isGothamEntitled && (!Number.isSafeInteger(doorsAllowed) || doorsAllowed < 1)) {
+          throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
+        }
+        // Once a Gotham usage document exists, keep it current even while the
+        // account is on another plan so a later Gotham renewal starts accurately.
+        if (isGothamEntitled || usageSnap.exists) {
           let currentUsage: number;
           if (usageSnap.exists) {
             currentUsage = Number(usageSnap.data()?.propertyCount);
@@ -3687,16 +3689,19 @@ async function startServer() {
             }
             currentUsage = existingIds.size;
           }
-          if (currentUsage >= doorsAllowed) {
+          if (isGothamEntitled && currentUsage >= doorsAllowed) {
             throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
           }
-          tx.set(usageRef, {
+          const usagePatch: Record<string, any> = {
             userId,
             propertyCount: currentUsage + 1,
-            allowance: doorsAllowed,
-            reconciledAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          }, { merge: true });
+          };
+          if (isGothamEntitled) {
+            usagePatch.allowance = doorsAllowed;
+            usagePatch.reconciledAt = admin.firestore.FieldValue.serverTimestamp();
+          }
+          tx.set(usageRef, usagePatch, { merge: true });
         }
         tx.create(propertyRef, propertyData);
         if (requestRef) {
@@ -3741,7 +3746,7 @@ async function startServer() {
         if (quotaOwnerSnap?.exists) {
           const ownerProfile = quotaOwnerSnap.data() || {};
           const isGothamAccount = ownerProfile.subscriptionType === "gotham_saas" || ownerProfile.isGothamSubscriber === true;
-          if (isGothamAccount && usageRef) {
+          if ((isGothamAccount || usageSnap?.exists) && usageRef) {
             let currentUsage: number;
             if (usageSnap?.exists) {
               currentUsage = Number(usageSnap.data()?.propertyCount);
@@ -3910,7 +3915,7 @@ async function startServer() {
         }
         const previousProfile = previousOwnerSnap.exists ? (previousOwnerSnap.data() || {}) : {};
         const currentNewProfile = latestNewOwnerSnap.exists ? (latestNewOwnerSnap.data() || {}) : {};
-        const previousIsGotham = previousProfile.subscriptionType === "gotham_saas" || previousProfile.isGothamSubscriber === true;
+        const previousIsGotham = previousProfile.subscriptionType === "gotham_saas" || previousProfile.isGothamSubscriber === true || previousUsageSnap.exists;
         const currentNewIsGotham = currentNewProfile.subscriptionType === "gotham_saas" || currentNewProfile.isGothamSubscriber === true;
         if (currentNewIsGotham && (
           currentNewProfile.gothamSubscriptionId !== verifiedGothamSubscriptionId ||
@@ -3940,9 +3945,9 @@ async function startServer() {
             previousCount = ids.size;
           }
         }
-        if (currentNewIsGotham) {
-          const allowance = Number(currentNewProfile.gothamDoorsCount);
-          if (!Number.isSafeInteger(allowance) || allowance < 1) {
+        if (currentNewIsGotham || newUsageSnap.exists) {
+          const allowance = currentNewIsGotham ? Number(currentNewProfile.gothamDoorsCount) : 0;
+          if (currentNewIsGotham && (!Number.isSafeInteger(allowance) || allowance < 1)) {
             throw new ForbiddenError("New owner's Gotham door allowance is invalid.");
           }
           if (newUsageSnap.exists) {
@@ -3960,7 +3965,7 @@ async function startServer() {
             for (const snap of [ownerQ, userQ, landlordQ]) snap.docs.forEach((doc: any) => ids.add(doc.id));
             newCount = ids.size;
           }
-          if (newCount >= allowance) {
+          if (currentNewIsGotham && newCount >= allowance) {
             throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
           }
         }
@@ -3991,7 +3996,8 @@ async function startServer() {
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         if (newCount !== null) tx.set(newUsageRef, {
-          userId, propertyCount: newCount + 1, allowance: Number(currentNewProfile.gothamDoorsCount),
+          userId, propertyCount: newCount + 1,
+          ...(currentNewIsGotham ? { allowance: Number(currentNewProfile.gothamDoorsCount) } : {}),
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         tx.create(claimRef, {
