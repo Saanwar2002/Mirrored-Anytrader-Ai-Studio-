@@ -761,7 +761,11 @@ service cloud.firestore {
         (
           (resource.data.get('ownerId', '') == request.auth.uid || resource.data.get('userId', '') == request.auth.uid) &&
           !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'ownerId', 'userId', 'landlordId', 'transferClaimedByUid', 'verifiedByAdmin'
+            'ownerId', 'userId', 'landlordId', 'homeownerId',
+            'pendingTransferToUid', 'transferStatus', 'transferCode',
+            'transferExpiresAt', 'transferTargetEmail', 'transferHistory',
+            'transferClaimedAt', 'transferClaimedByUid', 'previousOwnersCount',
+            'verifiedByAdmin'
           ])
         )
       );
