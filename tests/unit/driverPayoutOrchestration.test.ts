@@ -17,15 +17,13 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
 
   const applyFieldValue = (v: any, fieldName?: string) => {
     if (v && typeof v === "object") {
-      // Resolve the lease timestamp in this Firestore mock, rather than leaving a FieldValue sentinel.
-      if (fieldName === "payoutLockedAt") return Date.now();
-      if ("operand" in v) return v.operand;
-      // Firebase Admin sentinel method names identify delete vs server timestamp.
-      // FieldValue.isEqual is not reliable across independently-created sentinel instances.
+      // Resolve delete sentinels before field-specific timestamp handling: dry-run
+      // lease release deletes payoutLockedAt, while lease acquisition writes a timestamp.
       const methodName = typeof v._methodName === "string" ? v._methodName.toLowerCase() : "";
       if (methodName.includes("delete")) return undefined;
-      if (methodName.includes("servertimestamp")) return Date.now();
       if (typeof v.isEqual === "function" && v.isEqual(admin.firestore.FieldValue.delete())) return undefined;
+      if ("operand" in v) return v.operand;
+      if (methodName.includes("servertimestamp") || fieldName === "payoutLockedAt") return Date.now();
     }
     return v;
   };
