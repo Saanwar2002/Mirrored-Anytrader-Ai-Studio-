@@ -502,12 +502,16 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
       }),
     ]);
 
-    // Exactly one worker must succeed in transferring, the other must skip due to active lease
+    // Exactly one worker may transfer. Depending on scheduling, the competing
+    // worker either observes the active lease and skips, or its initial query
+    // runs after payoutTransferred is committed and finds no eligible ride.
     const totalProcessed = resultWorker1.processedCount + resultWorker2.processedCount;
     const totalSkipped = resultWorker1.skippedCount + resultWorker2.skippedCount;
+    const totalFailed = resultWorker1.failedCount + resultWorker2.failedCount;
 
     expect(totalProcessed).toBe(1);
-    expect(totalSkipped).toBe(1);
+    expect(totalFailed).toBe(0);
+    expect(totalSkipped).toBeLessThanOrEqual(1);
     expect(createdTransfers.length).toBe(1);
 
     const rideInStore = mockStore["ride_requests/ride_concurrent_race"];
