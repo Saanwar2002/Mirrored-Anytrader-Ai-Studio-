@@ -2118,3 +2118,14 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Callers may supply a stable key explicitly; malformed supplied keys are rejected before the request.
 - Added focused tests for network retry key reuse, new key after success, caller-supplied key, and malformed key rejection. These tests are authored but remain unexecuted pending GitHub Actions runner restoration.
 - The server's transaction-level request record remains the authority; client-side key reuse is an additional retry guarantee, not a replacement for server idempotency.
+
+
+## Section 72 — Property command idempotency implementation and review (2026-11-10)
+
+- The property API's server transaction already atomically reads/writes the per-user `property_creation_requests` record alongside property creation and quota increments. It returns the existing property ID for duplicate keys.
+- The client previously generated a new UUID on every invocation, defeating that server protection for retries after a network timeout or lost response.
+- `createPropertyViaCommand` now retains a pending key for the authenticated user + serialized payload until success, reuses it after a failed/ambiguous request, and clears it after a successful response. It also accepts an optional caller-supplied key and validates it against the server's 12–100 character safe-key format.
+- Added tests for network-failure retry reuse, new key after success, supplied key, and malformed supplied key.
+- Source review confirms the server transaction still creates the property and idempotency record atomically, with the quota counter in the same transaction. No changes were made to weaken the server-side guard.
+- Latest branch head before this documentation update: `d678281e7d2434cf8517361209e611b4be81ebdd`; comparison: 231 ahead / 0 behind `main`.
+- Latest push runs remain failing before steps due runner ID 0 / no runner. The new property tests are authored but unexecuted.
