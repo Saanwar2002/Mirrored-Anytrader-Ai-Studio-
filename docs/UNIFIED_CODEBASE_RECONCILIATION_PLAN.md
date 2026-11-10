@@ -3421,3 +3421,26 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 138 is documentation only; no code, tests, route, UI, Firestore rules, ledger, or balance changed.
 - No tests, emulator, typecheck, build, or CI were run in this step.
 - Next: inventory all existing fee/receivable ledger writers and settlement readers, then design one idempotent server cash-completion command with ride snapshot and reconciliation against legacy pending balances.
+
+
+## Section 139 — Platform-fee settlement still has no Stripe-bound fulfillment; the sandbox confirmation route clears the entire aggregate balance
+
+### Exact integration-branch evidence
+- `server.ts` blob `d0d781571a2a1dd28478ca92930f4f9b919bf38a`:
+  - `POST /api/driver/settle-fees` derives driver UID from verified auth, but accepts a body `amount` fallback (including default £9.75) and falls back to that amount if Firestore read fails or no document is found. A zero stored balance can also fall through because of `||`.
+  - Stripe Checkout metadata contains only `driverId` and `type: fee_settlement`; no settlement operation ID, intent binding, persisted attempt, or exact expected balance/version is recorded. The success URL is amount-based.
+  - `POST /api/driver/confirm-fee-settlement` is sandbox-only behind non-production and `ALLOW_MOCK_PAYMENTS=true`; it reads the current aggregate pending balance and unconditionally writes `pendingPlatformFees: 0`. It does not verify a Stripe Session/PaymentIntent, paid status, currency, amount, settlement ID, or balance version.
+  - No corresponding fee-settlement fulfillment handler was found in the previously inspected shared webhook path (Section 126). Consequently a genuine card success has no verified server-side settlement ledger/clear operation.
+- Existing `pendingPlatformFees` writes found in repository search are the client-side cash accrual increment and the server sandbox zeroing path; no dedicated fee receivable ledger writer was surfaced by the targeted searches. Search is not a complete proof of absence, but the aggregate balance is not currently backed by a demonstrated immutable per-ride fee ledger.
+
+### Required settlement redesign
+1. Create a server-owned settlement attempt against an exact ledger-derived outstanding balance and unique settlement ID; persist it before redirecting to Checkout.
+2. Bind Checkout metadata and/or `client_reference_id` to the persisted attempt, validate exact GBP amount and Stripe-paid status in webhook fulfillment, and make fulfillment idempotent.
+3. Reconcile settlement against fee ledger entries (or an explicit versioned balance snapshot) so fees accrued after Checkout creation remain outstanding; never clear the entire current aggregate on an old session success.
+4. Remove the amount/default fallback. If the server cannot read the trusted balance, fail closed and do not create a Checkout Session.
+5. Retire the sandbox clearing endpoint and success UI that can report success despite a failed backend confirmation. Sandbox simulations must use separate non-financial records and must never mutate the real fee receivable balance.
+
+### Status
+- Section 139 is documentation only; no route, webhook, client, ledger, or balance changed.
+- No tests, emulator, typecheck, build, or CI were run in this step.
+- Next: inspect Stripe webhook registration/dispatch and existing payment-intent ledger conventions, then define settlement attempt + fee ledger schemas and idempotent webhook behavior.
