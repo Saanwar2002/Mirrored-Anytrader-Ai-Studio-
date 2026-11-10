@@ -21,6 +21,48 @@ let globalConfig: any = {
   imRequireTagMatch: false
 };
 
+async function expireAndRefundInstantMatch(db: admin.firestore.Firestore, matchRef: admin.firestore.DocumentReference, stripe: Stripe | null, reason: string): Promise<void> {
+  const refundRef = db.collection("instant_match_refunds").doc(matchRef.id);
+  const operation = await db.runTransaction(async (tx: any) => {
+    const [matchSnap, refundSnap] = await Promise.all([tx.get(matchRef), tx.get(refundRef)]);
+    if (!matchSnap.exists) return { action: "stop" as const };
+    const match = matchSnap.data() || {};
+    const existing = refundSnap.exists ? refundSnap.data() || {} : null;
+    if (existing?.status === "succeeded" || existing?.status === "manual_review") return { action: "stop" as const };
+    const paymentIntentId = match.stripePaymentIntentId;
+    if (typeof paymentIntentId !== "string" || !/^pi_[A-Za-z0-9]+$/.test(paymentIntentId)) {
+      tx.set(matchRef, { status: "expired", expiredAt: match.expiredAt || new Date().toISOString(), refundStatus: "manual_review", refundReviewReason: "missing_or_invalid_payment_intent" }, { merge: true });
+      tx.set(refundRef, { instantMatchId: matchRef.id, status: "manual_review", reason: "missing_or_invalid_payment_intent", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      return { action: "stop" as const };
+    }
+    if (!existing && match.status !== "searching") return { action: "stop" as const };
+    const idempotencyKey = "instant-match-expiry:" + matchRef.id;
+    tx.set(matchRef, { status: "expired", expiredAt: match.expiredAt || new Date().toISOString(), refundStatus: "processing" }, { merge: true });
+    tx.set(refundRef, { instantMatchId: matchRef.id, paymentIntentId, idempotencyKey, reason, status: "processing", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return { action: "refund" as const, paymentIntentId, idempotencyKey };
+  });
+  if (operation.action !== "refund") return;
+  if (!stripe) {
+    await refundRef.set({ status: "reconciliation_required", error: "stripe_client_unavailable", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await matchRef.set({ refundStatus: "reconciliation_required" }, { merge: true });
+    return;
+  }
+  try {
+    const refund = await stripe.refunds.create({ payment_intent: operation.paymentIntentId, reason: "requested_by_customer", metadata: { instantMatchId: matchRef.id, operationType: "ANYTRADER_INSTANT_MATCH_EXPIRY" } }, { idempotencyKey: operation.idempotencyKey });
+    const status = refund.status === "succeeded" ? "succeeded" : (refund.status === "failed" || refund.status === "canceled") ? "manual_review" : "processing";
+    await db.runTransaction(async (tx: any) => {
+      const [latestMatch, latestRefund] = await Promise.all([tx.get(matchRef), tx.get(refundRef)]);
+      if (!latestMatch.exists || !latestRefund.exists) throw new Error("Instant Match refund operation disappeared.");
+      tx.set(refundRef, { status, stripeRefundId: refund.id, stripeRefundStatus: refund.status || null, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(matchRef, { refundStatus: status, stripeRefundId: refund.id }, { merge: true });
+    });
+  } catch (err: any) {
+    const message = err?.message || String(err);
+    await refundRef.set({ status: "reconciliation_required", error: message.slice(0, 500), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await matchRef.set({ refundStatus: "reconciliation_required" }, { merge: true });
+    console.error("Instant Match refund outcome requires reconciliation:", err);
+  }
+}
 export function startInstantMatchEngine(db: admin.firestore.Firestore) {
   if (!db) return;
   console.log("Starting Instant Match Engine...");
@@ -92,24 +134,7 @@ export function startInstantMatchEngine(db: admin.firestore.Firestore) {
                 const maxAttempts = globalConfig.imMaxAttempts ?? 10;
                 if (nextAttemptNum > maxAttempts) {
                   // Expire the match entirely if we tried max times
-                  await matchDoc.ref.update({
-                    status: "expired",
-                    expiredAt: now.toISOString()
-                  });
-                  // Refund customer
-                  if (match?.stripePaymentIntentId) {
-                     try {
-                         const stripe = getStripeClient();
-                         if (stripe) {
-                           await stripe.refunds.create({
-                             payment_intent: match.stripePaymentIntentId,
-                             reason: 'requested_by_customer'
-                           });
-                         }
-                     } catch (err) {
-                         console.error("Failed to refund instant match:", err);
-                     }
-                  }
+                  await expireAndRefundInstantMatch(db, matchDoc.ref, getStripeClient(), "attempts_exhausted");
                 } else {
                   await initiateNextAttempt(db, matchDoc.ref, match, nextAttemptNum);
                 }
@@ -160,23 +185,7 @@ export function startInstantMatchEngine(db: admin.firestore.Firestore) {
           const nextAttemptNum = attempt.attemptNumber + 1;
           const maxAttempts = globalConfig.imMaxAttempts ?? 10;
           if (nextAttemptNum > maxAttempts) {
-             await matchDoc.ref.update({
-                status: "expired",
-                expiredAt: new Date().toISOString()
-             });
-             if (matchDoc.data()?.stripePaymentIntentId) {
-                try {
-                    const stripe = getStripeClient();
-                    if (stripe) {
-                      await stripe.refunds.create({
-                        payment_intent: matchDoc.data()?.stripePaymentIntentId,
-                        reason: 'requested_by_customer'
-                      });
-                    }
-                } catch (err) {
-                    console.error("Failed to refund instant match:", err);
-                }
-             }
+             await expireAndRefundInstantMatch(db, matchDoc.ref, getStripeClient(), "attempts_exhausted");
           } else {
              await initiateNextAttempt(db, matchDoc.ref, matchDoc.data(), nextAttemptNum);
           }
@@ -254,10 +263,7 @@ async function initiateNextAttempt(db: admin.firestore.Firestore, matchRef: admi
   
   if (availableTraders.length === 0) {
     // No more traders!
-    await matchRef.update({
-      status: "expired",
-      expiredAt: new Date().toISOString()
-    });
+    await expireAndRefundInstantMatch(db, matchRef, getStripeClient(), "no_eligible_traders");
     return;
   }
 
