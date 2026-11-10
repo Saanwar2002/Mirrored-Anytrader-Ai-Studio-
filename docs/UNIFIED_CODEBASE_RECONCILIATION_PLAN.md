@@ -2607,3 +2607,19 @@ The follow-up search found an active refund-producing path outside the Stripe we
 - Static review only. No worker was started, no Stripe request was made, and no Firebase data was read or mutated.
 
 Next: inspect worker deployment/runtime topology and existing Instant Match tests, then design a single idempotent refund operation shared by both timeout triggers. Keep refund ingestion (FIN-02) distinct from refund initiation and reconciliation.
+
+
+## Section 108 — Instant Match refund identity is absent from production fulfillment (2026-11-10)
+
+A deeper trace from the Stripe checkout webhook into the worker shows that the Section 107 refund-initiation risk is incomplete without checking how the match is created:
+
+- In the production `checkout.session.completed` fulfillment transaction, `server.ts` creates `instant_matches/{im_<session.id>}` with job/customer IDs, `chargeAmountPence`, tier, status and timestamps. It does **not** persist `session.payment_intent` or any `stripePaymentIntentId` field on the match. The same transaction's fulfillment marker stores the event/session/intent metadata reference, but not a PaymentIntent field on the match document.
+- The Instant Match worker's two refund branches both guard on `match.stripePaymentIntentId`. The production-created match therefore does not satisfy the guard as currently written, so these branches cannot identify and refund the checkout payment for the normal webhook-created match. This is a source-level control-flow conclusion, not a live transaction test.
+- The separate mock checkout route also creates an Instant Match without a PaymentIntent ID. It is not evidence of a production Stripe payment identity.
+- A second gap exists in `initiateNextAttempt`: when no available traders remain, it sets the match to `expired` and returns without invoking the refund path. That path can expire a match even when a payment identity is available in a future corrected schema.
+- Consequently, remediation must first establish a trusted, durable payment identity at checkout fulfillment (from the verified Stripe Checkout Session's PaymentIntent, with explicit handling if the session is not yet associated with one). Then every terminal no-match path must converge on the same durable refund operation. Do not infer a PaymentIntent from a client field, job ID, session ID, or the worker's current missing property.
+- Keep the two failure classes distinct: (1) refund not initiated because the payment identity is missing or the terminal path bypasses refund logic; (2) refund initiated but outcome ambiguous/duplicated because of missing idempotency and durable operation state. Both need explicit tests.
+
+No source code was changed in this section. No Stripe API or Firebase production data was accessed, and no worker was started. Tests remain unexecuted.
+
+Next: inspect the Checkout Session creation mode and its PaymentIntent availability contract, then implement a trusted payment-identity handoff and a single terminal-expiry/refund operation covering attempt exhaustion and zero-eligible-trader expiry. Add tests for absent PaymentIntent, delayed/missing session PaymentIntent, no eligible traders, concurrent terminal triggers, and ambiguous Stripe responses before considering a live rollout.
