@@ -3444,3 +3444,30 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 139 is documentation only; no route, webhook, client, ledger, or balance changed.
 - No tests, emulator, typecheck, build, or CI were run in this step.
 - Next: inspect Stripe webhook registration/dispatch and existing payment-intent ledger conventions, then define settlement attempt + fee ledger schemas and idempotent webhook behavior.
+
+
+## Section 140 — Stripe webhook has a generic payment-intent binding gate, but fee settlement is not a recognized fulfillment type; existing ledger is job/escrow oriented
+
+### Exact integration-branch evidence
+- `server.ts` blob fetched from `integration/pr-consolidation-20261109`, webhook route `POST /api/webhook`:
+  - Every paid `checkout.session.completed` is required to carry `metadata.intentId` and `client_reference_id`; the corresponding `payment_intents/{intentId}` must exist and pass `evaluateCheckoutIntentBinding` (user, session ID, mode, exact amount, currency, optional PaymentIntent ID, and allowed intent status).
+  - A binding mismatch marks the intent `review_required` and fails fulfillment. A pending Session-ID binding is deliberately retryable.
+  - The subsequent type-specific fulfillment chain handles Video Pro, Exclusive Leads, Gold Driver, Gotham SaaS, and membership/subscription branches. No `fee_settlement` branch was found in that chain; the driver fee Checkout creator found in the same server file still creates a card Session with only `driverId` and `type: fee_settlement`, without an intent ID/client reference. It therefore cannot pass the common paid-session binding gate.
+  - The webhook's unpaid `checkout.session.completed` path marks the event completed/skipped rather than waiting for `checkout.session.async_payment_succeeded`; Section 125 records the separate async-payment event gap.
+- `src/server/paymentLedger.ts`:
+  - `LedgerEntry` is typed for `ESCROW_DEPOSIT | ESCROW_RELEASE | PLATFORM_COMMISSION | REFUND | RIDE_PAYMENT`, with minor-unit amount, platform fee, net payout, currency, payer/payee, status and idempotency key.
+  - The engine uses `payment_ledger` and `payment_idempotency` for escrow/release and other payment operations. No dedicated fee-receivable/fee-settlement entry type or settlement allocation contract appears in this interface.
+- `src/server/checkoutIntentIntegrity.ts`:
+  - The shared binding helper is generic and could validate a properly persisted fee settlement intent, but its current accepted intent states and Session fields do not themselves prove that a fee receivable was allocated or settled.
+
+### Conclusions / design constraints
+1. Do not bolt a fee-settlement branch onto webhook metadata alone. First persist an immutable settlement attempt and exact allocation of outstanding fee ledger IDs/amounts; then create a `payment_intents` record using the existing binding contract and set Stripe metadata to the attempt ID/type.
+2. Extend the financial ledger model deliberately (fee accrual/settlement allocation or a separate receivable ledger with clear accounting semantics); do not mislabel driver fee debt as `RIDE_PAYMENT` or `PLATFORM_COMMISSION` escrow proceeds.
+3. Webhook fulfillment must transactionally verify the claim token, bound intent, paid Session, GBP exact amount, settlement attempt state, and the exact fee allocations; write a unique fulfillment marker and settlement entries. Replay must return the existing effect, not clear a current aggregate.
+4. Add `checkout.session.async_payment_succeeded` / failed handling only with the same intent/attempt binding and payment verification; avoid marking an unpaid event terminal before a later successful payment can be reconciled.
+5. The generic Checkout intent gate is a reusable security boundary, not proof that all current Checkout creators comply. Inventory each creator against the required persisted intent and fulfillment handler before claiming end-to-end payment integrity.
+
+### Status
+- Section 140 is documentation only; no webhook, intent, ledger, settlement, route, client, or balance changed.
+- No tests, emulator, typecheck, build, or CI were run in this step.
+- Next: enumerate all `payment_intents` creators and their metadata/type branches, then define a narrow fee receivable/settlement schema and tests before changing live financial code.
