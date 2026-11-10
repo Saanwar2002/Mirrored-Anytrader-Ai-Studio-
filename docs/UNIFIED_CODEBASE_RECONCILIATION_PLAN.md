@@ -3231,3 +3231,38 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 132 is documentation only; no source code, Firestore rules, Remote Config parameters, or live configuration changed.
 - No tests, emulator, typecheck, build, CI, Firebase console access, or production operation was run.
 - Next: inspect all server-side reads and admin mutation paths for `platform_config/rides` and any existing audit/version conventions, then finalize the pricing schema before implementation.
+
+
+## Section 133 — Ride pricing has multiple client-side admin writers but no server-owned versioned pricing contract
+
+### Exact integration-branch evidence
+- `src/components/RidesCommandCenter.tsx` blob `1078ff7c6dd0d9407cddfb5a0c1edeef8fc98915`:
+  - `handleSaveConfig` writes a broad sanitized set of fare, commission, fixed-fee, dispatch, and surge fields to `platform_config/rides` using client SDK `setDoc(..., { merge: true })`.
+  - It stamps `updatedAt: serverTimestamp()`, but does not add a config version, actor identity, before/after audit event, or schema validation at the server boundary. Numeric coercions such as `Number(value) || fallback` can silently turn explicit zero/invalid values into defaults.
+- `src/components/anyroller/PricingFares.tsx` blob `885960b0aeaba10a31096c565dbc05b39c161c36`:
+  - A second client admin screen writes overlapping fare, commission, and fixed-fee fields to the same document with merge semantics.
+  - It writes `commissionRate` as a decimal fraction but does not write a version or audit record.
+- `src/components/anyroller/DispatchEngine.tsx` blob `50e7a3624248c6c2a91817e2691dcbe19c75cf87`:
+  - A third client admin surface writes operational policy fields to the same document, also with merge semantics. This creates a shared mutable document with multiple independently deployed writers and no explicit version contract.
+- `firestore.rules` (Section 132 blob `0d1139b17382491e47d7f0151fd41187978abedb`) restricts writes to admins, but any authorized admin client can write the allowed document fields directly. This is access control, not validation or audit/version enforcement.
+- `server.ts` blob `d0d781571a2a1dd28478ca92930f4f9b919bf38a` reads `platform_config/rides` for demand-zone surge settings. In the inspected read it tolerates a missing document and overlays defaults; that is a non-financial surge consumer, not an authoritative cash-fare/commission reader.
+- `src/server/pricingCatalog.ts` blob found on the integration branch resolves the separate `platform_config/global_tiers` and `platform_config/global` documents for marketplace/tradesperson pricing. Its commission logic is for milestone escrow, not taxi cash commission. Do not reuse it as the taxi pricing authority without a deliberate domain model change.
+
+### Reconciliation conclusions
+1. `platform_config/rides` is written by multiple admin client surfaces and is protected by admin-only rules, but it has no server-enforced schema, monotonic version, immutable audit trail, or single-writer command.
+2. Merge writes allow different screens to update overlapping subsets of the same document. Without a version check, stale admin screens can overwrite newer fields with stale values.
+3. The current client writes use inconsistent field shapes/defaulting conventions (for example commission displayed as percent in one UI and decimal in storage); any canonical schema must explicitly define units and reject ambiguous values.
+4. A server cash-completion command must not trust a browser snapshot, Remote Config value, local override, or request-supplied commission/fixed fee. It must read and validate a canonical server-owned pricing version and snapshot it with each fee accrual.
+5. Avoid making the entire operational `rides` document the financial pricing authority by accident. Prefer a dedicated `platform_config/rides_pricing` record or a validated subset with a clear owner, to prevent dispatch/surge UI changes from changing historical financial calculations.
+
+### Required implementation sequence
+1. Define a dedicated taxi pricing schema with explicit GBP/pence units, commission basis points, fixed fee pence, fare formula version, effective timestamp, config version, and admin actor.
+2. Add an authenticated admin server command that validates the full schema, enforces optimistic version increments, and writes an immutable audit record in the same transaction.
+3. Make admin pricing UIs call that command rather than directly merge-writing financial pricing fields. Operational dispatch/surge settings may remain separate.
+4. Make the cash completion command read only the canonical pricing document, fail closed on missing/invalid configuration, and persist the exact snapshot to the ride fee record.
+5. Add tests for invalid/negative/out-of-range rates, unit confusion, stale version conflicts, concurrent admin edits, missing config, and historical snapshot immutability.
+
+### Status
+- Section 133 is documentation only; no source code, Firestore rules, or configuration changed.
+- No tests, emulator, typecheck, build, CI, or production operation was run.
+- Next: inspect current admin authorization helpers and server route conventions to determine the safest reusable pattern for a versioned pricing-admin command and audit transaction.
