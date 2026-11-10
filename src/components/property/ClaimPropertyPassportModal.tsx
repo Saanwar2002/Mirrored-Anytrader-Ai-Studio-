@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from "react";
-
 import { useAuth } from "../AuthProvider";
 import { verifyPropertyTransferCode, claimPropertyTransfer } from "../../services/propertyCommandService";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
@@ -72,8 +71,7 @@ export function ClaimPropertyPassportModal({ initialCode = "", onClose, onSucces
       if (onSuccess) onSuccess(result.id);
     } catch (err) {
       console.error("Error claiming property:", err);
-      handleFirestoreError(err, OperationType.UPDATE, `properties/${verifiedProperty.id}`);
-      toast.error("Failed to claim property passport.");
+      toast.error(err instanceof Error ? err.message : "Failed to claim property passport.");
     } finally {
       setClaiming(false);
     }
