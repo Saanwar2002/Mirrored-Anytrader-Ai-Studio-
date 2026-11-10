@@ -3748,7 +3748,8 @@ async function startServer() {
               if (!Number.isSafeInteger(currentUsage) || currentUsage < 0) {
                 throw new ForbiddenError("Gotham property usage is invalid; deletion requires reconciliation.");
               }
-              currentUsage = Math.max(0, currentUsage - 1);
+              if (currentUsage < 1) throw new ForbiddenError("Gotham property usage is inconsistent; deletion requires reconciliation.");
+              currentUsage -= 1;
             } else {
               // If no reservation counter exists yet, backfill after excluding the
               // property being deleted so the delete and first create serialize.
@@ -3783,7 +3784,7 @@ async function startServer() {
   });
 
   // Public transfer-code verification returns only the preview fields shown to a buyer.
-  app.get("/api/properties/transfer/:code", async (req, res) => {
+  app.get("/api/properties/transfer/:code", paymentLimiter, async (req, res) => {
     try {
       const code = String(req.params.code || "").trim().toUpperCase();
       if (!/^TRF-[A-HJ-NP-Z2-9]{6}$/.test(code)) {
@@ -3825,7 +3826,7 @@ async function startServer() {
   });
 
   // Ownership claim updates both owners' Gotham counters atomically with the transfer.
-  app.post("/api/properties/claim-transfer", requireAuth, async (req, res) => {
+  app.post("/api/properties/claim-transfer", requireAuth, paymentLimiter, async (req, res) => {
     try {
       if (!db) throw new BadRequestError("Database service unavailable");
       const user = (req as any).user;
@@ -3903,7 +3904,9 @@ async function startServer() {
         ]);
         if (claimSnap.exists) {
           const prior = claimSnap.data() || {};
-          return { id: String(prior.propertyId || ""), duplicate: true };
+          const priorPropertyId = String(prior.propertyId || "");
+          if (!priorPropertyId) throw new Error("Property transfer idempotency record is invalid.");
+          return { id: priorPropertyId, duplicate: true };
         }
         const previousProfile = previousOwnerSnap.exists ? (previousOwnerSnap.data() || {}) : {};
         const currentNewProfile = latestNewOwnerSnap.exists ? (latestNewOwnerSnap.data() || {}) : {};
@@ -3922,7 +3925,8 @@ async function startServer() {
             if (!Number.isSafeInteger(previousCount) || previousCount < 0) {
               throw new ForbiddenError("Previous owner's Gotham usage requires reconciliation.");
             }
-            previousCount = Math.max(0, previousCount - 1);
+            if (previousCount < 1) throw new ForbiddenError("Previous owner's Gotham usage is inconsistent; transfer requires reconciliation.");
+            previousCount -= 1;
           } else {
             const [ownerQ, userQ, landlordQ] = await Promise.all([
               tx.get(db.collection("properties").where("ownerId", "==", previousOwnerId)),
