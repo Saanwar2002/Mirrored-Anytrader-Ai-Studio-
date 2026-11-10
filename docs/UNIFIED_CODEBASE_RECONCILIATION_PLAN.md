@@ -1725,3 +1725,16 @@ Consequently, the Stripe fulfilment write of `commissionRate: 0.10` is not by it
 ### Verification / status
 - CI failure confirmed from job summaries and raw logs; root cause localized to server.ts route/try boundary.
 - No repair committed in this section; this is explicitly a blocking defect.
+
+
+## Section 56 — Stripe webhook / checkout route boundary repair (2026-11-10)
+
+### Changes committed on integration
+- `316cdd5773c89ef8dce15e4b124877d84139a23b` — restored the standalone authenticated `POST /api/create-checkout-session` route using main's route implementation as a structural reference; restored the webhook's completion/error catch boundary.
+- `c497b44e63a0bc59008eb609f364f9a47018389b` — removed the stray checkout mock-completion block from webhook processing (it referenced checkout-only values such as `finalSuccessUrl` and `intentRef`).
+- Current route declarations verified by fetching integration `server.ts`: webhook at line 1662; checkout at line 2091; setup-session at line 2362. Webhook catch now records failed event state and returns HTTP 500 on processing errors.
+- Main was not modified. No AI Studio sync or deployment performed.
+
+### CI validation (pending at documentation time)
+- Run #537 (`316cdd5`) and #538 (`c497b44`) were both observed in progress after push. Run #538: [CI & Security Rules Release Gate](https://github.com/Saanwar2002/AnyTrader/actions/runs/42785092767).
+- Do not mark this repair verified until a run completes and emulator/security, unit/pen-test, TypeScript/lint, production build, and release audit results are inspected. If any subsequent stage fails, record and repair that blocker before advancing.
