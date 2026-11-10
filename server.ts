@@ -3743,8 +3743,8 @@ async function startServer() {
         const [quotaOwnerSnap, usageSnap] = quotaOwnerRef && usageRef
           ? await Promise.all([tx.get(quotaOwnerRef), tx.get(usageRef)])
           : [null, null];
-        if (quotaOwnerSnap?.exists) {
-          const ownerProfile = quotaOwnerSnap.data() || {};
+        if (quotaOwnerSnap?.exists || usageSnap?.exists) {
+          const ownerProfile = quotaOwnerSnap?.exists ? (quotaOwnerSnap.data() || {}) : {};
           const isGothamAccount = ownerProfile.subscriptionType === "gotham_saas" || ownerProfile.isGothamSubscriber === true;
           if ((isGothamAccount || usageSnap?.exists) && usageRef) {
             let currentUsage: number;
