@@ -2645,3 +2645,20 @@ A further inspection of the webhook's common checkout preamble corrects the word
 - The Checkout Session `payment_intents` registry path is not absent, and the proposed remediation does not need to introduce a second lookup. It needs to carry forward the already-validated `intent.paymentIntentId` (with the Instant Match-specific non-null invariant) into the match and route all terminal paths through one durable refund operation.
 
 This section supersedes the mistaken statement in Section 108's addendum that the webhook does not read/validate the registry. The underlying omission on the match and the no-eligible-traders bypass remain valid. Source review only; no code or live Stripe/Firebase changes, and no tests executed.
+
+
+## Section 110 — Instant Match refund identity handoff and durable expiry operation (2026-11-10)
+
+Implemented on the integration branch:
+
+- The existing checkout webhook's validated `payment_intents/{intentId}` record is now carried into the newly created Instant Match as `stripePaymentIntentId`. The value is accepted only when it is a non-empty PaymentIntent-shaped ID (`pi_...`). If it is absent or malformed, the paid match is created in `refund_review_required` with `refundStatus: manual_review`; it is not sent to the matching worker and no guessed refund identity is used.
+- `instantMatchWorker.ts` now routes all three terminal no-match paths through `expireAndRefundInstantMatch`: no eligible traders, listener-detected attempt exhaustion, and interval-detected attempt exhaustion.
+- The shared operation uses a deterministic `instant_match_refunds/{matchId}` record and stable Stripe idempotency key `instant-match-expiry:{matchId}`. It stores the PaymentIntent ID, operation reason, refund status and Stripe refund ID/status. The Stripe refund carries `instantMatchId` and operation-type metadata.
+- A Stripe client absence or thrown/ambiguous Stripe request is recorded as `reconciliation_required`, not as a definite refund failure. A failed/canceled Stripe refund is held for manual review; only a `succeeded` Stripe refund is marked succeeded. Error-state persistence is transaction-fenced so a late error cannot downgrade an already recorded success.
+- Concurrent triggers converge on the same operation document and Stripe idempotency key. This is an initiation/idempotency safeguard, not a full refund reconciler: no automatic retry is scheduled for expired matches, and an operator still needs a read-only Stripe refund lookup to resolve `reconciliation_required` states.
+
+Commits: worker operation `aa6817322f470e3616723ec3e64a4b46e14394b3`; checkout identity handoff `8b7f7b449ec6b61d04b1321c504f9e9ce4a9a01c`; late-error fencing `cd90fe7b92eeab1279b23e85da5d38616a29cfed`.
+
+**Verification boundary:** these changes have been written to the integration branch, but tests, TypeScript checking, build and CI have not been run. No live Stripe request, Firebase production read/write, worker startup or deployment was performed. Before rollout, add deterministic mocked tests for missing PaymentIntent, no eligible traders, attempt exhaustion, concurrent triggers, Stripe success, pending/failed refund statuses, thrown/ambiguous responses and late error-vs-success ordering. Review the interval/listener attempt-creation race separately; this change prevents duplicate refund operations but does not yet make attempt creation itself transactionally exclusive.
+
+Next: add mocked worker-level regression coverage and execute the local type/test/build gates when the GitHub runner/billing issue is resolved; then implement read-only reconciliation of stored refund operation IDs against Stripe.
