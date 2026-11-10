@@ -39,3 +39,27 @@ export async function deletePropertyViaCommand(
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || "Property could not be deleted.");
 }
+
+export async function verifyPropertyTransferCode(code: string): Promise<any> {
+  const normalizedCode = code.trim().toUpperCase();
+  const response = await fetch(`/api/properties/transfer/${encodeURIComponent(normalizedCode)}`);
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.property) throw new Error(result.error || "Transfer code could not be verified.");
+  return result.property;
+}
+
+export async function claimPropertyTransfer(
+  user: { getIdToken: () => Promise<string> },
+  code: string
+): Promise<{ id: string; duplicate: boolean }> {
+  const token = await user.getIdToken();
+  if (!token) throw new Error("You must be signed in to claim a property.");
+  const response = await fetch("/api/properties/claim-transfer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ code: code.trim().toUpperCase() })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.id) throw new Error(result.error || "Property transfer could not be completed.");
+  return { id: String(result.id), duplicate: Boolean(result.duplicate) };
+}
