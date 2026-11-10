@@ -2111,7 +2111,6 @@ async function startServer() {
               };
               tx.update(userDoc.ref, patch);
             });
-            });
           }
         }
       }
