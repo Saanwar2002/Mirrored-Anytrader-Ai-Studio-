@@ -485,7 +485,7 @@ export class PaymentLedgerEngine {
       stripe?: any;
     }
   ): Promise<{
-    transferStatus: "completed" | "failed" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
+    transferStatus: "completed" | "failed" | "reconciliation_required" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
     stripeTransferId?: string;
     stripeIdempotencyKey: string;
     error?: string;
@@ -618,7 +618,7 @@ export class PaymentLedgerEngine {
             .get();
           if (!ledgerSnap.empty) {
             await ledgerSnap.docs[0].ref.update({
-              transferStatus: "failed",
+              transferStatus: "reconciliation_required",
               transferError: errorMessage,
               lastTransferAttemptAt: new Date().toISOString(),
             });
@@ -629,7 +629,7 @@ export class PaymentLedgerEngine {
       }
 
       return {
-        transferStatus: "failed",
+        transferStatus: "reconciliation_required",
         error: errorMessage,
         stripeIdempotencyKey,
       };
@@ -641,7 +641,7 @@ export class PaymentLedgerEngine {
    * Tailors title and messaging strictly to the external Stripe transfer status.
    */
   public static formatReleaseNotification(params: {
-    transferStatus: "completed" | "failed" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
+    transferStatus: "completed" | "failed" | "reconciliation_required" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
     isQrHandshake?: boolean;
     jobNo?: string;
     targetMilestoneTitle?: string;
@@ -659,6 +659,13 @@ export class PaymentLedgerEngine {
         message: isQrHandshake
           ? `QR Handshake complete for "${jobNo}". Funds released to your account.`
           : `The homeowner has released funds for milestone: "${targetMilestoneTitle}". Funds transferred to your Stripe account.`,
+      };
+    }
+
+    if (transferStatus === "reconciliation_required") {
+      return {
+        title: "Payout Outcome Requires Reconciliation ⚠️",
+        message: `Stripe did not confirm the outcome for milestone "${targetMilestoneTitle}". The release is locked to its original operation key pending reconciliation; do not start a new release.`,
       };
     }
 
