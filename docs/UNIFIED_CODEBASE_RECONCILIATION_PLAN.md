@@ -2525,3 +2525,14 @@ GitHub Actions was triggered by pushes to the integration branch. The latest obs
 The integration branch's source, helper, tests, and plan were fetched back successfully. No test, emulator, lint, or build result can be claimed. Once GitHub runner availability is restored, rerun the existing CI workflow and inspect its actual step results before proceeding to close FIN-01.
 
 Observed latest run: `42830150821`; previous run: `42830065952`.
+
+
+## Section 101 — Remaining webhook projection write fenced (2026-11-10)
+
+A further whole-handler audit found one Firestore mutation in the checkout path that was outside the claim-validated transactions: the boosted-job public-card projection (public_job_cards/{jobId}). Although the projection was described as retry-safe, retry safety alone did not prevent a worker whose event claim had been taken over from publishing a stale projection after its lease expired.
+
+Changed that projection to a separate Firestore transaction which reads processed_stripe_events/{eventId}, validates the current processing status and exact claim token with the shared ownsStripeWebhookClaim predicate, and only then writes the projection. The core job/boost fulfillment remains atomic in its existing claim-fenced transaction; this additional transaction fences the denormalized public projection independently. The subscription lifecycle user update is also performed in a claim-validated transaction. No direct nontransactional Firestore write remains evident in the inspected checkout handler excerpt after this change; this is a source review, not runtime proof.
+
+Implementation commit: 89d1ab582c377976fbad6fec649113bcc9f9d1ab.
+
+**Verification boundary:** the updated source and this plan entry must be fetched back and inspected. No tests, emulator, build, or CI have run successfully; the latest CI issue remains pre-runner assignment as documented in Section 100. FIN-01 remains open pending executable transaction-takeover coverage and a complete audit of external/non-Firestore side effects.
