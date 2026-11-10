@@ -2341,3 +2341,24 @@ The test is authored in the integration branch. This review did not execute the 
   - `src/server/driverPayoutOrchestration.ts`: ZIP blob `903c950f480a16923d04ac900da061448245a8e7` differs from integration blob `6091e4a183caca9a30af16e12aae0472aecdf122`; this file requires focused diff review before any change.
 - This is a targeted baseline comparison, **not** the complete 705-entry ZIP-to-integration manifest. No application code, live Firebase state, production financial data, main branch or AI Studio workspace was changed.
 - Next: enumerate ZIP paths and compare the remaining payment/webhook/refund/escrow sources and tests against integration; review the payout orchestration difference; complete AI Studio/Firebase pre-change gate; then proceed to read-only reconciliation audit and approved remediation/test work.
+
+
+## Section 87 — Expanded financial path comparison (2026-11-10)
+
+The 2026-11-09 ZIP integrity check passed (705 archive entries). Git blob SHA comparison was expanded from the three baseline files to the following financial paths:
+
+| Path | ZIP blob SHA | Integration blob SHA | Decision |
+|---|---|---|---|
+| `src/server/paymentLedger.ts` | `fc99e5652b9b2e7993f04bec5224d85ef8737b49` | `fc99e5652b9b2e7993f04bec5224d85ef8737b49` | Exact match |
+| `src/services/stripeIntegrationService.ts` | `2f1e869aa7a5e94d8a46f1101890defc6a70c64d` | `2f1e869aa7a5e94d8a46f1101890defc6a70c64d` | Exact match |
+| `src/server/paymentVerification.ts` | `097883adb5c3356820b32ca8ed6fdd5a94c24b00` | `097883adb5c3356820b32ca8ed6fdd5a94c24b00` | Exact match |
+| `src/server/tripPaymentAuthorization.ts` | `979287a17a7537362fc9b59a8d7f2535f02f9292` | `979287a17a7537362fc9b59a8d7f2535f02f9292` | Exact match |
+| `tests/unit/paymentLedger.test.ts` | `ba4067ddf0a7d42072c55ca65ddd7ae2d63817d6` | `ba4067ddf0a7d42072c55ca65ddd7ae2d63817d6` | Exact match |
+| `tests/unit/escrowReleaseIntegrity.test.ts` | `25742240b3ecd973eea92aa5827754e3ccf8c778` | `25742240b3ecd973eea92aa5827754e3ccf8c778` | Exact match |
+| `src/server/driverPayoutOrchestration.ts` | `903c950f480a16923d04ac900da061448245a8e7` | `6091e4a183caca9a30af16e12aae0472aecdf122` | Divergent; retain integration pending line-level review |
+| `tests/unit/driverPayoutOrchestration.test.ts` | `a9cbaa10345a97f9e3df15f3a05a0dfa4cca8351` | `bacda2c0389429f8b9c3e13bbb10caadf350d449` | Divergent; compare coverage before any recovery |
+| `server.ts` | `0e935945b0cb7a3e6009030884aa620cc5dba175` | `99512448b790c65a2cc1f64e26fa0d30a72cca7d` | Divergent; broad server file requires focused webhook/financial route diff |
+
+**Interim decision:** ZIP and integration agree byte-for-byte on ledger engine, Stripe integration service, payment verification/authorization, and ledger/escrow integrity tests. Keep integration's payout orchestration and tests as baseline; do not copy ZIP versions. `server.ts` is also divergent (ZIP 271,222 bytes vs integration 317,000 bytes), so inspect only bounded webhook/refund/escrow route regions and preserve unrelated integration changes. No test suite was executed in this read-only pass; no CI run was associated with documentation commit `f5e99fe0e9e3bd346dc7b7a783d3c40f64008932`. No application or production state was changed.
+
+Next: complete bounded diff review for payout orchestration, its tests, and Stripe webhook/refund/escrow handlers; finish the 705-entry path manifest; then verify AI Studio/Firebase pre-change gates and run targeted tests before any implementation patch.
