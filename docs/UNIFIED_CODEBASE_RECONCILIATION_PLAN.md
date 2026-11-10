@@ -2536,3 +2536,12 @@ Changed that projection to a separate Firestore transaction which reads processe
 Implementation commit: 89d1ab582c377976fbad6fec649113bcc9f9d1ab.
 
 **Verification boundary:** the updated source and this plan entry must be fetched back and inspected. No tests, emulator, build, or CI have run successfully; the latest CI issue remains pre-runner assignment as documented in Section 100. FIN-01 remains open pending executable transaction-takeover coverage and a complete audit of external/non-Firestore side effects.
+
+
+## Section 102 — Webhook ownership test import correction (2026-11-10)
+
+Reviewing the claim helper and its unit suite after the projection audit exposed a test-source defect: the test file invoked ownsStripeWebhookClaim but imported only shouldClaimStripeWebhookEvent. Added the missing named import so the ownership cases reference the production helper rather than an undefined identifier.
+
+Test-source correction commit: 1628b234365dda87913f8bbbf4dd2a2c42315ae1.
+
+This was found by source inspection; the suite has not been executed, so this is not evidence that the tests compile or pass. CI still needs a runner and the emulator takeover test remains outstanding. FIN-01 remains open.
