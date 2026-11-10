@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { PaymentLedgerEngine } from "../../src/server/paymentLedger.ts";
-import { ForbiddenError, BadRequestError } from "../../src/server/httpErrors.ts";
+import { ForbiddenError, BadRequestError, ConflictError } from "../../src/server/httpErrors.ts";
 
 describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", () => {
   let db: any;
@@ -422,6 +422,13 @@ describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", (
       expect(quote.milestones[0].status).toBe("funds_released");
       const ledger = store[`payment_ledger/${releaseResult.ledgerEntryId}`];
       expect(ledger.transferStatus).toBe("reconciliation_required");
+      await expect(PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: homeownerId,
+        idempotencyKey: "rel_ambiguous_transfer_new_key",
+      })).rejects.toThrow(ConflictError);
     });
   });
 });
