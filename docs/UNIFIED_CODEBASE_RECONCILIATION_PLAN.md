@@ -2221,3 +2221,14 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Added lifecycle and subscription-ID guard regression coverage for landlord mapping, terminal/grace states, and ID selection.
 - Latest observed branch head before this documentation update: `12e876e3b5c1b0a79665c86b198166e4bdc4bacf`; comparison: 279 ahead / 0 behind `main`. No merge or production changes.
 - Latest Actions runs continue to fail before any steps start because runner ID is 0 and no runner is assigned. All new tests remain unexecuted.
+
+
+## Section 80 — Landlord checkout fulfillment uses homeowner-specific fields (2026-11-10)
+
+- A second pass through `checkout.session.completed` found that paid Landlord checkout fulfillment still wrote generic trader membership fields (`subscriptionStatus`, `tierId`, `isPro`, `isProInvoiceSubscriber`) and omitted the homeowner period end/status fields.
+- This was inconsistent with the Profile UI and the new landlord webhook/cancellation mapping. If `customer.subscription.created` arrived before the checkout completion event, it could not resolve the user yet; checkout completion therefore must initialise the homeowner subscription state itself.
+- Added and tested `buildLandlordCheckoutFulfillmentPatch`. Live checkout completion retrieves the Stripe subscription's current state and commits `subscriptionId`, `subscriptionType: landlord`, `isLandlord`, `homeownerTierId`, `homeownerSubscriptionStatus`, `homeownerCancelAtPeriodEnd`, and `homeownerCurrentPeriodEnd` without setting trader Pro entitlements.
+- Explicit development mock fulfillment now uses the same homeowner-specific mapping.
+- Membership checkout conflict checks now consider the current product's own status fields, preventing an active Landlord or trader subscription from being silently replaced by a different membership checkout.
+- Source refetch confirms the live and mock fulfillment paths call the helper. Regression tests cover the resulting field mapping. CI is still unexecuted due the Actions runner provisioning failure.
+- Before this documentation update the branch was 284 ahead / 0 behind `main`, at `1932285359ad46e90158119212dd06a09fc15f19`. `main` remains untouched.
