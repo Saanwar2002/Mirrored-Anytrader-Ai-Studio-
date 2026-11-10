@@ -336,7 +336,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
     // Verify ledger: exactly 1 entry, marked failed with error message
     const ledgerSnap1 = await db.collection("payment_ledger").where("idempotencyKey", "==", idempotencyKey).get();
     expect(ledgerSnap1.docs.length).toBe(1);
-    expect(ledgerSnap1.docs[0].data().transferStatus).toBe("failed");
+    expect(ledgerSnap1.docs[0].data().transferStatus).toBe("reconciliation_required");
     expect(ledgerSnap1.docs[0].data().transferError).toContain("Stripe API Timeout");
 
     // 3. Retry when Stripe is back online
@@ -531,7 +531,8 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
     expect(ledgerDoc.transferError).toContain("503 Service Unavailable");
 
     // c. Notification is NOT misleading
-    expect(notif.title).toBe("Release Recorded (Payout Pending Retry) ⚠️");
+    expect(notif.title).toBe("Payout Outcome Requires Reconciliation ⚠️");
+    expect(notif.message).toContain("pending reconciliation");
     expect(notif.title).not.toContain("Funds Released!");
   });
 });
