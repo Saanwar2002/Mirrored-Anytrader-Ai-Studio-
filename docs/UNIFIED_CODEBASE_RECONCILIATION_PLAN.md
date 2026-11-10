@@ -3164,3 +3164,32 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 130 is documentation only; no code or tests changed.
 - No tests, emulator, typecheck, build, CI, or production operations were run.
 - Next: inspect the remote-config/server pricing authority and the exact cash confirmation/timeout callbacks to specify the command input contract before implementation.
+
+
+## Section 131 — Cash shortfall confirmation and force-completion are client-controlled; fee pricing has split configuration inputs
+
+### Exact integration-branch evidence
+- `src/components/driver/DriverTerminal.tsx` blob `40db85db97f62c425787fd64b77ea241d3dd8eb8`:
+  - Cash completion derives fare and platform fee in the client from `activeRide`, client-side wait seconds, `fareConfig`, and the driver's entered cash amount.
+  - When cash collected is below the calculated total, the client writes `awaiting_cash_confirm` and the reported collected/shortfall amounts directly to the ride document, then starts a 45-second local countdown. This countdown is UI state, not a server-enforced deadline.
+  - After timeout, the driver UI offers a reason and force-completion path. The force-completion flag/reason is client state; the inspected path passes it into the same client-side cash completion function. It is not a server authorization decision.
+  - A Firestore snapshot observing `cash_confirmed` while the local ride state is `completed` calls `handleCashPayment(true)` again. That is a second client-triggered execution path, not a durable, server-side confirmation event.
+  - The fee calculation uses `fareConfig.commissionRate` and `fareConfig.fixedTripFee`. The former is taken from `remoteConfig.platformCommissionRate` when present, otherwise `platform_config/rides.commissionRate`, otherwise 12%; fixed fee comes from `platform_config/rides.fixedTripFee`. Thus commission and fixed fee may be sourced from different configuration documents, and neither is authoritatively read by a cash-completion server command because no such command exists.
+- `src/components/passenger/PassengerBooking.tsx` blob `ef0fc1e0c03d777cd460863241a86b2c54d318ec`:
+  - Passenger confirmation directly writes `cash_confirmed`, then attempts to update the passenger's `pendingCharges` and the ride's completed/financial fields.
+  - Its “stuck” force-completion button independently writes the ride as completed and may apply the pending passenger charge. It does not require a server-issued deadline, driver evidence, or a server adjudication.
+  - The UI says the unpaid remainder will be carried into the next trip/account balance. This is a debt/receivable, not collected cash, and must not be represented as money received or as a Stripe payment.
+- Checked-in `firestore.rules` allowlists documented in Sections 128–129 do not permit ordinary driver/passenger clients to perform these financial writes. This source inspection does not test deployed rules.
+
+### Required domain separation
+1. Cash received by driver, unpaid passenger remainder, platform commission receivable, and any later recovery/payment of that remainder must be distinct ledger facts. Do not equate an unpaid remainder with cash collected.
+2. A 45-second passenger response window must be recorded server-side with a timestamp/deadline and enforced by the command. A browser timer expiring is not proof that the deadline elapsed.
+3. Passenger confirmation should record acknowledgement of the stated cash/shortfall evidence; it must not itself assert cash collection or independently complete the ride.
+4. Force completion should be a server-authorized exception with a constrained reason, actor, timestamp, evidence, and review/reconciliation status. It must not erase a passenger receivable or create a paid record.
+5. Centralize the authoritative fare/commission/fixed-fee configuration. Resolve whether Remote Config or `platform_config/rides` owns each value, define validation/versioning, and snapshot the selected config version and integer-pence calculation into the ride/ledger event.
+6. The server transaction should atomically commit the lifecycle outcome, cash evidence, receivable (if any), platform-fee accrual, and idempotency marker. All client UIs become readers/callers of that command.
+
+### Status
+- Section 131 is documentation only; no application code, config, or rules changed.
+- No tests, emulator, typecheck, build, CI, or production operation was run.
+- Next: inspect the Remote Config provider and configuration write permissions/version semantics; then specify the canonical pricing schema and cash-completion command contract before coding.
