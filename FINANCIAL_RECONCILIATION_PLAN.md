@@ -146,3 +146,10 @@ The integration branch now conservatively locks ambiguous escrow transfer outcom
 Commits: `3ff058a1b91066ca25081c82c54e2d6d9b19a6b7`, `f5b2c06a0ca676988267bf7f28d1f04dfc015667`, `14a8c58595f8653748d67af9967ee24d5aa8a965`, `109d10da2ca8f7ecf743d12ca62958e54f39b16e`, `061475123b34bcda9f06940f5c35a293f8aef953`, `e6448fcd96f1b81971c4edd78a3bd0aad8abdb0d`, with plan records `d53829d80a8a6df01d59afb0f1cb299765417803`, `6214245f09e3440d41143d402dac0981aa5302a9` and `fc0f6c45155d683138453fe145474a2df5bf646a`.
 
 **Still open:** there is not yet an automated read-only Stripe transfer lookup/reconciliation worker. Implement that only with pagination, exact identity/destination/amount/currency matching and manual-review handling for zero, multiple, legacy or mismatched candidates. Never create a replacement transfer as part of reconciliation. Test execution and CI remain blocked by pre-runner GitHub Actions failures; no live financial operations were run.
+
+
+## FIN-02 source-of-truth correction — 10 November 2026
+
+The earlier PR #5-head observation about `charge.refunded`, embedded `charge.refunds.data` and `requiresPaginationReview` is historical and must not be attributed to the current integration branch. At integration HEAD `b430e240d0d0a8fdb3c6372d7176a036d8db08f8`, the `POST /api/webhook` dispatch in `server.ts` contains checkout completion and subscription lifecycle handling, but no `charge.refunded` branch, embedded refunds iteration or `stripe.refunds.list` pagination. The complete, non-truncated 715-entry Git tree has no separately named refund/webhook handler module.
+
+FIN-02 therefore remains open at source-of-truth discovery: locate the current refund persistence/recording contract and determine whether refunds are intentionally ingested elsewhere before adding webhook code. Do not restore the historical ZIP/PR #5 handler blindly. If a webhook is required, it must retrieve every refund page, validate charge/PaymentIntent/currency identity, deduplicate refund IDs, enforce cumulative limits, and remain retryable on incomplete retrieval. No live Stripe/Firebase operations were performed and no tests were run for this source review.
