@@ -1928,3 +1928,40 @@ For Gotham lifecycle events, the handler retrieves live subscription state for n
 ### Safeguards reaffirmed
 
 No changes to `main`, PR merge, AI Studio Pull/Push, production Firebase, production secrets, deployment, or AnyRoller/taxi behavior. Continue only on the existing integration branch. No test or release gate may be weakened to manufacture a green result.
+
+
+## Section 62 — Subscription cancellation/reactivation fail-closed hardening (2026-11-10)
+
+### Implementation committed
+
+- Commit: `2768ce7b48f6358b654c240847b4297b32ee6c4b`
+- Scope: `server.ts` cancellation and reactivation endpoints only.
+- Both endpoints now validate `subscriptionType` against the supported product set (`tier`, `exclusive_leads`, `video_pro`, `gotham_saas`, `driver_gold`).
+- Both endpoints now reject missing linked Stripe subscription IDs with HTTP 409 instead of reporting a successful local-only change.
+- Stripe-unavailable fallback is restricted to IDs explicitly prefixed `mock_`, outside production, with `ALLOW_MOCK_PAYMENTS=true`. Real Stripe subscriptions receive HTTP 503 and local entitlement/cancellation fields are not mutated.
+- Real subscription updates are sent to Stripe before Firestore is updated; Stripe API failures therefore do not create a false local success.
+- Cancellation no longer fabricates a 30-day paid-through date for Exclusive Leads, Video Pro, Gold Driver or membership. Existing stored period-end values are retained when available; absent values remain absent until Stripe returns its authoritative period end.
+- Verified from the fetched branch source after commit: no `Date.now() + 30` fabricated dates remain in either endpoint; both routes contain the explicit mock gate and the generic outage response.
+- Branch remains `integration/pr-consolidation-20261109`, 177 commits ahead / 0 behind `main`. No changes to `main`.
+
+### Verification status
+
+- GitHub workflow-run lookup for this commit returned no PR-triggered workflow runs. That endpoint filters to PR-triggered runs, so this is **not** evidence that a push workflow did not run; equally, no successful CI run for this commit has been established.
+- No test execution was performed in this checkpoint. The implementation is source-verified but remains **unverified by CI**.
+- Add route-level regression tests for: missing subscription ID (each product), unsupported product, Stripe configuration outage on a real ID (must return 503 and leave Firestore untouched), explicit non-production mock ID with mock flag enabled, mock ID with mock flag disabled, Stripe update rejection (no local mutation), and returned Stripe period end persistence.
+- Review whether `driver_gold` should exclusively use `driverSubscriptionId` rather than the current legacy fallback to `subscriptionId`; preserve backwards compatibility only if the data migration and product ownership semantics are confirmed.
+
+### Remaining subscription lifecycle work
+
+The webhook synchronizer still looks up only `gothamSubscriptionId`. Membership, Gold Driver, Exclusive Leads and Video Pro have distinct subscription ID and entitlement fields and are not yet covered by the common lifecycle handler. Do not mark subscription lifecycle reconciliation complete until each product has an authoritative subscription-to-user mapping, event idempotency/out-of-order protection, explicit entitlement/grace policy, and regression coverage. In particular, the current code has no `exclusiveSubscriptionStatus` or `videoProSubscriptionStatus` field; use the product's established entitlement fields rather than inventing a new field contract without checking all consumers.
+
+### Next action
+
+Build and test the product-aware Stripe lifecycle synchronizer using the established fields:
+- membership: `subscriptionId`, `subscriptionStatus`, `cancelAtPeriodEnd`, `currentPeriodEnd`;
+- Gold Driver: `driverSubscriptionId`, `driverSubscriptionStatus`, `isGoldDriver`, `driverCancelAtPeriodEnd`, `driverCurrentPeriodEnd`;
+- Exclusive Leads: `exclusiveSubscriptionId`, `hasExclusiveAddon`, `isExclusiveActive`, `exclusiveCancelAtPeriodEnd`, `exclusiveCurrentPeriodEnd`;
+- Video Pro: `videoProSubscriptionId`, `hasVerifiedVideoProSubscription`, `videoVerificationStatus`, `videoProCancelAtPeriodEnd`, `videoProCurrentPeriodEnd`;
+- Gotham: retain its dedicated subscription status, entitlement and purchased door allowance fields.
+
+For every product, retrieve current Stripe state for non-deleted events, verify the stored subscription ID still matches before applying changes, and never let an old event for a replaced subscription revoke or restore a newer subscription. Define payment-failure grace semantics before changing entitlement flags. Keep all release safeguards from Section 61.
