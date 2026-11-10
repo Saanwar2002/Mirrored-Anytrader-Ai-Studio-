@@ -75,6 +75,8 @@ export function resolveSubscriptionProductMatch(
   const userData = generic.userDoc.data ? generic.userDoc.data() : {};
   const legacyType = String(userData.subscriptionType || "");
   if (legacyType === "driver_gold") {
+    // A newer dedicated subscription supersedes this legacy generic ID.
+    if (userData.driverSubscriptionId && userData.driverSubscriptionId !== userData.subscriptionId) return null;
     return {
       ...generic,
       product: {
@@ -87,6 +89,8 @@ export function resolveSubscriptionProductMatch(
     };
   }
   if (legacyType === "gotham_saas") {
+    // A newer dedicated subscription supersedes this legacy generic ID.
+    if (userData.gothamSubscriptionId && userData.gothamSubscriptionId !== userData.subscriptionId) return null;
     return {
       ...generic,
       product: {
