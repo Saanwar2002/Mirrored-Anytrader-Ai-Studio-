@@ -131,6 +131,23 @@ describe("Stripe subscription product resolution", () => {
     ])).toThrow(/multiple users/);
   });
 
+  it("rejects a membership ID that is also linked to a dedicated product field", () => {
+    const doc = user("u1", { subscriptionType: "tier" });
+    expect(() => resolveSubscriptionProductMatch([
+      { product: membership, userDoc: doc },
+      { product: gold, userDoc: doc }
+    ])).toThrow(/conflicting product fields/);
+  });
+
+  it("accepts a matching legacy Gold Driver alias alongside its dedicated ID", () => {
+    const doc = user("u1", { subscriptionType: "driver_gold" });
+    const result = resolveSubscriptionProductMatch([
+      { product: membership, userDoc: doc },
+      { product: gold, userDoc: doc }
+    ]);
+    expect(result?.product.key).toBe("gold_driver");
+  });
+
   it("rejects one subscription ID linked to multiple dedicated product fields", () => {
     const doc = user("u1", {});
     expect(() => resolveSubscriptionProductMatch([
