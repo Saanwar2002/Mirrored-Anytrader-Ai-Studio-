@@ -3517,3 +3517,28 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 142 is documentation only. No ledger engine, fee, payment, payout, or balance code changed.
 - No tests, emulator, typecheck, build, or CI were run.
 - Next: trace cash ride completion writes and identify a single trusted source event for fee accrual; then design an idempotent accrual command and schema before implementing settlement.
+
+
+## Section 143 — Passenger cash acknowledgement directly mutates ride and driver balance; repeated client actions are not an accrual authority
+
+### Integration-branch source trace
+- `src/components/passenger/PassengerBooking.tsx`, cash remainder confirmation:
+  - Passenger client directly updates `ride_requests/{rideId}.status = cash_confirmed`.
+  - It reads the same ride client-side and checks `pendingChargesApplied`, then increments `users/{driverUid}.pendingCharges` by the driver's reported discrepancy and updates the ride to `completed` with `pendingChargesApplied: true`.
+  - The no-remainder branch directly writes completed/paymentMethod/finalFare/reported cash fields and sets `pendingChargesApplied: true`.
+  - It then performs an additional `dummyCheckForCloseBracketHack` ride update. These are multiple client Firestore writes, not a single trusted command/transaction; the check-then-increment is raceable and not protected by a server idempotency key.
+- `src/components/driver/DriverTerminal.tsx`, ride listener:
+  - When the ride snapshot reports `cash_confirmed` while local `rideState === "completed"`, it calls `handleCashPayment(true)` again. The listener is therefore a second potential completion/metric/fee side-effect path, not merely display state.
+- This corroborates Sections 127–129 and 138: both passenger and driver clients participate in completion and aggregate mutation; there is no canonical server cash-completion event whose immutable fee entry is exactly-once.
+
+### Required remediation boundary
+1. Replace passenger multi-write confirmation and driver listener side effects with one authenticated server command (derive passenger/driver from ride record; enforce assigned participants and permitted ride state).
+2. In one Firestore transaction, claim a unique ride-completion/cash-confirmation operation, validate driver-reported cash and passenger acknowledgement, finalize immutable ride fare/cash fields, and write one fee-receivable entry from server-authoritative commission policy. Never increment a mutable balance as the ledger source of truth.
+3. Make listener/UI state-only; duplicate snapshots must not execute financial writes. Any derived balance is a projection of fee ledger entries.
+4. Handle partial cash, zero remainder, disputes, cancellation, and late acknowledgement with explicit states; do not equate passenger acknowledgement of a discrepancy with Stripe payment or debt settlement.
+5. Add concurrent duplicate confirmation and forged participant/amount tests using Firestore emulator; verify no double accrual and no client writes to protected financial fields in rules.
+
+### Status
+- Section 143 is documentation only; no passenger/driver UI, Firestore rules, server route, ride status, or balances changed.
+- No tests, emulator, typecheck, build, or CI were run.
+- Next: inspect Firestore rules for `ride_requests` and `users.pendingCharges` write permissions to quantify whether the client path is currently executable, then implement a server-only completion command behind a safe rollout.
