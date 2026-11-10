@@ -29,7 +29,6 @@ import { HomeownerIdentityCard } from "./profile/HomeownerIdentityCard";
 import { SafetyEmergencyCard } from "./profile/SafetyEmergencyCard";
 import TraderNotificationPreferencesModal from "./TraderNotificationPreferencesModal";
 import { cn } from "@/src/lib/utils";
-import { normalizeTraderTier } from "@/src/services/stripeIntegrationService";
 import { 
   DndContext, 
   closestCenter,
