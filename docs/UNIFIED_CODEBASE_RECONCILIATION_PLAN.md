@@ -2492,3 +2492,15 @@ Commits: `7c8cdd50a94cc0822075b0be07bf850ecc519fad` (claim token implementation)
 Follow-up inspection of checkout fulfillment confirms that claim-token checks currently protect the event document's terminal transitions, but do **not** protect all side effects. In particular, the intent is read and updated outside a transaction tied to the event claim; subscription fulfillment transactions use per-session markers and user records but do not yet read/validate the event claim in the same transaction. The mismatch review write is also not claim-fenced.
 
 Do not treat FIN-01 as closed. Before marking it complete, refactor checkout processing so each Firestore mutation that changes intent/user entitlement state validates the current event claim token in the same transaction (read claim + target docs before writes), and add emulator/unit coverage that simulates lease takeover between claim and fulfillment. Stripe API reads are non-mutating; external side effects require separate idempotency/reconciliation handling. This review intentionally makes no speculative broad rewrite of the large webhook handler.
+
+
+
+## Section 98 — Checkout fulfillment claim fencing (2026-11-10)
+
+Implemented a first pass of same-transaction webhook claim validation across the `checkout.session.completed` Firestore mutation paths. Ten checkout fulfillment transaction callbacks now read `processed_stripe_events/{eventId}` and require both `status === "processing"` and the exact worker `claimToken` before proceeding to target-document reads/writes. The two standalone payment-intent state transitions (binding mismatch review and processing start) were converted to transactions that read and validate the event claim alongside the intent document before updating it.
+
+This closes the specific stale-worker window identified in Section 97 for the instrumented checkout transaction paths: a worker whose lease was replaced cannot begin a later guarded mutation, and Firestore transaction read conflicts provide retry-time validation if the claim changes concurrently. The existing per-session fulfillment markers remain in place for duplicate delivery protection.
+
+**Verification and remaining boundary:** source was fetched back after commit and inspected: 13 event-claim reads appear in the checkout block (including the existing unpaid-event and intent transitions), no standalone `intentRef.update` remains there, and the guarded transaction callbacks contain explicit claim-loss errors. No test suite, emulator, TypeScript build, or CI run has been executed; do not claim test success. Add regression coverage for stale-token rejection and takeover during a transaction, then audit any checkout side effect that occurs outside these guarded Firestore transactions. FIN-01 remains open until those tests and the broader webhook path review are complete. No live Stripe/Firebase operations were run.
+
+Commit: `79421cc2c5951efbbdbdb69479b651ebdd606980`.
