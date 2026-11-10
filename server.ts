@@ -2062,6 +2062,238 @@ async function startServer() {
         return res.json({ url: finalSuccessUrl.replace("{CHECKOUT_SESSION_ID}", "mock_session_success") });
       }
 
+      // Mark as completed idempotently
+      await eventRef.update({ status: 'completed' });
+      res.status(200).json({ received: true });
+    } catch (err: any) {
+      console.error("Webhook processing error:", err.message);
+      if (db) {
+        let rawEventId = event?.id;
+        if (!rawEventId && req.body && Buffer.isBuffer(req.body)) {
+          try {
+            const parsed = JSON.parse(req.body.toString('utf8'));
+            rawEventId = parsed.id;
+          } catch (_) {}
+        }
+        if (rawEventId) {
+          await db.collection("processed_stripe_events").doc(rawEventId).set({ 
+             status: 'failed',
+             error: err.message,
+             failedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true }).catch(e => console.error("Could not update failed status", e));
+        }
+      }
+      res.status(500).json({ error: 'Webhook processing failed' });
+    }
+  })
+
+  // Stripe Checkout Session (Server-Authoritative Pricing & Stripe Connect Routing)
+  app.post("/api/create-checkout-session", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      const authUid = (req as any).user.uid;
+      const { successUrl, cancelUrl } = req.body;
+      const userId = authUid; // Derive strictly from verified Firebase token
+      const appUrl = getAuthoritativeAppUrl();
+
+      const finalSuccessUrl = sanitizeRedirectUrl(successUrl, appUrl, `/profile?session_id={CHECKOUT_SESSION_ID}`);
+      const finalCancelUrl = sanitizeRedirectUrl(cancelUrl, appUrl, `/profile`);
+
+      // 1. Resolve strictly server-authoritative pricing and Stripe Connect routing
+      // Completely bypasses and ignores client-provided price_data to prevent price manipulation
+      const authoritativeResult = await resolveAuthoritativeLineItem(req.body, authUid, db);
+      
+      // CREATE PRE-CHECKOUT INTENT (Fixes C-01 and C-03 by never trusting Stripe metadata)
+      const intentId = `chk_intent_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      if (db) {
+         await db.collection("payment_intents").doc(intentId).set({
+            intentId,
+            userId,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            metadata: authoritativeResult.metadata,
+            mode: authoritativeResult.mode,
+            amount: authoritativeResult.authoritativeAmountPence || 0,
+            status: "pending"
+         });
+      }
+
+      let stripe;
+      try {
+        stripe = getStripe();
+      } catch (e) {
+        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_MOCK_PAYMENTS !== 'true') {
+          console.error("Stripe is not configured in production/live environment. Refusing mock checkout bypass.");
+          return res.status(503).json({ error: "Payment processing is currently unavailable: Stripe gateway is unconfigured." });
+        }
+        console.warn("Stripe is not configured. Mocking successful checkout flow for development testing.");
+        
+        // Authoritative Mock Fulfillment for local dev/testing
+        if (db) {
+          const meta = authoritativeResult.metadata;
+          if (meta.isVideoPro === 'true' || meta.type === 'video_pro_subscription') {
+            await db.collection("users").doc(userId).set({
+              hasVerifiedVideoProSubscription: true,
+              videoProSubscribedAt: new Date().toISOString(),
+              videoVerificationStatus: "verified",
+              videoProSubscriptionId: "mock_sub_vpro_" + Math.random().toString(36).substring(7),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (meta.isExclusiveAddon === 'true' || meta.type === 'exclusive_leads') {
+            await db.collection("users").doc(userId).set({
+              hasExclusiveAddon: true,
+              isExclusiveActive: true,
+              exclusiveSubscribedAt: new Date().toISOString(),
+              exclusiveSubscriptionId: "mock_sub_excl_" + Math.random().toString(36).substring(7),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (meta.subscriptionType === 'gotham_saas' || meta.type === 'gotham_saas') {
+            await db.collection("users").doc(userId).set({
+              subscriptionStatus: "active",
+              subscriptionId: "mock_sub_gotham_" + Math.random().toString(36).substring(7),
+              tierId: meta.gothamTierName || "Gotham Enterprise",
+              tier: "gotham",
+              subscriptionType: "gotham_saas",
+              isGothamSubscriber: true,
+              gothamDoorsCount: Number(meta.gothamDoorsCount) || 100,
+              gothamTierName: meta.gothamTierName || "Gotham Enterprise",
+              gothamBillingCycle: meta.gothamBillingCycle || "monthly",
+              gothamCancelAtPeriodEnd: false,
+              cancelAtPeriodEnd: false,
+              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (meta.subscriptionType === 'driver_gold' || meta.type === 'driver_gold') {
+            await db.collection("users").doc(userId).set({
+              subscriptionStatus: "active",
+              subscriptionId: "mock_sub_gold_driver_" + Math.random().toString(36).substring(7),
+              tierId: "Gold Driver",
+              tier: "gold",
+              driverTier: "gold",
+              subscriptionType: "driver_gold",
+              isGoldDriver: true,
+              commissionRate: 0.10,
+              destinationFilters: 4,
+              advanceBookingDays: 14,
+              priorityDispatch: 50,
+              driverCancelAtPeriodEnd: false,
+              cancelAtPeriodEnd: false,
+              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (authoritativeResult.mode === 'subscription') {
+            const canonicalTier = meta.tier || 'pro';
+            await db.collection("users").doc(userId).set({
+              tierId: meta.tierName || "Pro",
+              tier: canonicalTier,
+              isPro: canonicalTier !== 'payg',
+              isProInvoiceSubscriber: canonicalTier !== 'payg',
+              subscriptionStatus: "active",
+              subscriptionId: "mock_sub_" + Math.random().toString(36).substring(7),
+              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (authoritativeResult.mode === 'payment') {
+            if (meta.type === 'ad_wallet_topup') {
+              const topupAmount = Number(meta.topupAmount) || 0;
+              if (topupAmount > 0) {
+                await db.collection("users").doc(userId).set({
+                  adWalletBalance: admin.firestore.FieldValue.increment(topupAmount),
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+              }
+            } else if (meta.type === 'milestone_funding' && meta.jobId && meta.quoteId && meta.milestoneId) {
+              const { jobId, quoteId, milestoneId } = meta;
+              const quoteRef = db.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+              const quoteDoc = await quoteRef.get();
+              if (quoteDoc.exists) {
+                const quoteData = quoteDoc.data();
+                const milestones = quoteData?.milestones || [];
+                const updatedMilestones = milestones.map((m: any) => {
+                  if (m.id === milestoneId) {
+                    return { ...m, status: 'funded', fundedAt: new Date().toISOString(), stripePaymentIntentId: intentId };
+                  }
+                  return m;
+                });
+                await quoteRef.update({ milestones: updatedMilestones });
+
+                // Record to immutable payment ledger
+                await PaymentLedgerEngine.recordEscrowFunding(db, {
+                  jobId,
+                  milestoneId,
+                  paymentIntentId: intentId,
+                  idempotencyKey: `mock_fund_${jobId}_${milestoneId}`,
+                  customerId: userId,
+                  traderId: meta.traderId || quoteData?.tradespersonId || "trader",
+                  verifiedAmount: authoritativeResult.authoritativeAmountPence,
+                  currency: "gbp"
+                });
+
+                await db.collection("notifications").add({
+                  userId: quoteData?.tradespersonId,
+                  title: "Milestone Funded! 💰",
+                  message: `Homeowner funded "${milestones.find((m: any) => m.id === milestoneId)?.title || 'Milestone'}". You can now start work!`,
+                  type: "status",
+                  link: `/job/${jobId}`,
+                  read: false,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              }
+            } else if (meta.type === 'mediation_stake' && meta.jobId) {
+              await db.collection("jobs").doc(meta.jobId).update({
+                status: "disputed",
+                mediationStakePaid: true,
+                disputeReason: meta.disputeReason || "Unspecified",
+                technicalFaultReport: meta.technicalFaultReport || "Unspecified",
+                disputedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+            } else if (meta.jobId && meta.type === 'boost') {
+              const boostExpiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+              const isIM = meta.tier === 'instant_match';
+              await db.collection("jobs").doc(meta.jobId).set({
+                isBoosted: true,
+                boostTier: meta.tier || 'emergency_boost',
+                boostExpiresAt,
+                postedDate: admin.firestore.FieldValue.serverTimestamp(),
+                isInstantMatch: isIM,
+                isEmergencyBoost: meta.tier === 'emergency_boost',
+                retryCount: 0
+              }, { merge: true });
+
+              try {
+                await db.collection("public_job_cards").doc(meta.jobId).set({
+                  isBoosted: true,
+                  boostTier: meta.tier || 'emergency_boost',
+                  isInstantMatch: isIM,
+                  updatedAt: new Date().toISOString()
+                }, { merge: true });
+              } catch (pubErr) {
+                console.warn("Could not sync public_job_cards for mock boost:", pubErr);
+              }
+
+              if (isIM) {
+                const matchRef = db.collection("instant_matches").doc();
+                await matchRef.set({
+                  id: matchRef.id,
+                  jobId: meta.jobId,
+                  customerId: userId,
+                  chargeAmountPence: 299,
+                  chargeTier: "instant_match",
+                  feeWaived: false,
+                  status: "searching",
+                  currentAttempt: 0,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                  searchingAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                await db.collection("jobs").doc(meta.jobId).set({
+                  instantMatchId: matchRef.id,
+                  matchedViaInstantMatch: true
+                }, { merge: true });
+              }
+            }
+          }
+        }
+        return res.json({ url: finalSuccessUrl.replace("{CHECKOUT_SESSION_ID}", "mock_session_success") });
+      }
+
       // Real Stripe Flow
       let customerId: string | undefined;
       if (userId && db) {
@@ -2117,25 +2349,7 @@ async function startServer() {
         }
       }
 
-      let session: Stripe.Checkout.Session;
-      try {
-        session = await stripe.checkout.sessions.create(sessionOptions, {
-          idempotencyKey: `checkout_session_${intentId}`
-        });
-        await intentRef.update({
-          status: "session_created",
-          checkoutSessionId: session.id,
-          sessionCreatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-      } catch (stripeError) {
-        await intentRef.update({
-          status: "retryable_failed",
-          lastErrorAt: admin.firestore.FieldValue.serverTimestamp()
-        }).catch((statusError: any) => {
-          console.error("Could not persist checkout intent failure state:", statusError);
-        });
-        throw stripeError;
-      }
+      const session = await stripe.checkout.sessions.create(sessionOptions);
 
       res.json({ url: session.url });
     } catch (error: any) {
