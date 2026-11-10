@@ -1215,7 +1215,8 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
 
     // Respect real queue retry backoff: wait until nextAttemptAt is due
     const nextAttemptTime = new Date(job3TaskData.nextAttemptAt!).getTime();
-    const waitMs = Math.max(0, nextAttemptTime - Date.now() + 50);
+    // Add a generous clock/Firestore transaction margin; a 50ms edge can race emulator scheduling.
+    const waitMs = Math.max(0, nextAttemptTime - Date.now() + 500);
     if (waitMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
