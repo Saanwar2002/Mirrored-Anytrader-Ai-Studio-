@@ -14,3 +14,15 @@ export function shouldClaimStripeWebhookEvent(
   }
   return true;
 }
+
+
+export function ownsStripeWebhookClaim(
+  existingData: Record<string, any> | undefined,
+  claimToken: string | null | undefined
+): boolean {
+  return Boolean(
+    claimToken &&
+    existingData?.status === "processing" &&
+    existingData?.claimToken === claimToken
+  );
+}
