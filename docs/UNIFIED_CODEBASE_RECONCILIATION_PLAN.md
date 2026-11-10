@@ -1640,3 +1640,24 @@ A review of the Gold Driver and Gotham SaaS checkout callers found that both dis
 ### Verification
 - Static source replacement only; no build, lint, unit, browser, emulator or Stripe test-mode verification.
 - No changes to main, AI Studio, production Firebase or deployment.
+
+
+## 51. Checkout resolver-to-fulfilment trace and lifecycle gap (2026-11-10)
+
+### Confirmed by source inspection
+
+- The server pricing resolver's membership catalog branch canonicalises Landlord Pro to `tier=landlord` / `subscriptionType=landlord`, and Gold Driver to `tier=driver_gold` / `subscriptionType=driver_gold`. It preserves the caller metadata after authoritative keys, so product routing values must remain validated server-side (the webhook consumes the persisted intent metadata, not the browser's Stripe metadata).
+- The webhook's ordinary membership branch explicitly sets `isLandlord`, `subscriptionType=landlord`, and the generic membership fields when landlord metadata is present. Gold Driver and Gotham are routed to their dedicated branches before this generic tier classifier.
+- Gotham pricing resolver builds authoritative subscription line-item amount and metadata (`type`, `subscriptionType`, door count, tier name, billing cycle, user binding); Gold Driver resolves the catalog price and canonical subscription metadata.
+- The webhook currently handles checkout-session completion for activation. Source inspection found no handlers for `customer.subscription.updated`, `customer.subscription.deleted`, or `invoice.payment_failed` in this route. Therefore cancellation-at-period-end, actual expiry, payment delinquency, and reactivation do not yet have a demonstrated event-driven entitlement synchronisation path.
+
+### Risk / next action
+
+- Do not treat checkout activation as a complete subscription lifecycle. Design lifecycle handling only after confirming product policy (immediate cancellation vs period-end access, grace period, failed-payment recovery) and each product's actual consumer fields. Use Stripe subscription ID + product discriminator, event idempotency, and stale-event protection; avoid a generic event handler that accidentally downgrades unrelated product entitlements.
+- Existing cancellation endpoint's product-specific period-end persistence is only a request-side update; it is not proof that entitlements are revoked or restored at the right time.
+- Gold Driver and Gotham downstream consumer/field audits remain open. Landlord's generic membership mapping is source-confirmed, but still needs tests against its UI and entitlement consumers.
+
+### Verification / promotion safety
+
+- Inspection only; no code change to lifecycle behaviour and no automated tests or Stripe test-mode events run.
+- Integration branch remains the sole working branch for reconciliation. No main merge, AI Studio Pull/Push, or deployment.
