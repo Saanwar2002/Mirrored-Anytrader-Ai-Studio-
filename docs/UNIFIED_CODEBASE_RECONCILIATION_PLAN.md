@@ -2545,3 +2545,12 @@ Reviewing the claim helper and its unit suite after the projection audit exposed
 Test-source correction commit: 1628b234365dda87913f8bbbf4dd2a2c42315ae1.
 
 This was found by source inspection; the suite has not been executed, so this is not evidence that the tests compile or pass. CI still needs a runner and the emulator takeover test remains outstanding. FIN-01 remains open.
+
+
+## Section 103 — Webhook side-effect inventory and latest CI runner state (2026-11-10)
+
+A second pass inventoried the Stripe webhook handler's Firestore mutation calls from event claim acquisition through checkout fulfillment, subscription lifecycle synchronization, completion, and failure handling. The handler's writes are transaction writes: claim acquisition; unpaid-event completion; intent review/processing; subscription and membership entitlement updates with fulfillment markers; ad-wallet credit with marker; mediation stake/job update with marker; boost/job/instant-match update with markers; the public-card projection now fenced by Section 101; lifecycle entitlement synchronization; and terminal event completion/failure. Each post-acquisition mutation transaction inspected reads the event claim and checks the current token/status before writing. The Stripe API calls found in this handler are subscription retrievals (read-only); no Stripe charge, refund, transfer, or other mutating Stripe API call was found in this handler excerpt. This inventory is a static source review, not proof against every race or non-Firestore side effect.
+
+The newest Actions run observed after the Section 102 plan commit is run 42831357287 (run number 764), for commit e065add975fa7e2db5e0b69dc694e74d5f7235fe. Its sole job reports runner_id 0, empty runner name, and an empty steps array; it failed within seconds without reaching a workflow step. This repeats the pre-runner failure shape from Section 100 and does not establish a code test failure or prove the exact account/billing cause.
+
+**Remaining FIN-01 work:** execute the unit suite when a runner is available; add emulator coverage for claim takeover and Firestore transaction retry; audit non-Firestore effects and delivery/retry semantics; then inspect actual CI step results. FIN-01 remains open. No live Stripe/Firebase operations were run.
