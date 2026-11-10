@@ -3542,3 +3542,24 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 143 is documentation only; no passenger/driver UI, Firestore rules, server route, ride status, or balances changed.
 - No tests, emulator, typecheck, build, or CI were run.
 - Next: inspect Firestore rules for `ride_requests` and `users.pendingCharges` write permissions to quantify whether the client path is currently executable, then implement a server-only completion command behind a safe rollout.
+
+
+## Section 144 — Firestore rules block the passenger cash-confirmation and pending-charge client writes (verified branch source)
+
+### Rules evidence: `firestore.rules` on `integration/pr-consolidation-20261109`
+- Passenger `ride_requests` updates are limited to non-financial keys and, when changing status, only `cancelled` or `draft` from pending/searching/offered/draft. `cash_confirmed` and `completed` are not allowed by that passenger branch.
+- Driver `ride_requests` updates are allowlisted to `status`, `location`, `updatedAt`; final fare, discrepancy, completion timestamp, payment method and related financial fields are not permitted.
+- `users/{userId}` owner update allowlist does not include `pendingCharges` or `pendingChargesReason`. Admin bypass is separate and does not apply to ordinary passenger confirmation.
+- Therefore the passenger UI sequence identified in Section 143 is not merely raceable: ordinary client writes to `status: cash_confirmed`, `status: completed`, and driver `pendingCharges` are rejected by these rules. Its catch/log behavior can leave the user believing confirmation succeeded while the financial writes did not. The UI and deployed rules are inconsistent.
+- This is a source-level rules evaluation; no Firebase emulator request was executed. Existing deployed rules may differ from this integration branch and are not asserted here.
+
+### Remediation
+1. Do not loosen client rules to permit these financial/status fields. Preserve the deny-by-default boundary.
+2. Route acknowledgement through a server command callable by the authenticated passenger; server verifies ride identity/participants, assigned driver, state and reported values, and performs one transaction.
+3. UI must await server success and display failure explicitly; remove direct `pendingCharges` increment and the dummy close-bracket write.
+4. Add emulator tests proving passenger/driver direct writes are denied and the trusted command succeeds exactly once; separately test current UI's rejected writes and error presentation.
+
+### Status
+- Section 144 is documentation only; Firestore rules and UI remain unchanged.
+- No emulator, tests, typecheck, build, or CI run.
+- Next: inspect the driver's `handleCashPayment` implementation and the existing trusted ride command pattern, then specify a server cash-finalization command that can replace both client flows safely.
