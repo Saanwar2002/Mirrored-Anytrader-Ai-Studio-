@@ -145,4 +145,27 @@ describe("Payment Ledger & Invariants", () => {
       .rejects.toThrow("different financial operation");
   });
 
+  it("does not let a stale executor complete or delete a successor idempotency claim", async () => {
+    const store = new Map<string, any>();
+    const db = {
+      collection: (_name: string) => ({ doc: (id: string) => ({
+        update: async (v: any) => store.set(id, {...store.get(id), ...v}),
+        set: async (v: any) => store.set(id,v),
+        delete: async () => store.delete(id),
+      }) }),
+      runTransaction: async (fn: any) => fn({
+        get: async (ref: any) => ({ exists: store.has(ref.id), data: () => store.get(ref.id) }),
+        set: (ref: any, value: any) => store.set(ref.id, value),
+        update: (ref: any, value: any) => store.set(ref.id, {...store.get(ref.id), ...value}),
+        delete: (ref: any) => store.delete(ref.id),
+      }),
+    };
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(db, "claim", "CAPTURE", async () => {
+      store.set("claim", { operationName: "CAPTURE", status: "in_progress", claimToken: "successor", startedAt: new Date().toISOString() });
+      return { transfer: "tr_1" };
+    })).rejects.toThrow("superseded");
+    expect(store.get("claim").claimToken).toBe("successor");
+    expect(store.get("claim").status).toBe("in_progress");
+  });
+
 });
