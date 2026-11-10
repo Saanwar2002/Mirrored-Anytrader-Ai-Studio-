@@ -54,7 +54,20 @@ Implemented on `integration/pr-consolidation-20261109`:
 
 **Commits:** `5377e19`, `966766b`, `5584f91`, `a65f4c1`, `d13c542`, `0bd25a0`, `f4764c7`, `3d62b44`, `d2abed2`, `e0ca4ae`, `b7f4b77`, `18da5f2`, `40e45d5`, `a06015c`, `45d7512`, `4fbdb1f`, `1e12ad2`, `34a9b15`, `e5f9dbd`, `fb93671`, `b23e3af`, `b8121dc`, `4401145`, `a00dc53`, plus the earlier audit/plan documentation commits.
 
-**Not yet verified:** no emulator, unit, TypeScript, production build, release-audit, or CI run has been observed for these changes. In particular, server-side Gotham entitlement/quota boundary, forged-field, retry, and concurrency tests still need to be added and executed. The live AI Studio/Firebase pre-change parity gate is also not verified. Do not treat this implementation as release-ready.
+## CI verification (2026-11-10)
+
+The complete GitHub Actions gate passed on commit `111aad93e15b948ba6393d0ee24df14bf68dafea`:
+
+- Workflow: [CI & Security Rules Release Gate, run 42796203967](https://github.com/Saanwar2002/AnyTrader/actions/runs/42796203967) — **success**.
+- Firebase Security Rules + Firestore emulator/concurrency suite: **21 test files, 592 tests passed**.
+- Unit and penetration suite: **65 test files, 1,071 tests passed**.
+- TypeScript/lint: passed.
+- Production build: passed.
+- Release audit: **0 critical failures, 7 warnings**; the audit returned “GO WITH EXPLICIT ACCEPTED RISKS”.
+
+The seven CI release-audit warnings include unset CI environment values for `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GEMINI_API_KEY`, `JWT_SECRET`, `APP_URL`, and `ALLOWED_ORIGINS`, plus the server Firestore client not being initialized in the audit environment. These are not proof that live deployment secrets are missing; verify the actual AI Studio/Cloud Run environment before release.
+
+**Still outstanding before release:** API-level tests for Gotham quota boundaries, inactive/expired and cancellation-at-period-end entitlement, forged payloads, idempotency replay, deletion/transfer counter reconciliation, and concurrent create/delete/transfer races. The static server authorization helper `assertCanModifyProperty` and its simulation test still describe pending recipients as able to modify properties; align them with the new server-only ownership-claim command. Live AI Studio/Firebase parity, deployed named-database rules/indexes, staging smoke tests, and production environment verification remain unconfirmed. Do not treat a green CI run as release approval.
 
 ## Release and branch safeguards
 
