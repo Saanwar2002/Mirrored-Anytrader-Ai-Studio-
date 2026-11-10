@@ -772,11 +772,8 @@ service cloud.firestore {
           ])
         )
       );
-      allow delete: if isSignedIn() && (
-        resource.data.get('ownerId', '') == request.auth.uid || 
-        resource.data.get('userId', '') == request.auth.uid || 
-        isAdmin()
-      );
+      // Property deletion is server-only so the Gotham usage counter is decremented atomically.
+      allow delete: if false;
     }
 
     // --- Public Properties: Sanitized projection for Anonymous & Public Property Discovery / Verification ---
