@@ -2568,3 +2568,15 @@ FIN-03 follow-up remediation on the integration branch:
 Commits: ledger implementation `3ff058a1b91066ca25081c82c54e2d6d9b19a6b7`; route handling `f5b2c06a0ca676988267bf7f28d1f04dfc015667`; regression test `14a8c58595f8653748d67af9967ee24d5aa8a965`, strengthened by `109d10da2ca8f7ecf743d12ca62958e54f39b16e` to prove a new caller key is rejected.
 
 **Verification boundary:** fetch-back/source inspection and branch comparison are pending. The unit test has not been executed; CI runner availability remains unresolved. This is a conservative lock-and-escalate behavior, not an automated Stripe transfer reconciler. An authorized operator still needs to reconcile Stripe's transfer records against the stored operation metadata before releasing the lock or retrying. No live Stripe/Firebase operation was performed.
+
+
+## Section 105 — Durable Stripe transfer lookup metadata (2026-11-10)
+
+FIN-03 recovery preparation:
+
+- New escrow transfers now include `releaseOperationId`, the deterministic `stripeIdempotencyKey`, and `operationType: ANYTRADER_ESCROW_RELEASE` in Stripe transfer metadata, alongside job, quote, milestone and trader identifiers.
+- This gives a future read-only reconciliation process an explicit operation identity to compare against Stripe's transfer records after an ambiguous API response. It does not itself prove that a transfer exists, and it does not retroactively annotate historical transfers.
+- Added assertions to the successful transfer unit test for the complete metadata identity. The existing ambiguous-outcome test still verifies the lock and new-key rejection.
+- Commits: metadata implementation `061475123b34bcda9f06940f5c35a293f8aef953`; metadata regression assertion `e6448fcd96f1b81971c4edd78a3bd0aad8abdb0d`.
+
+**Remaining FIN-03 work:** implement a bounded, read-only Stripe transfer lookup/pagination path and compare metadata, destination account, amount and currency against the durable Firestore operation/ledger record. Any zero, multiple or mismatched candidates must remain manual-review cases; never automatically issue a replacement transfer. Also cover legacy transfers without operation metadata. Tests and CI remain unexecuted because GitHub Actions continues to fail before runner assignment. No live Stripe/Firebase calls were made.
