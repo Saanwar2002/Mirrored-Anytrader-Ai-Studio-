@@ -1699,21 +1699,24 @@ async function startServer() {
       // Idempotency: Use a transaction to atomically claim 'processing' state
       const eventRef = db.collection("processed_stripe_events").doc(event.id);
       try {
-        const claimSuccess = await db.runTransaction(async (t: admin.firestore.Transaction) => {
+        const claimToken = await db.runTransaction(async (t: admin.firestore.Transaction) => {
           const existing = await t.get(eventRef);
           const existingData = existing.exists ? existing.data() : undefined;
           if (!shouldClaimStripeWebhookEvent(existingData, Date.now())) {
-            return false;
+            return null;
           }
+          const claimToken = crypto.randomUUID();
           t.set(eventRef, {
             status: 'processing',
             claimedAt: admin.firestore.FieldValue.serverTimestamp(),
-            workerId: `worker_${Math.random().toString(36).substring(7)}`
+            workerId: `worker_${Math.random().toString(36).substring(7)}`,
+            claimToken
           });
+          return claimToken;
           return true;
         });
 
-        if (!claimSuccess) {
+        if (!claimToken) {
            return res.status(200).send("Already processed or currently processing");
         }
       } catch (txErr) {
@@ -1725,7 +1728,11 @@ async function startServer() {
         const session = event.data.object as Stripe.Checkout.Session;
         if (session.payment_status !== 'paid') {
           console.warn(`[Webhook Warning] Checkout session ${session.id} completed with payment_status '${session.payment_status}'. Skipping fulfillment until paid.`);
-          await eventRef.update({ status: 'completed', skippedReason: 'payment_not_paid' });
+          await db.runTransaction(async (tx: any) => {
+            const latest = await tx.get(eventRef);
+            if (latest.data()?.claimToken !== claimToken || latest.data()?.status !== 'processing') throw new Error('Webhook claim lost before unpaid-event completion.');
+            tx.update(eventRef, { status: 'completed', skippedReason: 'payment_not_paid', claimToken: admin.firestore.FieldValue.delete() });
+          });
           return res.status(200).json({ received: true, status: 'skipped_unpaid' });
         }
 
@@ -2115,8 +2122,13 @@ async function startServer() {
         }
       }
 
-      // Mark as completed idempotently
-      await eventRef.update({ status: 'completed' });
+      // Completion is fenced: an expired worker cannot complete a successor's claim.
+      await db.runTransaction(async (tx: any) => {
+        const latest = await tx.get(eventRef);
+        const data = latest.data() || {};
+        if (data.status !== 'processing' || data.claimToken !== claimToken) throw new Error('Webhook claim lost before completion; reconciliation required.');
+        tx.update(eventRef, { status: 'completed', claimToken: admin.firestore.FieldValue.delete() });
+      });
       res.status(200).json({ received: true });
     } catch (err: any) {
       console.error("Webhook processing error:", err.message);
@@ -2129,11 +2141,18 @@ async function startServer() {
           } catch (_) {}
         }
         if (rawEventId) {
-          await db.collection("processed_stripe_events").doc(rawEventId).set({ 
-             status: 'failed',
-             error: err.message,
-             failedAt: admin.firestore.FieldValue.serverTimestamp()
-          }, { merge: true }).catch(e => console.error("Could not update failed status", e));
+          const failedRef = db.collection("processed_stripe_events").doc(rawEventId);
+          await db.runTransaction(async (tx: any) => {
+            const latest = await tx.get(failedRef);
+            const data = latest.data() || {};
+            if (data.status !== 'processing' || data.claimToken !== claimToken) return;
+            tx.update(failedRef, {
+              status: 'failed',
+              error: err.message,
+              failedAt: admin.firestore.FieldValue.serverTimestamp(),
+              claimToken: admin.firestore.FieldValue.delete()
+            });
+          }).catch(e => console.error("Could not update failed status", e));
         }
       }
       res.status(500).json({ error: 'Webhook processing failed' });
