@@ -2476,3 +2476,12 @@ Remediated FIN-04 in `src/server/paymentLedger.ts`:
 - Added tests for operation-name collisions and stale executor completion/cleanup after successor claim replacement.
 
 Commits: implementation `a56a227e5f73a25056207b42dae4dae58b91bb81`; test updates `1294ddd636555a75a2b4d82720e1c6b595b39032` and `4d34e6166ef949ab52e719bc65126bd5dd21bb20`. Files fetched back next for verification. No live financial operations were run. Tests remain pending execution/CI.
+
+
+## Section 96 — Stripe webhook claim-generation fencing (2026-11-10)
+
+Added a random claim token to each successful `processed_stripe_events/{eventId}` acquisition. The webhook now transactionally verifies that token and `processing` status before marking an unpaid checkout skipped or marking the event completed. Failure handling only marks the event failed when the current document still belongs to the failing worker; it cannot overwrite/delete a successor claim. Completion/failure clear the token.
+
+Commits: `7c8cdd50a94cc0822075b0be07bf850ecc519fad` (claim token implementation), `d557bd480f45cbfa5db5335732936e80dac1cfd7` (scope correction).
+
+**Important boundary:** this fences event-record transitions, not every intermediate Firestore mutation in the webhook. Some fulfillment paths update intent/user documents before final event completion; a worker that loses its lease during those operations could still race on those records. This is not yet end-to-end webhook side-effect fencing. No Stripe/Firebase live operations were run; tests/CI remain unverified.
