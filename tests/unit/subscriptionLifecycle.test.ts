@@ -62,7 +62,7 @@ describe("Stripe subscription lifecycle patch mapping", () => {
 
   it.each(["past_due", "incomplete", "paused", "unknown"])("preserves entitlement fields for %s", (status) => {
     const fields = {
-      landlord: ["homeownerSubscriptionStatus"],
+      landlord: ["isLandlord"],
       membership: ["isPro", "isProInvoiceSubscriber"],
       gold_driver: ["isGoldDriver"],
       exclusive_leads: ["hasExclusiveAddon", "isExclusiveActive"],
