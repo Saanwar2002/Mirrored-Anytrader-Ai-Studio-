@@ -3602,8 +3602,9 @@ async function startServer() {
         }
       }
       const entitlementSnap = await userRef.get();
-      if (!entitlementSnap.exists) throw new NotFoundError("User profile not found.");
-      const entitlementProfile = entitlementSnap.data() || {};
+      // An authenticated ordinary homeowner may predate profile bootstrap; absence
+      // of a server-owned Gotham subscription record means no Gotham quota applies.
+      const entitlementProfile = entitlementSnap.exists ? (entitlementSnap.data() || {}) : {};
       const isGothamAccount = entitlementProfile.subscriptionType === "gotham_saas" || entitlementProfile.isGothamSubscriber === true;
       let verifiedGothamSubscriptionId = "";
       let verifiedGothamStatus = "";
@@ -3648,12 +3649,11 @@ async function startServer() {
           tx.get(usageRef),
           requestRef ? tx.get(requestRef) : Promise.resolve(null)
         ]);
-        if (!userSnap.exists) throw new NotFoundError("User profile not found.");
         if (requestSnap?.exists) {
           const prior = requestSnap.data() || {};
           return { id: String(prior.propertyId || ""), duplicate: true };
         }
-        const profile = userSnap.data() || {};
+        const profile = userSnap.exists ? (userSnap.data() || {}) : {};
         const isGothamAccount = profile.subscriptionType === "gotham_saas" || profile.isGothamSubscriber === true;
         const isGothamEntitled = isGothamAccount &&
           Boolean(verifiedGothamSubscriptionId) &&
