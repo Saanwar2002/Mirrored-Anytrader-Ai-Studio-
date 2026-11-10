@@ -2129,3 +2129,14 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Source review confirms the server transaction still creates the property and idempotency record atomically, with the quota counter in the same transaction. No changes were made to weaken the server-side guard.
 - Latest branch head before this documentation update: `d678281e7d2434cf8517361209e611b4be81ebdd`; comparison: 231 ahead / 0 behind `main`.
 - Latest push runs remain failing before steps due runner ID 0 / no runner. The new property tests are authored but unexecuted.
+
+
+## Section 73 — Gotham property quota decision extraction (2026-11-10)
+
+- Extracted the purchased-door allowance decision into `src/server/gothamPropertyQuota.ts` and wired the production `POST /api/properties` transaction to use its result before writing the incremented usage count.
+- The pure decision rejects negative, non-integer, or unsafe usage counters; rejects invalid/zero allowances for entitled Gotham accounts; blocks when current usage is already at the purchased allowance; and allows a non-Gotham owner with an existing historical usage counter to keep that counter accurate without enforcing a lapsed allowance.
+- The transaction still owns the atomic Firestore read/check/write. The helper does not replace or weaken transaction serialization.
+- Added focused boundary tests for below-limit, exact allowance, limit reached, invalid allowance, invalid usage, and historical counter maintenance.
+- Source refetch confirms the route imports and calls the helper and writes `quotaDecision.nextUsage` in the same transaction as the property and idempotency record.
+- Latest observed branch head: `950bdac143fd98cd3f52191e7a16f92845a473d2`; comparison: 235 ahead / 0 behind `main`.
+- Latest push workflow run `42806902691` (run 663) failed before any steps (runner provisioning failure); tests remain unexecuted.
