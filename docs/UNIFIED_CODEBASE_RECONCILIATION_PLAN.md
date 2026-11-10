@@ -3104,3 +3104,36 @@ This is a source-audit finding only. No source code or tests were changed or run
 - Section 128 is documentation only; no rules or application code changed.
 - No emulator tests, CI, build, or production checks were run.
 - Next: map the existing server-side ride completion/force-complete commands and their authentication/lifecycle guards so the repair can reuse the correct trusted boundary rather than introduce a parallel completion path.
+
+
+## Section 129 — No trusted taxi cash-completion route exists in the current server route inventory
+
+### Exact integration-branch evidence
+- `server.ts` blob `d0d781571a2a1dd28478ca92930f4f9b919bf38a`:
+  - The ride-specific authenticated routes found in the route inventory are `POST /api/rides/accept` and `POST /api/rides/create-trip-payment`; the former delegates to `executeAcceptRideCommand`, the latter creates Stripe Checkout through `executeCreateTripPaymentCommand`.
+  - No authenticated `complete-ride`, `complete-trip`, `cash-confirm`, or `force-complete` route was found in this server file. The fee routes are separate and do not complete a ride.
+  - The Stripe webhook exists, but the earlier Sections 119–126 establish that the taxi Checkout path is not bound into the shared intent/webhook fulfillment contract.
+- `src/components/driver/DriverTerminal.tsx` blob `40db85db97f62c425787fd64b77ea241d3dd8eb8`:
+  - Driver cash completion writes `awaiting_cash_confirm` or `completed` directly to `ride_requests`, including financial fields, then attempts to increment `users/{driverId}.pendingPlatformFees`.
+  - A `cash_confirmed` snapshot causes the driver client to call `handleCashPayment(true)` again, so the completion/accrual path is re-entered from a client-observed status transition.
+- `src/components/passenger/PassengerBooking.tsx` blob `ef0fc1e0c03d777cd460863241a86b2c54d318ec`:
+  - Passenger-side simulation transitions `awaiting_cash_confirm` to `completed` by direct Firestore updates.
+  - The cash-confirmation button first attempts to write `status: "cash_confirmed"`, then may write passenger pending charges and financial completion fields directly to Firestore.
+- These client operations conflict with the checked-in `firestore.rules` ride update allowlists documented in Section 128: assigned drivers can update only operational status/location/timestamp fields; passengers cannot change financial completion fields and can only perform narrowly allowed cancellation/draft status transitions. This review has not run an emulator to test the rules, but the source predicates exclude the fields in question.
+
+### Reconciliation implications
+1. The current cash workflow has no trusted server command that owns the full state transition, fee calculation, and ledger accrual. It relies on multiple client writes that are disallowed by the checked-in rules.
+2. The driver snapshot callback can re-enter cash completion when it sees `cash_confirmed`; without a stable ride-scoped idempotency record, retries or repeated snapshots risk duplicate metric/fee side effects if any write path is later permitted.
+3. A separate client simulation path should not be mistaken for a production completion authority. The passenger UI and driver UI are both attempting state changes rather than invoking a single server state machine.
+4. Do not loosen Firestore rules to permit these financial mutations. Implement one authenticated server command for cash collection confirmation and completion, with role/ride ownership checks, allowed lifecycle transitions, exact cash collected/discrepancy validation, idempotent fee accrual, and atomic writes.
+
+### Required next inspection before implementation
+1. Fetch and trace `executeAcceptRideCommand`, ride lifecycle/state-machine helpers, and any shared ride authorization or force-completion command before designing the new route.
+2. Identify the canonical source of fare configuration and commission rate. The current driver component uses local `fareConfig` state, which must not be the authority for money calculations.
+3. Decide the domain semantics for partial cash: passenger-confirmed unpaid balance, force-complete reason, and driver platform commission must be separate, explicit ledger entries.
+4. Build a server command and emulator/unit tests together; keep direct client writes denied.
+
+### Status
+- Section 129 is documentation only; no application code or rules changed.
+- No tests, emulator, typecheck, build, CI, or production operation was run.
+- Next: inspect `executeAcceptRideCommand` and ride lifecycle helpers, then design the server-owned cash completion command around the existing trusted patterns.
