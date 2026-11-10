@@ -347,6 +347,67 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(mockStore["ride_requests/ride_ledger_fail"].payoutStatus).toBe("rejected_unverified_payment");
   });
 
+  it("4a. Security Regression: Refund ledger entries cannot authorize a driver payout", async () => {
+    mockStore["payment_ledger/refund_for_ride"] = {
+      transactionId: "pi_refund_for_ride",
+      type: "REFUND",
+      status: "completed",
+      captured: true,
+      currency: "gbp",
+      amount: 5500,
+    };
+    mockStore["ride_requests/ride_refund_ledger"] = {
+      status: "completed",
+      paymentStatus: "paid",
+      payoutTransferred: false,
+      finalFare: 50.0,
+      tipAmount: 5.0,
+      assignedDriverId: "driver_legit",
+      driverId: "driver_legit",
+      stripePaymentIntentId: "pi_refund_for_ride",
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({
+      db: mockDb,
+      stripeClient: mockStripe,
+    });
+
+    expect(result.processedCount).toBe(0);
+    expect(createdTransfers.length).toBe(0);
+    expect(mockStore["ride_requests/ride_refund_ledger"].payoutTransferred).toBe(false);
+    expect(mockStore["ride_requests/ride_refund_ledger"].payoutStatus).toBe("rejected_unverified_payment");
+  });
+
+  it("4b. Ledger fallback accepts only an explicitly typed completed RIDE_PAYMENT receipt", async () => {
+    mockStore["payment_ledger/ride_receipt"] = {
+      transactionId: "pi_ride_ledger_fallback",
+      type: "RIDE_PAYMENT",
+      status: "completed",
+      currency: "gbp",
+      amount: 5500,
+    };
+    mockStore["ride_requests/ride_ledger_fallback_valid"] = {
+      status: "completed",
+      paymentStatus: "paid",
+      payoutTransferred: false,
+      finalFare: 50.0,
+      tipAmount: 5.0,
+      assignedDriverId: "driver_legit",
+      driverId: "driver_legit",
+      stripePaymentIntentId: "pi_ride_ledger_fallback",
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({
+      db: mockDb,
+      stripeClient: mockStripe,
+    });
+
+    expect(result.processedCount).toBe(1);
+    expect(createdTransfers.length).toBe(1);
+    expect(createdTransfers[0].payload.amount).toBe(4900);
+    expect(mockStore["ride_requests/ride_ledger_fallback_valid"].payoutTransferred).toBe(true);
+  });
+
   it("5. Finding 35G-4: Client-mutated fareEstimate or fare cannot increase payout beyond authoritative finalFare", async () => {
     mockStore["ride_requests/ride_tampered_estimate"] = {
       status: "completed",
