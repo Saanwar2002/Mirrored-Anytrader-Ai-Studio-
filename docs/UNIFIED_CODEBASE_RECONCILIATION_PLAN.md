@@ -2098,3 +2098,13 @@ Add focused webhook tests using the existing Stripe webhook test harness, inspec
 - Latest observed branch head: `bed8f668d0a717eec948782394f48ba9f828e4ee`; comparison: 224 ahead / 0 behind `main`.
 - Latest push workflow run `42806129244` (run 652) failed with runner ID 0, blank runner name and no steps. CI remains blocked by runner provisioning/billing; none of the newly authored tests have run.
 - `main` remains unchanged. No deployment, production data change, or AI Studio synchronisation.
+
+
+## Section 70 — Development mock checkout isolation (2026-11-10)
+
+- The Stripe-unconfigured development checkout fallback previously wrote Gold Driver and Gotham mock subscriptions into generic membership fields (`subscriptionId`, `subscriptionStatus`, `currentPeriodEnd`, `cancelAtPeriodEnd`). This could overwrite an existing membership subscription and made Gotham quota checks miss the mock subscription's dedicated ID.
+- The fallback now writes only product-specific records: Gold Driver uses `driverSubscriptionId`, `driverSubscriptionStatus`, `driverCurrentPeriodEnd`, and `driverCancelAtPeriodEnd`; Gotham uses the corresponding `gotham*` fields including `gothamSubscriptionId`, which the property quota verifier requires.
+- Combined with the prior cancellation changes, the mock fallback no longer clears or overwrites generic membership cancellation or period-end fields for these products.
+- Added a regression case asserting a dedicated Gotham ID takes precedence when a different membership ID exists.
+- Latest observed branch head at code review: `a7019e16352abba399ea2832fedcaa452a917894`; branch was 227 ahead / 0 behind `main` before this documentation update. No changes to `main`.
+- CI remains blocked: the latest observed push run `42806318058` (run 654) failed. Previous runs continue to fail before steps with runner ID 0; no code test result is available.
