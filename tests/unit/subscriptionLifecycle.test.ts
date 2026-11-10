@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "../../src/server/subscriptionLifecycle.ts";
+import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "../../src/server/subscriptionLifecycle.ts";
 
 const active = { id: "sub_test", status: "active", cancel_at_period_end: false, current_period_end: 1_800_000_000 };
 
@@ -14,6 +14,22 @@ describe("Stripe subscription lifecycle patch mapping", () => {
   ] as const)("maps active state to %s only", (product, expected) => {
     const patch = buildSubscriptionLifecyclePatch(product, active);
     for (const [key, value] of Object.entries(expected)) expect(patch[key]).toBe(value);
+  });
+
+  it("builds a landlord checkout fulfillment patch without trader membership entitlements", () => {
+    const patch = buildLandlordCheckoutFulfillmentPatch("sub_landlord", "landlord", active);
+    expect(patch).toMatchObject({
+      subscriptionId: "sub_landlord",
+      subscriptionType: "landlord",
+      isLandlord: true,
+      homeownerTierId: "landlord",
+      homeownerSubscriptionStatus: "active",
+      homeownerCancelAtPeriodEnd: false,
+      homeownerCurrentPeriodEnd: new Date(1_800_000_000_000).toISOString()
+    });
+    expect(patch).not.toHaveProperty("subscriptionStatus");
+    expect(patch).not.toHaveProperty("isPro");
+    expect(patch).not.toHaveProperty("isProInvoiceSubscriber");
   });
 
   it("maps landlord cancellation to homeowner-only lifecycle fields", () => {
