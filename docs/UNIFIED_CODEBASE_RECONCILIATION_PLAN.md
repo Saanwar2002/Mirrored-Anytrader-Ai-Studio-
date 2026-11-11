@@ -4412,3 +4412,40 @@ This validates the committed payout lease-fencing regression and FIN-04 idempote
 3. Prove evaluator purity: no writes, no Stripe calls, no mutation of input snapshots.
 4. Separately close FIN-01 route-level stale-worker tests and supplementary domain-event consumer delivery.
 5. Keep all writes on `integration/pr-consolidation-20261109`; no merge, deployment, production mutation, or AI Studio Pull/Push.
+
+
+## Section 175 — FIN-05 pure evaluator started; working memory checkpoint (11 November 2026)
+
+### Durable current state
+
+- Repository: `Saanwar2002/AnyTrader`.
+- Sole write target: `integration/pr-consolidation-20261109`. Never write `main`, create a branch, merge PR #5, deploy, mutate production Firebase/Stripe, or use AI Studio Pull/Push.
+- Branch head before this FIN-05 batch: `686875b1775a5026f04339fc049bd7cfcacfc223`; both documentation CI runs #959 and #960 completed successfully.
+- Exact code-level CI evidence immediately before FIN-05: run #958 at `c6cddd4cef5b5aa93f4e92ca59a21f18e5f0e6bb` succeeded across emulator/security, unit/penetration, type/lint, production build and release audit. Do not transfer that green status to later commits.
+
+### FIN-05 implementation in progress
+
+Added `src/server/financialReconciliation.ts`, a pure snapshot-based evaluator with no Firestore/Stripe/network dependencies. It returns deterministic, sorted findings and counts for:
+- duplicate ledger IDs;
+- missing/mismatched capture ledger amount/currency;
+- duplicate/orphaned/mismatched succeeded refunds and cumulative refund totals over capture;
+- payout operation vs Stripe transfer amount/currency/destination mismatches and missing Stripe evidence;
+- released escrow lacking a transfer identity or referencing absent/mismatched transfer evidence;
+- orphan Stripe transfers;
+- payout destination allocations exceeding an explicitly supplied authorised cap (never inferred).
+
+Added `tests/unit/financialReconciliation.test.ts` covering balanced lifecycle, missing/duplicate/mismatch cases, orphan and over-refund cases, escrow/payout/transfer mismatch, explicit payout cap, input immutability and deterministic output.
+
+Commits:
+- evaluator: `638dc4ab112d3303b10ad90add8fbba05e53ebcc`
+- initial tests: `051c3e42c3a441945f81e9c4b0e4dc9701a55a2d`
+- typed cap refinement: `0a80f0e752b5010ca95cc17e7ba156c7e81b900a`
+- allocation-cap regression: `1466f8e5852ffe4aa7d2c75fc5f9c1c0af9bcc75`
+
+### Verification / immediate next actions
+
+- This is a new unvalidated code batch. Check latest branch head and Actions run; wait for exact-head CI. No local test execution is claimed.
+- Review typecheck/test output carefully; fix any issues only on this integration branch.
+- Evaluator is not wired to a scheduled/admin endpoint; it only processes caller-supplied snapshots. Any future runner must be separately authorized, read-only, bounded/paginated, and must not auto-repair or initiate money movement.
+- Continue FIN-05 acceptance tests and review assumptions around duplicate IDs, multiple capture ledger entries, and transfer linkage before declaring complete.
+- FIN-01 stale webhook route-level tests and supplementary durable domain-event consumer delivery remain open.
