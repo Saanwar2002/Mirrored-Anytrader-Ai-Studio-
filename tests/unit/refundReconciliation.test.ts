@@ -34,7 +34,7 @@ function createMemoryDb(seed: Record<string, any> = {}) {
   };
 }
 
-const recordRefund = (db: any, input: any) => recordRefund(db, { stripeRefundStatus: "succeeded", ...input });
+const recordRefund = (db: any, input: any) => recordConfirmedRefund(db, { stripeRefundStatus: "succeeded", ...input });
 
 const original = {
   entryId: "ledg_original",
