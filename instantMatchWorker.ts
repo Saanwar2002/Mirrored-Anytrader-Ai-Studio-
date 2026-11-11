@@ -54,19 +54,64 @@ export async function expireAndRefundInstantMatch(db: admin.firestore.Firestore,
     return;
   }
   try {
-    const refund = await stripe.refunds.create({ payment_intent: operation.paymentIntentId, reason: "requested_by_customer", metadata: { instantMatchId: matchRef.id, operationType: "ANYTRADER_INSTANT_MATCH_EXPIRY" } }, { idempotencyKey: operation.idempotencyKey });
-    const status = refund.status === "succeeded" ? "succeeded" : (refund.status === "failed" || refund.status === "canceled") ? "manual_review" : "processing";
+    const expectedAmount = Number(operation.amount);
+    if (!Number.isSafeInteger(expectedAmount) || expectedAmount <= 0) {
+      throw new Error("Instant Match refund amount is invalid; reconciliation is required.");
+    }
+    const refund = await stripe.refunds.create({
+      payment_intent: operation.paymentIntentId,
+      amount: expectedAmount,
+      reason: "requested_by_customer",
+      metadata: { instantMatchId: matchRef.id, operationType: "ANYTRADER_INSTANT_MATCH_EXPIRY" }
+    }, { idempotencyKey: operation.idempotencyKey });
+    const returnedPaymentIntentId = typeof refund.payment_intent === "string"
+      ? refund.payment_intent
+      : refund.payment_intent?.id;
+    const responseMatchesOperation = typeof refund.id === "string" && refund.id.trim() !== "" &&
+      returnedPaymentIntentId === operation.paymentIntentId &&
+      refund.amount === expectedAmount &&
+      String(refund.currency || "").toLowerCase() === String(operation.currency || "").toLowerCase();
+    const status = !responseMatchesOperation
+      ? "manual_review"
+      : refund.status === "succeeded" ? "succeeded"
+      : (refund.status === "failed" || refund.status === "canceled") ? "manual_review"
+      : "processing";
     await db.runTransaction(async (tx: any) => {
       const [latestMatch, latestRefund] = await Promise.all([tx.get(matchRef), tx.get(refundRef)]);
       if (!latestMatch.exists || !latestRefund.exists) throw new Error("Instant Match refund operation disappeared.");
-      tx.set(refundRef, { status, stripeRefundId: refund.id, stripeRefundStatus: refund.status || null, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      tx.set(matchRef, { refundStatus: status, stripeRefundId: refund.id }, { merge: true });
+      const currentRefund = latestRefund.data() || {};
+      if (
+        currentRefund.status !== "processing" ||
+        currentRefund.paymentIntentId !== operation.paymentIntentId ||
+        currentRefund.idempotencyKey !== operation.idempotencyKey ||
+        currentRefund.amount !== expectedAmount ||
+        String(currentRefund.currency || "").toLowerCase() !== String(operation.currency || "").toLowerCase()
+      ) {
+        throw new Error("Instant Match refund claim was changed or superseded; reconciliation is required.");
+      }
+      tx.set(refundRef, {
+        status,
+        stripeRefundId: typeof refund.id === "string" ? refund.id : null,
+        stripeRefundStatus: refund.status || null,
+        ...(!responseMatchesOperation ? { error: "stripe_refund_response_mismatch" } : {}),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      tx.set(matchRef, {
+        refundStatus: status,
+        ...(typeof refund.id === "string" ? { stripeRefundId: refund.id } : {})
+      }, { merge: true });
     });
   } catch (err: any) {
     const message = err?.message || String(err);
     await db.runTransaction(async (tx: any) => {
       const [latestMatch, latestRefund] = await Promise.all([tx.get(matchRef), tx.get(refundRef)]);
-      if (!latestMatch.exists || !latestRefund.exists || latestRefund.data()?.status === "succeeded") return;
+      if (!latestMatch.exists || !latestRefund.exists) return;
+      const currentRefund = latestRefund.data() || {};
+      if (
+        currentRefund.status !== "processing" ||
+        currentRefund.paymentIntentId !== operation.paymentIntentId ||
+        currentRefund.idempotencyKey !== operation.idempotencyKey
+      ) return;
       tx.set(refundRef, { status: "reconciliation_required", error: message.slice(0, 500), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       tx.set(matchRef, { refundStatus: "reconciliation_required" }, { merge: true });
     });
