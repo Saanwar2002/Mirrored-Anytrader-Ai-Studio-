@@ -15,6 +15,13 @@ export interface RefundOperation {
   updatedAt: string;
 }
 
+export function getRefundEventReconciliationStatus(
+  requiresReview: boolean,
+  requiresPaginationReview: boolean
+): "reconciled" | "requires_review" {
+  return requiresReview || requiresPaginationReview ? "requires_review" : "reconciled";
+}
+
 export interface ConfirmedRefundInput {
   refundId: string;
   chargeId: string;

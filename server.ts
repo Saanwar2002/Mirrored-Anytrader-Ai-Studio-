@@ -4,7 +4,7 @@ import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockS
 import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
 import { createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure } from "./src/server/mediationStake.ts";
-import { recordConfirmedRefund } from "./src/server/refundReconciliation.ts";
+import { getRefundEventReconciliationStatus, recordConfirmedRefund } from "./src/server/refundReconciliation.ts";
 import { evaluateCheckoutIntentBinding } from "./src/server/checkoutIntentIntegrity.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -2169,8 +2169,12 @@ async function startServer() {
             reason: "charge_refund_missing_payment_intent_reference", status: "requires_review", sourceEventId: event.id,
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true });
+          await eventRefundRef.set({ chargeId: charge.id, amountRefunded: charge.amount_refunded, currency: charge.currency,
+            status: "requires_review", requiresReview: true, reason: "charge_refund_missing_payment_intent_reference",
+            sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         } else {
           const refunds = refundUpdate ? [refundUpdate] : charge.refunds?.data || [];
+          let requiresReview = false;
           await eventRefundRef.set({ chargeId: charge.id, paymentIntentId, amountRefunded: charge.amount_refunded,
             currency: charge.currency, refundIds: refunds.map(refund => refund.id), status: "reconciliation_started",
             createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -2178,6 +2182,7 @@ async function startServer() {
           const preferred = ledger.docs.filter((doc: any) => doc.data()?.status === "completed" && doc.data()?.type === "ESCROW_DEPOSIT");
           const eligible = preferred.length ? preferred : ledger.docs.filter((doc: any) => doc.data()?.status === "completed" && doc.data()?.type === "PLATFORM_COMMISSION");
           if (!refunds.length && charge.amount_refunded > 0) {
+            requiresReview = true;
             await db.collection("refund_review").doc(`charge_${charge.id}`).set({ chargeId: charge.id, paymentIntentId,
               amountRefunded: charge.amount_refunded, currency: charge.currency,
               reason: "charge_refunded_event_has_no_individual_refund_objects", status: "requires_review", sourceEventId: event.id,
@@ -2187,6 +2192,7 @@ async function startServer() {
             const refundPi = typeof refund.payment_intent === "string" ? refund.payment_intent : refund.payment_intent?.id || paymentIntentId;
             const reviewRef = db.collection("refund_review").doc(refund.id);
             if (refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase() || eligible.length !== 1) {
+              requiresReview = true;
               await reviewRef.set({ refundId: refund.id, chargeId: charge.id, paymentIntentId,
                 amountPence: refund.amount, currency: refund.currency,
                 candidateLedgerEntryIds: eligible.map((doc: any) => doc.id),
@@ -2203,19 +2209,25 @@ async function startServer() {
               await reviewRef.delete().catch(() => undefined);
             } catch (refundError: any) {
               if (![400, 404, 409].includes(Number(refundError?.statusCode))) throw refundError;
+              requiresReview = true;
               await reviewRef.set({ refundId: refund.id, chargeId: charge.id, paymentIntentId,
                 originalLedgerEntryId: eligible[0].id, amountPence: refund.amount, currency: refund.currency,
                 reason: refundError.message || "refund_reconciliation_conflict", status: "requires_review",
                 sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
             }
           }
-          if (!refundUpdate && charge.refunds?.has_more) await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).set({
-            chargeId: charge.id, paymentIntentId, reason: "stripe_charge_refunds_list_has_more_items; retrieve remaining refunds from Stripe",
-            status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          }, { merge: true });
+          const requiresPaginationReview = !refundUpdate && Boolean(charge.refunds?.has_more);
+          if (requiresPaginationReview) {
+            requiresReview = true;
+            await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).set({
+              chargeId: charge.id, paymentIntentId, reason: "stripe_charge_refunds_list_has_more_items; retrieve remaining refunds from Stripe",
+              status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          }
           if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before refund event completion.");
-          await eventRefundRef.set({ status: "reconciled", reconciledRefundCount: refunds.length,
-            requiresPaginationReview: !refundUpdate && Boolean(charge.refunds?.has_more), reconciledAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          await eventRefundRef.set({ status: getRefundEventReconciliationStatus(requiresReview, requiresPaginationReview),
+            requiresReview, reconciledRefundCount: refunds.length, requiresPaginationReview,
+            reconciledAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         }
       }
       // Mediation stake payment lifecycle is server-authoritative and validates the reserved attempt.

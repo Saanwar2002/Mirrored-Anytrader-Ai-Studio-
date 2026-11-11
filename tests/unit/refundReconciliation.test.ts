@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recordConfirmedRefund, reserveRefundOperation } from "../../src/server/refundReconciliation.ts";
+import { getRefundEventReconciliationStatus, recordConfirmedRefund, reserveRefundOperation } from "../../src/server/refundReconciliation.ts";
 import { BadRequestError, ConflictError } from "../../src/server/httpErrors.ts";
 
 function createMemoryDb(seed: Record<string, any> = {}) {
@@ -48,6 +48,20 @@ const original = {
   type: "ESCROW_DEPOSIT",
   status: "completed",
 };
+
+describe("refund event outcome", () => {
+  it("marks an event reconciled only when every refund was handled without review", () => {
+    expect(getRefundEventReconciliationStatus(false, false)).toBe("reconciled");
+  });
+
+  it.each([
+    [true, false],
+    [false, true],
+    [true, true],
+  ])("keeps review-required outcomes visible (%s, %s)", (requiresReview, requiresPaginationReview) => {
+    expect(getRefundEventReconciliationStatus(requiresReview, requiresPaginationReview)).toBe("requires_review");
+  });
+});
 
 describe("refund reconciliation", () => {
   it("reserves one stable refund operation and replays matching requests", async () => {
