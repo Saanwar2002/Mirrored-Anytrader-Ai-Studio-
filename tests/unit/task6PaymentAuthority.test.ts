@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import crypto from "crypto";
 import { PaymentLedgerEngine } from "../../src/server/paymentLedger.ts";
 import { validateMilestoneTransition } from "../../src/server/stateMachine.ts";
 import { ConflictError, BadRequestError, ForbiddenError } from "../../src/server/httpErrors.ts";
@@ -1057,8 +1058,23 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
 
       // 2. Simulate worker crash: set payment_idempotency to in_progress with stale timestamp (> 5 mins old)
       const idempRef = db.collection("payment_idempotency").doc(crashOpKey);
+      const binding = {
+        version: 1,
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid,
+        authorizationMode: "owner",
+      };
+      const canonicalize = (value: any): any => Array.isArray(value)
+        ? value.map(canonicalize)
+        : value && typeof value === "object"
+          ? Object.keys(value).sort().reduce((acc: any, key) => { acc[key] = canonicalize(value[key]); return acc; }, {})
+          : value;
+      const bindingHash = crypto.createHash("sha256").update(JSON.stringify(canonicalize(binding))).digest("hex");
       await idempRef.set({
         operationName: "RELEASE_MILESTONE",
+        bindingHash,
         status: "in_progress",
         startedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
       });

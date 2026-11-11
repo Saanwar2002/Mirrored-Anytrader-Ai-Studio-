@@ -124,6 +124,7 @@ describe("Payment Ledger & Invariants", () => {
       mockDb,
       "test_key_1",
       "TEST_OP",
+      { version: 1, testResource: "resource-1" },
       task
     );
     expect(secondCall.wasReplayed).toBe(true);
@@ -141,8 +142,8 @@ describe("Payment Ledger & Invariants", () => {
         delete: () => store.delete("key"),
       }),
     };
-    await PaymentLedgerEngine.executeIdempotentOperation(db, "key", "PAYMENT_CAPTURE", async () => "done");
-    await expect(PaymentLedgerEngine.executeIdempotentOperation(db, "key", "REFUND", async () => "wrong"))
+    await PaymentLedgerEngine.executeIdempotentOperation(db, "key", "PAYMENT_CAPTURE", { version: 1, resource: "payment-1" }, async () => "done");
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(db, "key", "REFUND", { version: 1, resource: "payment-1" }, async () => "wrong"))
       .rejects.toThrow("different financial operation");
   });
 
@@ -181,7 +182,7 @@ describe("Payment Ledger & Invariants", () => {
         delete: (ref: any) => store.delete(ref.id),
       }),
     };
-    await expect(PaymentLedgerEngine.executeIdempotentOperation(db, "claim", "CAPTURE", async () => {
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(db, "claim", "CAPTURE", { version: 1, resource: "capture-1" }, async () => {
       store.set("claim", { operationName: "CAPTURE", status: "in_progress", claimToken: "successor", startedAt: new Date().toISOString() });
       return { transfer: "tr_1" };
     })).rejects.toThrow("superseded");
