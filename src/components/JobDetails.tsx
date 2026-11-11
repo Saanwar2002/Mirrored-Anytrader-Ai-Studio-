@@ -1584,8 +1584,8 @@ const libraries: any[] = ['places', 'geometry'];
 
       setShowQrModal(false);
       setQrCodeData(null);
-      // Refresh local job state
-      setJob((prev: any) => ({ ...prev, paymentStatus: "handshake_complete", isPaid: true, updatedAt: new Date() }));
+      // Refresh the job from the server; a single QR milestone release does not
+      // establish that the entire job has been paid.
     } catch (err) {
       console.error("QR Handshake failed:", err);
     } finally {

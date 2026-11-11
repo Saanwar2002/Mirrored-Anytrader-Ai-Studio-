@@ -906,10 +906,11 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
       expect(result.success).toBe(true);
       expect(result.releasedAmount).toBe(500);
 
-      // Verify job marked handshake complete
+      // QR handshake authorizes this milestone only; it must not mark the
+      // entire multi-milestone job as paid.
       const jobSnap = await db.collection("jobs").doc(jobId).get();
-      expect(jobSnap.data()?.paymentStatus).toBe("handshake_complete");
-      expect(jobSnap.data()?.isPaid).toBe(true);
+      expect(jobSnap.data()?.paymentStatus).not.toBe("handshake_complete");
+      expect(jobSnap.data()?.isPaid).not.toBe(true);
     });
 
     it("allows authorized admin to release milestone", async () => {
