@@ -4326,3 +4326,30 @@ Do not treat event-document existence as proof that consumers completed. The nex
 4. Implement FIN-05 as a read-only evaluator with discrepancy fixtures.
 5. Re-run the full CI gate on the consolidated integration commit and record exact SHA, run ID, all job outcomes and evidence.
 6. Keep the integration branch as the only write target. Do not merge PR #5, change `main`, deploy, or touch production Firebase/Stripe state.
+
+
+## Section 172 — Lease-fenced existing-operation replay barrier (11 November 2026)
+
+### Implementation
+
+- Corrected `src/server/driverPayoutOrchestration.ts`: when a deterministic `driver_payout_operations` record already exists, the orchestrator now opens a Firestore transaction, re-reads the ride, and writes `reconciliation_required` only if the exact `payoutClaimToken` acquired by this worker is still current.
+- If the claim token has changed, the transaction leaves the ride untouched and the result still reports `reconciliation_required` with the existing-operation reason. The durable operation remains a replay barrier; no new Stripe transfer is attempted.
+- Added a functional regression in `tests/unit/driverPayoutOrchestration.test.ts`. The operation lookup hook changes the ride to a successor token/status and writes a successor-owned diagnostic before the transaction. Assertions require that token, status, diagnostic and unpaid flag remain unchanged, and that Stripe transfer creation is never called.
+
+### Commits and CI
+
+- Production-code correction: `d32a13a3685f27360d71fbbdd643f6b5a0f380b2`.
+- Functional regression test: `6139a0abe3eb93c04a3346952ebaed6da89ffce5`.
+- The integration branch head at this checkpoint is `6139a0abe3eb93c04a3346952ebaed6da89ffce5`; comparison against `main` is **523 ahead, 0 behind**.
+- Push-triggered CI run **#953** (`43101354860`) is associated with the exact test commit SHA and was `in_progress` when inspected. Job `security-and-build-gate` was also `in_progress`.
+- Earlier push-triggered run **#952** (`43101326715`) for the code-only commit was also `in_progress` at inspection. Neither run is recorded as passing.
+- The commit combined-status endpoint returned an empty status list. This is not a green check.
+- The regression has been committed but has **not** been executed locally in this session. Wait for CI and inspect the unit test step/logs before considering it validated.
+
+### Remaining work
+
+1. Inspect run #953 to completion and read failing step logs if it fails; fix only on this integration branch.
+2. Complete FIN-04 durable per-consumer event delivery/retry and operation recovery with functional crash-boundary tests.
+3. Implement FIN-05 read-only financial discrepancy evaluation and fixtures.
+4. Re-run the full CI gate on the final consolidated candidate SHA and record all job outcomes.
+5. Do not merge PR #5, modify `main`, deploy, or touch production Firebase/Stripe state.
