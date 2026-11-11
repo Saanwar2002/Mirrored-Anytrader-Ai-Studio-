@@ -183,3 +183,47 @@ Remediation should validate the registry record's `checkoutSessionId` against th
 ### Correction — checkout webhook already validates the payment-intent registry
 
 The common `checkout.session.completed` webhook preamble already loads `payment_intents/{session.metadata.intentId}` and validates it against the Stripe Checkout Session using `evaluateCheckoutIntentBinding`. It checks the session/user/mode/amount/currency binding and any PaymentIntent ID already stored; pending bindings remain retryable and mismatches are marked for review. Thus, the registry is not missing and the webhook does not need a second lookup. The actual defect is that the Instant Match-specific fulfillment transaction omits the already-validated `intent.paymentIntentId` when creating `instant_matches/{matchId}`. Also require a non-empty PaymentIntent ID for paid Instant Match refunds: the shared binding helper allows null IDs for product flows that legitimately have none. Preserve the missing-identity review state rather than silently skipping a refund. The no-eligible-traders terminal path still bypasses refund initiation. This correction supersedes the earlier sentence suggesting the webhook does not read/validate the registry; no live operation or code change was made.
+
+## Integration branch remediation progress — 11 November 2026
+
+This section supersedes the older "Stage 3B remediation: Not started" status above. It records source changes on `integration/pr-consolidation-20261109` only; it does not certify live Stripe/Firebase state or authorize merge/deployment.
+
+### FIN-01 — webhook lease fencing
+
+- The current webhook claim stores a unique `claimToken` on each claim/takeover.
+- Fulfillment/review mutations check current ownership; terminal completion and failure writes are transactionally fenced by the token.
+- `ownsStripeWebhookClaim` and stale-claim decision tests exist.
+- Remaining acceptance gap: add route-level/concurrent integration tests proving a stale webhook worker cannot commit a financial side effect after takeover. Treat FIN-01 as implementation-present, test-hardening-open.
+
+### FIN-04 — generic idempotency binding
+
+- `PaymentLedgerEngine.executeIdempotentOperation` canonicalizes semantic binding keys, hashes the validated binding, rejects mismatched operation/binding replays, and fences stale executors with a claim token.
+- Current financial call sites bind the relevant owner and resource context: funding includes customer/job/milestone/payment intent/amount/currency; release includes authenticated caller/job/quote/milestone/authorization mode; driver payout includes driver/connected account/currency/amount mode and amount.
+- Remaining acceptance gap: expand adversarial tests across owner, resource, operation and canonical-payload variations; verify raw client keys cannot create unsafe document paths. FIN-04 is substantially implemented, final audit/tests open.
+
+### FIN-03 — escrow transfer recovery and response binding
+
+- Ambiguous Stripe outcomes retain the original release identity and require reconciliation; different operation keys cannot silently create a second release.
+- Stripe transfer responses are checked against the requested transfer ID, amount, GBP currency, connected-account destination and full operation metadata before being marked completed.
+- The release route passes the exact ledger entry ID to the Stripe side-effect handler. The fallback lookup is also constrained by job, quote, milestone and release type rather than updating the first row with a matching client idempotency key.
+- Mismatch/ambiguous outcomes remain reconciliation-required; reconciliation does not create a replacement transfer.
+- CI run `43064977003` passed all stages at commit `c3dfecf10db0c064b48a2b0bbda1d911642a0491`. This run includes transfer response validation, exact ledger binding and the LedgerEntry identifier typing fix.
+
+### FIN-02 — Instant Match refund initiation and reconciliation
+
+- Paid Instant Match fulfillment now persists the already-validated PaymentIntent ID; missing identity is held for manual review. The no-eligible-trader path uses the same expiry/refund coordinator as attempt exhaustion.
+- Refund initiation reserves one durable per-match operation with a stable Stripe idempotency key, amount/currency/PaymentIntent binding, a claim token and a five-minute lease.
+- Expired processing claims can be reclaimed with the same Stripe idempotency key only inside a conservative 23-hour retry window. Stale workers cannot overwrite a successor claim; pending Stripe responses receive a retry cooldown; expired/unknown idempotency windows require reconciliation rather than a new refund.
+- The read-only Stripe refund inspector scans all PaymentIntent refund pages, rejects malformed/non-advancing pagination, deduplicates repeated refund IDs, flags multiple/mismatched candidates, and only reports a match when the Stripe refund status is `succeeded`.
+- CI run `43065421728` passed all stages at commit `aaa5f364aa95965683dc6a46f3565b3415d2c170` for the refund-inspector changes. Runs `43065811061` and `43066046301` are still in progress for the subsequent claim-fencing/cooldown changes; do not treat those commits as verified until their full CI gates complete.
+
+### FIN-05 — cross-operation read-only reconciliation
+
+- Still open. Next work is a read-only discrepancy report keyed by PaymentIntent, original ledger entry, job/quote/milestone, Stripe transfer ID and Stripe refund ID.
+- It must report missing, duplicate, orphaned, mismatched and over-allocated records without changing ledger history or initiating/canceling Stripe operations. Build the pure invariant evaluator and tests before wiring any scheduled/admin runner.
+
+### Scope and execution guardrails
+
+- All code/documentation changes in this progress section are on `integration/pr-consolidation-20261109`.
+- No merge, deployment, production Firebase mutation, live Stripe financial operation, or AI Studio Pull/Push was performed.
+- No local test execution is claimed. CI status is cited per exact commit above; newer pending commits remain unverified.
