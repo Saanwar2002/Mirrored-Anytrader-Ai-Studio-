@@ -22,6 +22,31 @@ describe("read-only Instant Match refund reconciliation", () => {
     const list = vi.fn().mockResolvedValue({ data: [refund({ metadata: {} })], has_more: false });
     await expect(inspectInstantMatchRefunds({ refunds: { list } }, evidence)).resolves.toMatchObject({ outcome: "not_found", pagesScanned: 1 });
   });
+  it("does not treat pending, failed, or canceled refunds as successful reconciliation", async () => {
+    for (const status of ["pending", "failed", "canceled", null]) {
+      const list = vi.fn().mockResolvedValue({ data: [refund({ status })], has_more: false });
+      await expect(inspectInstantMatchRefunds({ refunds: { list } }, evidence))
+        .resolves.toMatchObject({ outcome: "not_succeeded" });
+    }
+  });
+  it("deduplicates the same refund appearing across pages but flags duplicate distinct refunds", async () => {
+    const same = refund();
+    const repeated = vi.fn()
+      .mockResolvedValueOnce({ data: [same], has_more: true })
+      .mockResolvedValueOnce({ data: [same], has_more: false });
+    await expect(inspectInstantMatchRefunds({ refunds: { list: repeated } }, evidence))
+      .resolves.toMatchObject({ outcome: "matched", refunds: [{ id: "re_123" }], pagesScanned: 2 });
+    const distinct = vi.fn()
+      .mockResolvedValueOnce({ data: [refund()], has_more: true })
+      .mockResolvedValueOnce({ data: [refund({ id: "re_456" })], has_more: false });
+    await expect(inspectInstantMatchRefunds({ refunds: { list: distinct } }, evidence))
+      .resolves.toMatchObject({ outcome: "conflict" });
+  });
+  it("rejects a matching metadata record without a Stripe refund ID", async () => {
+    const list = vi.fn().mockResolvedValue({ data: [refund({ id: "" })], has_more: false });
+    await expect(inspectInstantMatchRefunds({ refunds: { list } }, evidence))
+      .resolves.toMatchObject({ outcome: "conflict" });
+  });
   it("reports conflict when matching metadata has a different amount or currency", async () => {
     const list = vi.fn().mockResolvedValue({ data: [refund({ amount: 2400 })], has_more: false });
     await expect(inspectInstantMatchRefunds({ refunds: { list } }, evidence)).resolves.toMatchObject({ outcome: "conflict" });

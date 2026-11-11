@@ -6,7 +6,7 @@ export interface InstantMatchRefundEvidence {
 }
 
 export interface InstantMatchRefundReconciliationResult {
-  outcome: "matched" | "not_found" | "conflict";
+  outcome: "matched" | "not_found" | "conflict" | "not_succeeded";
   refunds: Array<{ id: string; status: string | null; amount: number; currency: string }>;
   pagesScanned: number;
 }
@@ -29,6 +29,7 @@ export async function inspectInstantMatchRefunds(
   let startingAfter: string | undefined;
   let pagesScanned = 0;
   const seenCursors = new Set<string>();
+  const seenRefunds = new Map<string, string>();
 
   for (;;) {
     const params: any = { payment_intent: evidence.paymentIntentId, limit: 100 };
@@ -46,18 +47,30 @@ export async function inspectInstantMatchRefunds(
       if (refund.metadata?.instantMatchId !== evidence.instantMatchId ||
           refund.metadata?.operationType !== "ANYTRADER_INSTANT_MATCH_EXPIRY") continue;
 
-      if (paymentIntent !== evidence.paymentIntentId ||
+      const refundId = typeof refund.id === "string" ? refund.id.trim() : "";
+      if (!refundId || paymentIntent !== evidence.paymentIntentId ||
           refund.amount !== evidence.amount ||
           String(refund.currency || "").toLowerCase() !== evidence.currency) {
         return {
           outcome: "conflict",
-          refunds: [{ id: String(refund.id || ""), status: refund.status || null,
+          refunds: [{ id: refundId, status: refund.status || null,
             amount: Number(refund.amount), currency: String(refund.currency || "").toLowerCase() }],
           pagesScanned
         };
       }
-      matches.push({ id: String(refund.id), status: refund.status || null,
-        amount: refund.amount, currency: String(refund.currency).toLowerCase() });
+      const candidate = {
+        id: refundId, status: typeof refund.status === "string" ? refund.status : null,
+        amount: refund.amount, currency: String(refund.currency).toLowerCase()
+      };
+      const fingerprint = JSON.stringify(candidate);
+      const priorFingerprint = seenRefunds.get(refundId);
+      if (priorFingerprint && priorFingerprint !== fingerprint) {
+        return { outcome: "conflict", refunds: [matches.find((item) => item.id === refundId) || candidate], pagesScanned };
+      }
+      if (!priorFingerprint) {
+        seenRefunds.set(refundId, fingerprint);
+        matches.push(candidate);
+      }
     }
 
     if (!page.has_more) break;
@@ -70,5 +83,7 @@ export async function inspectInstantMatchRefunds(
   }
 
   if (matches.length > 1) return { outcome: "conflict", refunds: matches, pagesScanned };
-  return { outcome: matches.length === 1 ? "matched" : "not_found", refunds: matches, pagesScanned };
+  if (matches.length === 0) return { outcome: "not_found", refunds: matches, pagesScanned };
+  if (matches[0].status !== "succeeded") return { outcome: "not_succeeded", refunds: matches, pagesScanned };
+  return { outcome: "matched", refunds: matches, pagesScanned };
 }
