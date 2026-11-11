@@ -525,10 +525,25 @@ export async function executeDriverPayoutOrchestrationCommand(
       if (priorOperation.exists) {
         const prior = priorOperation.data() || {};
         logger.error(`[Payout Orchestrator] Durable operation ${operationId} already exists (${prior.status}); manual reconciliation required before replay.`);
-        await rideDoc.ref.update({
-          payoutStatus: "reconciliation_required",
-          payoutLastError: "Durable payout operation exists; reconcile Stripe evidence before retry",
+        // The replay barrier is durable, but ride state remains owned by the
+        // current lease holder. A worker whose lease was superseded must not
+        // overwrite the successor's state while surfacing this barrier.
+        let reconciliationStateWritten = false;
+        await db.runTransaction(async (t: any) => {
+          const freshSnap = await t.get(rideDoc.ref);
+          const freshData = freshSnap.data() || {};
+          if (freshData.payoutClaimToken !== claimToken) {
+            return;
+          }
+          t.update(rideDoc.ref, {
+            payoutStatus: "reconciliation_required",
+            payoutLastError: "Durable payout operation exists; reconcile Stripe evidence before retry",
+          });
+          reconciliationStateWritten = true;
         });
+        if (!reconciliationStateWritten) {
+          logger.warn(`[Payout Orchestrator] Claim lost for ride ${rideId}; preserving successor state while reporting existing durable operation.`);
+        }
         failedCount++;
         details.push({ rideId, driverId: assignedDriverId, stripeAccountId, amount: driverEarningsGbp,
           status: "reconciliation_required", ...(prior.stripeTransferId ? { transferId: prior.stripeTransferId } : {}),
