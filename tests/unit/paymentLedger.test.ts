@@ -211,6 +211,64 @@ describe("Payment Ledger & Invariants", () => {
     expect(executions).toBe(0);
     expect(store.get("expired-key").status).toBe("reconciliation_required");
     expect(store.get("expired-key").claimToken).toBe("old-worker");
+
+    // A subsequent retry must not replace the reconciliation stop state with
+    // a fresh in-progress claim and repeat a possibly completed external effect.
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(
+      db, "expired-key", "TRANSFER", { version: 1 }, async () => { executions++; return "duplicate"; }
+    )).rejects.toThrow("automatic replay remains blocked");
+    expect(executions).toBe(0);
+    expect(store.get("expired-key").status).toBe("reconciliation_required");
+    expect(store.get("expired-key").claimToken).toBe("old-worker");
+  });
+
+  it("canonicalizes semantic bindings and rejects owner or resource changes", async () => {
+    const store = new Map<string, any>();
+    const db = {
+      collection: () => ({ doc: (id: string) => ({ id }) }),
+      runTransaction: async (fn: any) => fn({
+        get: async (ref: any) => ({ exists: store.has(ref.id), data: () => store.get(ref.id) }),
+        set: (ref: any, value: any) => store.set(ref.id, value),
+        update: (ref: any, value: any) => store.set(ref.id, { ...store.get(ref.id), ...value }),
+        delete: (ref: any) => store.delete(ref.id),
+      }),
+    };
+    let executions = 0;
+    const first = await PaymentLedgerEngine.executeIdempotentOperation(
+      db, "canonical-binding-key", "FUND_ESCROW",
+      { version: 1, ownerId: "customer-1", resourceId: "milestone-1", amountPence: 5000 },
+      async () => { executions++; return { ledgerEntryId: "ledger-1" }; }
+    );
+    const reordered = await PaymentLedgerEngine.executeIdempotentOperation(
+      db, "canonical-binding-key", "FUND_ESCROW",
+      { amountPence: 5000, resourceId: "milestone-1", ownerId: "customer-1", version: 1 },
+      async () => { executions++; return { ledgerEntryId: "wrong" }; }
+    );
+    expect(first.wasReplayed).toBe(false);
+    expect(reordered.wasReplayed).toBe(true);
+    expect(reordered.result).toEqual({ ledgerEntryId: "ledger-1" });
+
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(
+      db, "canonical-binding-key", "FUND_ESCROW",
+      { version: 1, ownerId: "customer-2", resourceId: "milestone-1", amountPence: 5000 },
+      async () => { executions++; return "wrong-owner"; }
+    )).rejects.toThrow("different transaction details");
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(
+      db, "canonical-binding-key", "FUND_ESCROW",
+      { version: 1, ownerId: "customer-1", resourceId: "milestone-2", amountPence: 5000 },
+      async () => { executions++; return "wrong-resource"; }
+    )).rejects.toThrow("different transaction details");
+    expect(executions).toBe(1);
+  });
+
+  it("rejects slash-containing or oversized idempotency keys before Firestore access", async () => {
+    const executor = async () => "must-not-run";
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(
+      null, "unsafe/path/key", "TEST", { version: 1 }, executor
+    )).rejects.toThrow("cannot contain");
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(
+      null, "x".repeat(201), "TEST", { version: 1 }, executor
+    )).rejects.toThrow("at most 200");
   });
 
 });
