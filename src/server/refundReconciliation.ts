@@ -157,6 +157,8 @@ export async function recordConfirmedRefund(
       if (
         existing.transactionId !== paymentIntentId ||
         existing.amount !== amountPence ||
+        existing.currency?.toLowerCase() !== currency ||
+        existing.stripeChargeId !== chargeId ||
         existing.reversalOfEntryId !== originalLedgerEntryId
       ) {
         throw new ConflictError("Stripe refund ID already exists with conflicting payment details.");

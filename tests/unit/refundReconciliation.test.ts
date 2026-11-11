@@ -106,6 +106,23 @@ describe("refund reconciliation", () => {
     expect(db.store.get(Object.keys(Object.fromEntries(db.store)).find(k => k.startsWith("payment_refund_totals/"))!)?.remainingAmountPence).toBe(7500);
   });
 
+  it("rejects replay of a Stripe refund ID with a different charge or currency", async () => {
+    const db = createMemoryDb({ "payment_ledger/ledg_original": original });
+    const input = {
+      refundId: "re_replay_mismatch",
+      chargeId: "ch_original",
+      paymentIntentId: "pi_original",
+      originalLedgerEntryId: "ledg_original",
+      amountPence: 500,
+      currency: "gbp",
+    };
+    await recordConfirmedRefund(db, input);
+    await expect(recordConfirmedRefund(db, { ...input, chargeId: "ch_other" }))
+      .rejects.toThrow(ConflictError);
+    await expect(recordConfirmedRefund(db, { ...input, currency: "usd" }))
+      .rejects.toThrow(ConflictError);
+  });
+
   it("marks a reserved operation succeeded when its Stripe refund is confirmed", async () => {
     const db = createMemoryDb({ "payment_ledger/ledg_original": original });
     await reserveRefundOperation(db, {
