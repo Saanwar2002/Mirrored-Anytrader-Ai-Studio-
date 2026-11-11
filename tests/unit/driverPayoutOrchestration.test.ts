@@ -857,6 +857,14 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(ride.payoutStatus).toBe("processing");
     expect(ride.payoutTransferred).toBe(false);
     expect(ride.stripeTransferId).toBeUndefined();
+    const operation = Object.values(mockStore).find((entry: any) => entry?.rideId === "ride_success_lost_claim" && entry?.operationId);
+    expect(operation).toBeDefined();
+    expect(operation.status).toBe("stripe_succeeded");
+    expect(operation.stripeTransferId).toBe("tr_ambiguous_456");
+    // A later worker sees the durable operation barrier and does not call Stripe again.
+    const retry = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+    expect(retry.details.some((detail) => detail.status === "reconciliation_required")).toBe(true);
+    expect(createdTransfers).toHaveLength(1);
   });
 
 });

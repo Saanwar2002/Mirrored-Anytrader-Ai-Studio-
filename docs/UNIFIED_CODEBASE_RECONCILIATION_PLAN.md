@@ -4220,3 +4220,20 @@ The analysis has converged on a single coherent implementation batch rather than
 The available GitHub workflow can inspect and commit repository files, but this session has no verified local checkout/test runner. Therefore no application-code batch is being represented as tested or safe to merge at this checkpoint. Do not substitute source-text assertions for functional failure/retry tests. Obtain a real checkout/test execution path before implementation, then keep the complete code/test batch on this integration branch and run one full CI cycle after the consolidated commit.
 
 Continue with the integration branch only. Do not create another branch, change `main`, merge PR #5, deploy, or touch production Firebase/Stripe state.
+
+
+## Section 167 — Driver payout durable external-effect evidence (11 November 2026)
+
+### Implementation checkpoint
+
+The driver payout orchestrator now creates a deterministic Firestore operation record in `driver_payout_operations` before invoking Stripe. Its document ID is SHA-256 over the ride, assigned driver and exact integer transfer amount; the record captures those immutable facts, connected-account destination, GBP, deterministic Stripe idempotency key, claim token and preparation timestamp.
+
+After Stripe returns a transfer, the orchestrator persists `status: stripe_succeeded`, transfer ID, amount, currency, destination and confirmation timestamp **before** attempting ride-document finalization. If transfer/finalization throws, it attempts to mark the operation `reconciliation_required` and retains the error. A later worker encountering any existing operation record is blocked from issuing a new transfer, writes a reconciliation-required ride status and surfaces any persisted transfer ID. This deliberately sacrifices automatic retry availability for protection against duplicate disbursement.
+
+The operation record is an evidence barrier, not yet a complete reconciliation/resolution service: it does not automatically finalize a ride from a previously confirmed transfer, reconcile a prepared/ambiguous record against Stripe, or support authorized operator resolution. Firestore failure immediately after Stripe success can still prevent recording the transfer receipt; that outage boundary must be handled through Stripe-side metadata/idempotency-key lookup and manual reconciliation. No production Stripe or Firestore data was read or written.
+
+### Regression coverage and verification
+
+- Extended the existing successful-Stripe/lost-lease test to assert durable transfer evidence and that a subsequent orchestration invocation is blocked without a second Stripe call.
+- The implementation and test changes are committed on `integration/pr-consolidation-20261109`; CI must pass before this checkpoint is treated as validated.
+- Remaining FIN-04 and payout reconciliation work: reconcile prepared/ambiguous operations with complete Stripe transfer search, verify exact amount/currency/destination/metadata, operator-fenced finalization, and test Firestore write failure after Stripe success. Preserve `main`, production services and draft PR #5 unchanged.
