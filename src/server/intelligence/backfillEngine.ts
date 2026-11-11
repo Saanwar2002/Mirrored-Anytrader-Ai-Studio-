@@ -355,9 +355,15 @@ export class ControlledBackfillEngine {
         query = query.orderBy('__name__');
       }
       if (effectiveCursor) {
-        // A name-range filter is stable across tenant equality filters and
-        // avoids SDK/emulator startAfter(snapshot) ambiguity on __name__.
-        query = query.where('__name__', '>', firestoreDb.collection(targetCollection).doc(effectiveCursor));
+        if (tenantId) {
+          // Tenant equality + document-name range is reliable in the emulator
+          // and prevents cursor values being interpreted as ordinary fields.
+          query = query.where('__name__', '>', firestoreDb.collection(targetCollection).doc(effectiveCursor));
+        } else {
+          // Legacy/unscoped queries and the in-memory adapter use the standard
+          // ordered document cursor.
+          query = query.startAfter(firestoreDb.collection(targetCollection).doc(effectiveCursor));
+        }
       }
 
       // Bound the resumed page after applying its cursor checkpoint.
