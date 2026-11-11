@@ -15,6 +15,9 @@ export interface LedgerEntry {
   entryId: string;
   transactionId: string;
   idempotencyKey: string;
+  jobId?: string;
+  quoteId?: string;
+  milestoneId?: string;
   payerId: string;
   payeeId: string;
   amount: number; // in minor units (pence / cents)
