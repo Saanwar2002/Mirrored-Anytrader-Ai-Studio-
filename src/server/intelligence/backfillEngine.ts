@@ -354,18 +354,10 @@ export class ControlledBackfillEngine {
       if (typeof query.orderBy === 'function') {
         query = query.orderBy('__name__');
       }
-      if (effectiveCursor && typeof query.startAfter === 'function') {
-        // Resume from the actual persisted document snapshot. With a tenant
-        // equality filter plus __name__ ordering, a DocumentReference cursor
-        // can be interpreted as a field value by emulator/SDK combinations
-        // and yield an empty page; the snapshot is unambiguous.
-        const cursorSnapshot = await firestoreDb.collection(targetCollection).doc(effectiveCursor).get();
-        if (cursorSnapshot.exists) {
-          query = query.startAfter(cursorSnapshot);
-        } else {
-          // Cursor doc may have been deleted; fall back to its document name.
-          query = query.startAfter(firestoreDb.collection(targetCollection).doc(effectiveCursor));
-        }
+      if (effectiveCursor) {
+        // A name-range filter is stable across tenant equality filters and
+        // avoids SDK/emulator startAfter(snapshot) ambiguity on __name__.
+        query = query.where('__name__', '>', firestoreDb.collection(targetCollection).doc(effectiveCursor));
       }
 
       // Bound the resumed page after applying its cursor checkpoint.
