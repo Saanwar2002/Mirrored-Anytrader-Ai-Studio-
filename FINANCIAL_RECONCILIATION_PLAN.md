@@ -265,3 +265,12 @@ The current integration head at the time of verification was `c6cddd4cef5b5aa93f
 Accordingly, the FIN-04 hardening and driver payout stale-worker regression committed before this SHA have passed the full CI gate. FIN-02 changes are also included in the successful exact-head run. This is repository CI evidence only; no live Stripe/Firebase production reconciliation was performed.
 
 FIN-05 remains open: implement a pure read-only cross-operation discrepancy evaluator with fixtures for missing, duplicate, orphaned, mismatched and over-allocated records. FIN-01 route-level stale-worker integration tests remain open. Supplementary durable per-consumer domain-event delivery/retry is a separate reliability workstream, not formal FIN-04.
+
+
+## FIN-05 implementation checkpoint — 11 November 2026
+
+Added a pure, snapshot-only evaluator in `src/server/financialReconciliation.ts` and deterministic tests in `tests/unit/financialReconciliation.test.ts`. It reports duplicate ledger IDs; capture-ledger absence/amount/currency mismatch; duplicate/orphaned/mismatched succeeded refunds and refund totals over capture; payout/Stripe transfer amount, currency and destination mismatches; missing or orphaned transfer evidence; released escrow missing transfer identity; and payout destination over-allocation against explicit caps.
+
+The evaluator does not access Firestore/Stripe, mutate supplied snapshots, infer an allocation cap, or initiate a financial action. It is not yet wired to a runner. Commits: `638dc4a`, `051c3e4`, `0a80f0e`, `1466f8e`.
+
+**Status: implementation started, validation pending.** Run the focused Vitest file and full exact-head CI; review multi-capture/duplicate handling and transfer identity assumptions before acceptance. FIN-01 route-level stale-worker tests and durable per-consumer domain-event delivery remain open.
