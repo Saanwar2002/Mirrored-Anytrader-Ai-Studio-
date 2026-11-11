@@ -74,6 +74,49 @@ describe("Instant Match expiry refund operation", () => {
     await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "attempts_exhausted");
     expect(create).toHaveBeenCalledTimes(1);
   });
+  it("reclaims an expired processing lease with the same Stripe idempotency key", async () => {
+    const { db, store, matchRef } = memoryDb({
+      status: "expired", stripePaymentIntentId: "pi_123", chargeAmountPence: 299, currency: "gbp"
+    });
+    store.set("instant_match_refunds/match-1", {
+      status: "processing", paymentIntentId: "pi_123", amount: 299, currency: "gbp",
+      idempotencyKey: "instant-match-expiry:match-1", createdAtMs: Date.now() - 60_000,
+      leaseExpiresAtMs: Date.now() - 1, claimToken: "stale-claim", attemptCount: 1
+    });
+    const create = vi.fn().mockResolvedValue({ id: "re_recovered", payment_intent: "pi_123", amount: 299, currency: "gbp", status: "succeeded" });
+    await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "attempts_exhausted");
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][1].idempotencyKey).toBe("instant-match-expiry:match-1");
+    expect(store.get("instant_match_refunds/match-1")).toMatchObject({ status: "succeeded", stripeRefundId: "re_recovered", attemptCount: 2 });
+  });
+
+  it("does not let an expired worker overwrite a successor's refund claim", async () => {
+    const { db, store, matchRef } = memoryDb({ status: "searching", stripePaymentIntentId: "pi_123", chargeAmountPence: 299, currency: "gbp" });
+    const create = vi.fn().mockImplementation(async () => {
+      const current = store.get("instant_match_refunds/match-1");
+      store.set("instant_match_refunds/match-1", { ...current, claimToken: "successor-claim" });
+      return { id: "re_stale", payment_intent: "pi_123", amount: 299, currency: "gbp", status: "succeeded" };
+    });
+    await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "attempts_exhausted");
+    expect(store.get("instant_match_refunds/match-1")).toMatchObject({ status: "processing", claimToken: "successor-claim" });
+    expect(store.get("instant_matches/match-1").refundStatus).toBe("processing");
+  });
+
+  it("does not reclaim an operation after the safe Stripe idempotency retry window", async () => {
+    const { db, store, matchRef } = memoryDb({
+      status: "expired", stripePaymentIntentId: "pi_123", chargeAmountPence: 299, currency: "gbp"
+    });
+    store.set("instant_match_refunds/match-1", {
+      status: "processing", paymentIntentId: "pi_123", amount: 299, currency: "gbp",
+      idempotencyKey: "instant-match-expiry:match-1", createdAtMs: Date.now() - 24 * 60 * 60 * 1000,
+      leaseExpiresAtMs: Date.now() - 1, claimToken: "old-claim"
+    });
+    const create = vi.fn();
+    await expireAndRefundInstantMatch(db, matchRef as any, { refunds: { create } } as any, "attempts_exhausted");
+    expect(create).not.toHaveBeenCalled();
+    expect(store.get("instant_match_refunds/match-1")).toMatchObject({ status: "reconciliation_required", error: "refund_idempotency_window_expired_or_unknown" });
+  });
+
   it("does not replay a completed operation", async () => {
     const { db, store, matchRef } = memoryDb({ status: "expired", stripePaymentIntentId: "pi_123" });
     store.set("instant_match_refunds/match-1", { status: "succeeded", stripeRefundId: "re_existing" });
