@@ -144,9 +144,9 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
 
     const mockStripe = {
       transfers: {
-        create: vi.fn().mockImplementation(async () => {
+        create: vi.fn().mockImplementation(async (params: any) => {
           executionTimeline.push("stripe_transfer_create");
-          return { id: "tr_contract_test_1" };
+          return { id: "tr_contract_test_1", amount: params.amount, currency: params.currency, destination: params.destination, metadata: params.metadata };
         }),
       },
     };
@@ -198,9 +198,9 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
 
     const mockStripe = {
       transfers: {
-        create: vi.fn().mockImplementation(async (_params: any, options: any) => {
+        create: vi.fn().mockImplementation(async (params: any, options: any) => {
           capturedIdempotencyKeys.push(options.idempotencyKey);
-          return { id: "tr_idemp_test" };
+          return { id: "tr_idemp_test", amount: params.amount, currency: params.currency, destination: params.destination, metadata: params.metadata };
         }),
       },
     };
@@ -253,7 +253,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
 
     const mockStripe = {
       transfers: {
-        create: vi.fn().mockResolvedValue({ id: "tr_prod_success_999" }),
+        create: vi.fn().mockImplementation(async (params: any) => ({ id: "tr_prod_success_999", amount: params.amount, currency: params.currency, destination: params.destination, metadata: params.metadata })),
       },
     };
 
@@ -335,7 +335,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
     // 3. Retry when Stripe is back online
     const recoveredStripe = {
       transfers: {
-        create: vi.fn().mockResolvedValue({ id: "tr_recovered_post_retry_101" }),
+        create: vi.fn().mockImplementation(async (params: any) => ({ id: "tr_recovered_post_retry_101", amount: params.amount, currency: params.currency, destination: params.destination, metadata: params.metadata })),
       },
     };
 
@@ -386,7 +386,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
           if (callCount === 1) {
             throw new Error("HTTP 504 Gateway Timeout from Stripe");
           }
-          return { id: "tr_deduped_999" };
+          return { id: "tr_deduped_999", amount: _params.amount, currency: _params.currency, destination: _params.destination, metadata: _params.metadata };
         }),
       },
     };
