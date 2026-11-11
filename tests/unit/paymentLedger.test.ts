@@ -192,7 +192,7 @@ describe("Payment Ledger & Invariants", () => {
 
   it("blocks automatic replay of an expired in-progress financial claim", async () => {
     const store = new Map<string, any>([["expired-key", {
-      operationName: "TRANSFER", bindingHash: "binding-hash", status: "in_progress",
+      operationName: "TRANSFER", bindingHash: "2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8", status: "in_progress",
       startedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(), claimToken: "old-worker",
     }]]);
     const db = {
