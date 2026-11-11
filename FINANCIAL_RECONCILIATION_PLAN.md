@@ -256,3 +256,12 @@ Commits: `d8784e5ad57ad170a69dde7b9d50c4e96298d6c3` and `bce37dd205ff58046057286
 **Verification pending:** no local execution is claimed; run the focused `tests/unit/paymentLedger.test.ts` suite and full CI against the exact integration head before marking FIN-04 complete.
 
 The domain-event dispatcher observation recorded in the unified plan is a separate supplementary reliability finding; it is not the formal FIN-04 scope and does not change this acceptance criteria.
+
+
+## Exact-head CI validation — 11 November 2026
+
+The current integration head at the time of verification was `c6cddd4cef5b5aa93f4e92ca59a21f18e5f0e6bb`. GitHub Actions run **#958** (`43101671335`) for that exact SHA completed successfully. Its `security-and-build-gate` job passed Firebase Security Rules/Firestore emulator concurrency tests, unit and penetration tests, TypeScript/lint, production build and final release audit.
+
+Accordingly, the FIN-04 hardening and driver payout stale-worker regression committed before this SHA have passed the full CI gate. FIN-02 changes are also included in the successful exact-head run. This is repository CI evidence only; no live Stripe/Firebase production reconciliation was performed.
+
+FIN-05 remains open: implement a pure read-only cross-operation discrepancy evaluator with fixtures for missing, duplicate, orphaned, mismatched and over-allocated records. FIN-01 route-level stale-worker integration tests remain open. Supplementary durable per-consumer domain-event delivery/retry is a separate reliability workstream, not formal FIN-04.
