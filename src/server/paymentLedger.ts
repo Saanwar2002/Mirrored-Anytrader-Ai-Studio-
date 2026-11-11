@@ -45,6 +45,11 @@ export class PaymentLedgerEngine {
     if (!idempotencyKey || typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) {
       throw new BadRequestError("A valid, non-empty idempotencyKey is required for financial operations.");
     }
+    // Idempotency keys may originate in request headers or bodies. Keep them
+    // as single Firestore document IDs; never let a slash create a nested path.
+    if (idempotencyKey.includes("/") || idempotencyKey.length > 200) {
+      throw new BadRequestError("Idempotency key must be at most 200 characters and cannot contain '/'.");
+    }
     if (!semanticBinding || typeof semanticBinding !== "object" || Array.isArray(semanticBinding)) {
       throw new BadRequestError("A semantic binding is required for financial idempotency.");
     }
@@ -90,6 +95,15 @@ export class PaymentLedgerEngine {
         }
         if (data.status === "completed") {
           return { shouldExecute: false, result: data.response as T, wasReplayed: true };
+        }
+        // Reconciliation-required is a durable stop state. Never let a later
+        // retry silently replace it with a fresh claim and repeat a possible
+        // external financial effect.
+        if (data.status === "reconciliation_required") {
+          throw new ConflictError("Financial operation requires reconciliation; automatic replay remains blocked.");
+        }
+        if (data.status !== "in_progress") {
+          throw new ConflictError("Existing financial operation has an unknown state and requires reconciliation.");
         }
         if (data.status === "in_progress") {
           const startedAt = data.startedAt ? new Date(data.startedAt).getTime() : Date.now();
