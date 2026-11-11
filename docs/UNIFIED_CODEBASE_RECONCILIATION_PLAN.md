@@ -4353,3 +4353,28 @@ Do not treat event-document existence as proof that consumers completed. The nex
 3. Implement FIN-05 read-only financial discrepancy evaluation and fixtures.
 4. Re-run the full CI gate on the final consolidated candidate SHA and record all job outcomes.
 5. Do not merge PR #5, modify `main`, deploy, or touch production Firebase/Stripe state.
+
+
+## Section 173 — FIN-04 idempotency stop-state and key-path hardening (11 November 2026)
+
+### Classification correction
+
+The formal FIN-04 in `FINANCIAL_RECONCILIATION_PLAN.md` is **generic idempotency resource/payload binding**, not domain-event consumer delivery. Section 171's domain-event delivery/retry observation is retained as a supplementary reliability finding, but it does not replace or redefine FIN-04. FIN-04's binding/hash/claim implementation was already present on the integration branch; this checkpoint closes two additional gaps discovered in the final audit.
+
+### Additional defects corrected
+
+- `executeIdempotentOperation` previously changed an expired `in_progress` record to `reconciliation_required` and correctly rejected that same invocation, but a later invocation did not explicitly reject the persisted `reconciliation_required` state. It could fall through and replace the stop state with a fresh `in_progress` claim, potentially repeating an ambiguous external financial effect.
+- The operation document used the caller-provided idempotency key directly as a Firestore document ID. Request-originated keys containing `/` could be interpreted as nested document paths; excessively long keys also lacked a bounded input contract.
+
+### Changes committed
+
+- `src/server/paymentLedger.ts`: persisted `reconciliation_required` records now remain a hard conflict on every subsequent retry. Unknown existing operation states fail closed and require reconciliation. Idempotency keys are rejected before Firestore access if they contain `/` or exceed 200 characters.
+- `tests/unit/paymentLedger.test.ts`: the expired-claim test now retries after the first reconciliation-required transition and proves the executor remains uncalled and the original claim token/status remain intact. Added canonical key-order replay coverage, owner/resource mismatch conflicts, and slash/oversized-key rejection.
+- Code commit: `d8784e5ad57ad170a69dde7b9d50c4e96298d6c3`.
+- Regression commit: `bce37dd205ff58046057286c9fad6b3504afda62`.
+
+### Verification
+
+- These commits are on `integration/pr-consolidation-20261109` only.
+- CI and focused test execution are pending. Do not mark FIN-04 verified until the exact-head Actions run completes successfully and the unit-test step confirms these cases.
+- The Section 171 domain-event observation remains open as a supplementary item: deterministic event-document persistence currently does not establish durable per-consumer delivery/retry. It should be addressed as a separate event-outbox/recovery workstream, not by changing the FIN-04 identifier.
