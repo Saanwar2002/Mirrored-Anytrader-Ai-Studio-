@@ -2161,8 +2161,7 @@ async function startServer() {
       // Reconcile each individual Stripe refund against the original completed ledger entry.
       if (event.type === "charge.refunded" || event.type === "refund.updated") {
         // charge.refunded can arrive while an individual refund is still pending.
-        // Stripe emits refund.updated when that refund later changes state, so
-        // re-fetch its charge and reconcile the updated refund independently.
+        // refund.updated refreshes the Charge; both event types then reconcile the complete Stripe refund list.
         const refundUpdate = event.type === "refund.updated" ? event.data.object as Stripe.Refund : null;
         const charge = refundUpdate
           ? await stripeClient.charges.retrieve(typeof refundUpdate.charge === "string" ? refundUpdate.charge : refundUpdate.charge.id)
@@ -2204,12 +2203,12 @@ async function startServer() {
             const refundChargeId = typeof refund.charge === "string" ? refund.charge : refund.charge?.id || null;
             const refundPi = typeof refund.payment_intent === "string" ? refund.payment_intent : refund.payment_intent?.id || null;
             const reviewRef = db.collection("refund_review").doc(refund.id);
-            if (refundChargeId !== charge.id || refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase() || eligible.length !== 1) {
+            if (refundChargeId !== charge.id || refundPi !== paymentIntentId || String(refund.currency || "").toLowerCase() !== String(charge.currency || "").toLowerCase() || eligible.length !== 1) {
               requiresReview = true;
               await reviewRef.set({ refundId: refund.id, chargeId: charge.id, paymentIntentId,
                 amountPence: refund.amount, currency: refund.currency,
                 candidateLedgerEntryIds: eligible.map((doc: any) => doc.id),
-                reason: refundChargeId !== charge.id || refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase()
+                reason: refundChargeId !== charge.id || refundPi !== paymentIntentId || String(refund.currency || "").toLowerCase() !== String(charge.currency || "").toLowerCase()
                   ? "refund_charge_payment_intent_or_currency_mismatch" : eligible.length === 0
                     ? "no_matching_completed_original_payment_ledger_entry" : "multiple_matching_original_payment_ledger_entries",
                 status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
