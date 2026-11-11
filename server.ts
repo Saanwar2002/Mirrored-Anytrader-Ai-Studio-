@@ -3628,6 +3628,22 @@ async function startServer() {
         throw new BadRequestError("Idempotency-Key header is required for payout operations.");
       }
 
+      // Resolve the payout destination before checking/replaying the idempotency key.
+      // A driver reconnecting Stripe must not replay a payout bound to the previous account.
+      const driverDoc = await db.collection("users").doc(driverId).get();
+      if (!driverDoc.exists) throw new BadRequestError("Driver not found");
+
+      const stripeAccountId = driverDoc.data()?.stripeAccountId;
+      if (typeof stripeAccountId !== "string" || stripeAccountId.trim() === "") {
+        throw new BadRequestError("No Stripe account connected");
+      }
+
+      const hasFixedAmount = amount !== undefined && amount !== null && amount !== "";
+      const requestedAmountPence = hasFixedAmount ? Math.round(Number(amount) * 100) : null;
+      if (hasFixedAmount && (!Number.isSafeInteger(requestedAmountPence) || requestedAmountPence! <= 0)) {
+        throw new BadRequestError("Invalid payout amount. Must be a positive amount in pounds.");
+      }
+
       const { result, wasReplayed } = await PaymentLedgerEngine.executeIdempotentOperation(
         db,
         idempotencyKey,
@@ -3635,17 +3651,12 @@ async function startServer() {
         {
           version: 1,
           driverId,
+          stripeAccountId,
           currency: "gbp",
-          amountMode: amount !== undefined && amount !== null && amount !== "" ? "fixed" : "full_available_balance",
-          amountPence: amount !== undefined && amount !== null && amount !== "" ? Math.round(Number(amount) * 100) : null,
+          amountMode: hasFixedAmount ? "fixed" : "full_available_balance",
+          amountPence: requestedAmountPence,
         },
         async () => {
-          const driverDoc = await db.collection("users").doc(driverId).get();
-          if (!driverDoc.exists) throw new BadRequestError("Driver not found");
-
-          const stripeAccountId = driverDoc.data()?.stripeAccountId;
-          if (!stripeAccountId) throw new BadRequestError("No Stripe account connected");
-
           const stripe = getStripe();
 
           // Get available balance first
@@ -3660,11 +3671,11 @@ async function startServer() {
           }
 
           // Create a payout
-          const payoutAmount = amount !== undefined && amount !== null && amount !== "" 
-            ? Math.round(Number(amount) * 100) 
+          const payoutAmount = hasFixedAmount
+            ? requestedAmountPence!
             : available; // Default to full available balance
 
-          if (isNaN(payoutAmount) || payoutAmount <= 0) {
+          if (!Number.isSafeInteger(payoutAmount) || payoutAmount <= 0) {
             throw new BadRequestError("Invalid payout amount. Must be a positive number.");
           }
 
