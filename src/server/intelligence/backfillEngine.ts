@@ -355,10 +355,10 @@ export class ControlledBackfillEngine {
         query = query.orderBy('__name__');
       }
       if (effectiveCursor && typeof query.startAfter === 'function') {
-        // With orderBy('__name__'), use the document ID as the cursor value.
-        // Fetching a snapshot here is unnecessary and can produce inconsistent
-        // resume behavior across Firestore emulator/client implementations.
-        query = query.startAfter(effectiveCursor);
+        // A document reference is the canonical cursor value for __name__.
+        // Passing a bare string can be treated differently by emulator SDKs
+        // and silently return an empty page on resume.
+        query = query.startAfter(firestoreDb.collection(targetCollection).doc(effectiveCursor));
       }
 
       // Bound the resumed page after applying its cursor checkpoint.
