@@ -412,7 +412,7 @@ export async function resolveAuthoritativeLineItem(
   // =========================================================================
   if (
     (!hasExplicitMembershipSelection || body.priceId === "price_gotham_saas" || (typeof body.tierName === "string" && body.tierName.toLowerCase().includes("gotham"))) &&
-    (metadata.type === "gotham_saas" || metadata.subscriptionType === "gotham_saas" || (typeof body.tierName === "string" && body.tierName.toLowerCase().includes("gotham"))
+    (metadata.type === "gotham_saas" || metadata.subscriptionType === "gotham_saas" || (typeof body.tierName === "string" && body.tierName.toLowerCase().includes("gotham")))
   ) {
     const doors = Number(metadata.gothamDoorsCount || body.doorsCount || 100);
     const cycle = (metadata.gothamBillingCycle || "monthly") as "monthly" | "annual";
