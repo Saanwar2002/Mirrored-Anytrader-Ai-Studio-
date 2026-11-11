@@ -82,6 +82,8 @@ export interface FinancialReconciliationSnapshot {
   payouts?: readonly ReconciliationPayoutSnapshot[];
   escrows?: readonly ReconciliationEscrowSnapshot[];
   refundedTotals?: readonly { paymentIntentId: string; amount: number }[];
+  /** Explicit business-authorized caps; evaluator never infers a cap. */
+  payoutAllocationCaps?: readonly { destination: string; amount: number }[];
 }
 export interface ReconciliationFinding {
   code: ReconciliationFindingCode;
@@ -210,8 +212,7 @@ export function evaluateFinancialReconciliation(
   }
   // An allocation cap is meaningful only when a caller supplies a finite, positive
   // authorised amount in the snapshot. Avoid guessing a cap from ledger arithmetic.
-  const payoutCaps=(snapshot as any).payoutAllocationCaps as readonly {destination:string;amount:number}[]|undefined;
-  for(const cap of payoutCaps||[]) {
+  for(const cap of snapshot.payoutAllocationCaps||[]) {
     const allocated=allocationByKey.get(cap.destination)||0;
     if(safeAmount(cap.amount)&&allocated>cap.amount) add("PAYOUT_ALLOCATION_EXCEEDED","critical",cap.destination,"Payout operations exceed the explicitly supplied authorised allocation cap.",[cap.destination]);
   }
