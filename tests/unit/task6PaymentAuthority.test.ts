@@ -327,6 +327,36 @@ async function processWebhook(params: {
 }
 
 describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () => {
+  describe("13. DURABLE QR HANDSHAKE ATTEMPT THROTTLE", () => {
+    it("persists five failed PIN attempts and locks further guesses", async () => {
+      const db = createMockFirestore({ "jobs/job-qr": { acceptedTradespersonId: "trader-1", handshakeCode: "482915" } });
+      for (let i = 0; i < 4; i++) {
+        await expect(PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(db, {
+          jobId: "job-qr", authUid: "trader-1", handshakeCode: "000000"
+        })).rejects.toThrow(ForbiddenError);
+      }
+      await expect(PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(db, {
+        jobId: "job-qr", authUid: "trader-1", handshakeCode: "000000"
+      })).rejects.toThrow(/temporarily locked/i);
+      expect(db._store["jobs/job-qr/handshake_attempts/trader-1"].attempts).toBe(5);
+      await expect(PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(db, {
+        jobId: "job-qr", authUid: "trader-1", handshakeCode: "482915"
+      })).rejects.toThrow(/temporarily locked/i);
+    });
+
+    it("resets the persistent counter after a valid accepted-trader PIN", async () => {
+      const db = createMockFirestore({
+        "jobs/job-qr": { acceptedTraderId: "trader-1", verificationPin: "482915" },
+        "jobs/job-qr/handshake_attempts/trader-1": { attempts: 3, windowStartedAtMs: Date.now(), lockedUntilMs: 0 }
+      });
+      await expect(PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(db, {
+        jobId: "job-qr", authUid: "trader-1", handshakeCode: "482915"
+      })).resolves.toBeUndefined();
+      expect(db._store["jobs/job-qr/handshake_attempts/trader-1"]).toMatchObject({ attempts: 0, lockedUntilMs: 0 });
+    });
+  });
+
+
   let db: any;
   const jobId = "job_london_tiling_123";
   const quoteId = "quote_dave_456";

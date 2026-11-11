@@ -220,6 +220,52 @@ export class PaymentLedgerEngine {
    * Single canonical authority for milestone fund release.
    * Transactionally protects Job, Quote, and Milestone state.
    */
+  /**
+   * Durable per-job/per-user QR PIN throttle. Failed attempts commit in their
+   * own transaction before rejection, so the counter survives thrown errors.
+   */
+  public static async validateAndRecordQrHandshakeAttempt(
+    db: any,
+    params: { jobId: string; authUid: string; handshakeCode?: string }
+  ): Promise<void> {
+    const { jobId, authUid, handshakeCode } = params;
+    if (!db || !jobId || !authUid) throw new BadRequestError("Job and authenticated user are required");
+    const jobRef = db.collection("jobs").doc(jobId);
+    const attemptRef = jobRef.collection("handshake_attempts").doc(authUid);
+    const now = Date.now();
+    const outcome = await db.runTransaction(async (tx: any) => {
+      const [jobSnap, attemptSnap] = await Promise.all([tx.get(jobRef), tx.get(attemptRef)]);
+      if (!jobSnap.exists) return "invalid";
+      const job = jobSnap.data() || {};
+      const attempt = attemptSnap.exists ? attemptSnap.data() || {} : {};
+      if (Number(attempt.lockedUntilMs || 0) > now) return "locked";
+      const acceptedTrader = [job.acceptedTradespersonId, job.acceptedTraderId, job.tradespersonId]
+        .some((id) => typeof id === "string" && id === authUid);
+      const expected = String(job.handshakeCode || job.verificationPin || "").trim();
+      const supplied = String(handshakeCode || "").trim();
+      if (acceptedTrader && expected !== "" && supplied !== "" && expected === supplied) {
+        tx.set(attemptRef, { attempts: 0, windowStartedAtMs: now, lockedUntilMs: 0, lastSuccessAtMs: now });
+        return "valid";
+      }
+      const windowStarted = Number(attempt.windowStartedAtMs || 0);
+      const activeWindow = windowStarted > 0 && now - windowStarted < 15 * 60 * 1000;
+      const attempts = (activeWindow ? Number(attempt.attempts || 0) : 0) + 1;
+      const locked = attempts >= 5;
+      tx.set(attemptRef, {
+        attempts,
+        windowStartedAtMs: activeWindow ? windowStarted : now,
+        lockedUntilMs: locked ? now + 15 * 60 * 1000 : 0,
+        lastFailedAtMs: now,
+      });
+      return locked ? "locked" : "invalid";
+    });
+    if (outcome !== "valid") {
+      throw new ForbiddenError(outcome === "locked"
+        ? "QR verification is temporarily locked. Please wait 15 minutes or contact support."
+        : "Invalid QR handshake code.");
+    }
+  }
+
   public static async releaseEscrowFunds(
     db: any,
     params: {

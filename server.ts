@@ -4945,6 +4945,14 @@ async function startServer() {
         throw new InternalServerError("Stripe integration unavailable for escrow transfer");
       }
 
+      // Persist QR PIN failures per job/user across server instances and restarts.
+      if (isQrHandshake) {
+        await PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(firestoreDb, {
+          jobId, authUid,
+          handshakeCode: typeof handshakeCode === "string" ? handshakeCode : undefined,
+        });
+      }
+
       // Delegate to canonical authority
       const result = await PaymentLedgerEngine.releaseEscrowFunds(firestoreDb, {
         jobId,
