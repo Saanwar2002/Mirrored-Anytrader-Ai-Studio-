@@ -4090,3 +4090,49 @@ A more exact pass over the helper, orchestration catch path and existing regress
 ### Scope and verification
 
 This checkpoint is still a read-only source audit plus a documentation update. CI #924 is green for the documentation-only snapshot; it does not validate the missing failure-boundary regressions or remediate FIN-04. No local checkout or local test execution was available in this workflow, so no application patch is being made without the required focused test feedback. Continue only on `integration/pr-consolidation-20261109`; do not create branches, merge PR #5, modify `main`, deploy, or alter production Firebase/Stripe state.
+
+
+
+## Section 164 — FIN-04 idempotency-helper call-site impact map (11 November 2026)
+
+### Verified checkpoint
+
+- Audited only `integration/pr-consolidation-20261109`, at branch head `3aae00a53ee7731c9d55f7e210d126837f5dc954`.
+- Branch comparison: 495 commits ahead of `main`, 0 behind; merge base remains `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- Workflow run #925 for this exact documentation snapshot completed successfully: [run #925](https://github.com/Saanwar2002/AnyTrader/actions/runs/43071416777). Security rules/emulator concurrency, unit/penetration tests, TypeScript/lint, production build and final release audit passed.
+- PR #5 remains open, draft and unmerged, with the integration branch as its base.
+- This checkpoint changes documentation only. No application/test code, production configuration, Firebase data, Stripe object, deployment, or workflow was changed.
+
+### Complete helper call-site map
+
+A branch-wide source inspection found three production call sites for `PaymentLedgerEngine.executeIdempotentOperation`, in addition to its definition and unit-test uses:
+
+1. `FUND_MILESTONE_ESCROW` in `src/server/paymentLedger.ts` (around line 166).
+2. `RELEASE_MILESTONE` in `src/server/paymentLedger.ts` (around line 324).
+3. `DRIVER_STRIPE_PAYOUT` in `server.ts` (around line 3647).
+
+The helper's common catch path (around lines 126–138) deletes the current claim after *any* executor error. The five-minute stale-`in_progress` path (around lines 94–105) also replaces the claim and re-executes without knowing whether an external effect was attempted. A helper-contract change therefore cannot safely be designed around the driver payout route alone; each caller needs an explicit recovery policy.
+
+### Caller-specific consequences
+
+1. **Milestone funding:** the executor updates the milestone, writes a deterministic ledger entry, and then dispatches `MILESTONE_FUNDED`. A thrown event dispatch currently causes the helper to remove its claim after Firestore writes may already have committed. The funding caller's replay behavior and domain-event idempotency need to be preserved when changing helper semantics; do not turn this into an indiscriminate permanent lock.
+2. **Milestone release:** the executor commits the quote/milestone transition and ledger row in a Firestore transaction, then dispatches `MILESTONE_RELEASED`. If dispatch throws, the generic helper deletes its claim even though the release transaction committed. On retry, the release transaction recognizes the same `releaseOperationId` as already committed and intentionally skips the event dispatch. This creates a concrete event-recovery gap: the retry can return success without repairing the missing event. The correction should use a durable event/outbox state or an idempotent event-repair path, while retaining the authoritative transaction's same-operation replay behavior.
+3. **Driver Stripe payout:** `server.ts` calls `stripe.payouts.create` with the stable key `stripe_payout_<caller key>`, then dispatches `DRIVER_PAYOUT_INITIATED`. A dispatch error after Stripe success reaches the generic catch, which deletes the claim. A later retry can issue another payout create after Stripe's idempotency retention window. Persist and validate the Stripe payout evidence before event dispatch, and make the event independently repairable; never treat event failure as proof the payout did not happen.
+4. **Automated ride transfer:** this flow does not call the generic helper; it has its own ride claim and post-Stripe Firestore finalization. The Section 163 finding remains separate and must be addressed in the same financial recovery design: confirmed transfer success followed by local finalization failure must leave durable reconciliation evidence, not ordinary `failed`.
+
+### Implementation design constraints for the consolidated batch
+
+- Replace the helper's implicit “delete claim on any exception” policy with an explicit, typed outcome contract that distinguishes: proven pre-effect rejection; ambiguous external request/transport outcome; confirmed external success with local persistence failure; and post-commit notification/event failure.
+- Preserve caller-specific semantics. Funding and release are primarily Firestore-ledger transitions with post-commit domain events; driver payout and automated ride payout cross the Stripe external-effect boundary. A single generic retry rule must not conflate them.
+- For release and funding, make post-commit event delivery recoverable (prefer a durable outbox/dispatch state with deterministic event identity) so an event exception cannot strand or silently omit an event after the ledger transition is committed.
+- For driver payout, persist an operation record before the Stripe call, validate and persist the returned payout ID and request-binding facts immediately after success, then dispatch/repair the domain event independently. Replays must consult that durable record and never create a new payout merely because event dispatch failed.
+- For expired `in_progress` records, do not authorize a new executor solely because five minutes elapsed. Require durable proof that the external request was never attempted, or mark the operation reconciliation-required.
+- Add focused tests for each production call site: funding write + event failure recovery; release transaction committed + event failure recovery; payout success + event failure with no second Stripe create; expired possibly-attempted claim; and preservation of stale-claim fencing. Keep the Section 163 transfer-finalization regressions in the same coherent FIN-04 code/test batch.
+- Before changing the shared helper, inspect and update every production call site and all helper tests in one batch. Run focused tests where a checkout is available, then run one full CI suite against the consolidated commit, wait for completion, fix failures, and rerun the full suite. Record the exact SHA/run/result.
+
+### Verification and next gate
+
+- The current helper test file covers successful replay, operation/binding conflicts and stale-executor fencing, but the inspected tests do not cover expired in-progress recovery or the caller-specific post-commit event-failure cases above.
+- No local checkout/test runner is available in this workflow; no local tests are claimed.
+- FIN-04 remains open. The green #925 run validates the documentation-only commit, not these unimplemented recovery requirements.
+- Continue on `integration/pr-consolidation-20261109` only. Do not create another branch, merge PR #5, modify `main`, deploy, change production Firebase/Stripe state, or weaken security rules.
