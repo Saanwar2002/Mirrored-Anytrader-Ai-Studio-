@@ -373,15 +373,12 @@ export class PaymentLedgerEngine {
         };
 
         if (isQrHandshake) {
-          const guaranteeExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); 
+          // QR handshake is an authorization method for this milestone only. It is not
+          // proof that every milestone (or the whole job) has been paid. Keep the
+          // guarantee metadata on the quote, but leave job/quote aggregate payment
+          // projections to the canonical settlement reconciler.
+          const guaranteeExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
           quoteUpdatePayload.guaranteeExpiresAt = guaranteeExpiry.toISOString();
-          quoteUpdatePayload.paymentStatus = "handshake_complete";
-          
-          transaction.update(jobRef, {
-            paymentStatus: "handshake_complete",
-            isPaid: true,
-            updatedAt: new Date().toISOString()
-          });
         }
 
         transaction.update(quoteRef, quoteUpdatePayload);
