@@ -1,10 +1,10 @@
 export interface ChargeRefundPage {
-  data: Array<Record<string, any>>;
+  data: any[];
   has_more: boolean;
 }
 
 export interface ChargeRefundPaginationResult {
-  refunds: Array<Record<string, any>>;
+  refunds: any[];
   pagesScanned: number;
 }
 
@@ -27,7 +27,7 @@ export async function listAllChargeRefunds(
     throw new Error("A valid Stripe Charge ID is required for refund pagination.");
   }
 
-  const refundsById = new Map<string, Record<string, any>>();
+  const refundsById = new Map<string, any>();
   const seenCursors = new Set<string>();
   let startingAfter: string | undefined;
   let pagesScanned = 0;
