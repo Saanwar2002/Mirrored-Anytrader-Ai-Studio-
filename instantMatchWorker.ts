@@ -130,7 +130,9 @@ export async function expireAndRefundInstantMatch(db: admin.firestore.Firestore,
         stripeRefundId: typeof refund.id === "string" ? refund.id : null,
         stripeRefundStatus: refund.status || null,
         claimToken: admin.firestore.FieldValue.delete(),
-        leaseExpiresAtMs: 0,
+        // A non-terminal Stripe refund response remains processing; cool down before
+        // retrying the same idempotency key rather than polling Stripe on every trigger.
+        leaseExpiresAtMs: status === "processing" ? Date.now() + leaseMs : 0,
         ...(!responseMatchesOperation ? { error: "stripe_refund_response_mismatch" } : {}),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
