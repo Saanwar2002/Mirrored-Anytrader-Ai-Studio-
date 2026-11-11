@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer } from "../../src/server/pricingCatalog";
 
 describe("Stripe Connect & Financial Flow Invariants", () => {
-  const checkoutDb = (ownerId: string, status = "active") => ({
+  const checkoutDb = (ownerId: string, status = "open") => ({
     collection: (col: string) => ({
       doc: (id: string) => ({
         get: async () => col === "jobs" ? ({
@@ -26,7 +26,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
     ];
 
     for (const item of catalogEntries) {
-      const lineItem = await resolveAuthoritativeLineItem(item.body, "user_test_123", checkoutDb("user_test_123", item.body.metadata?.type === "mediation_stake" ? "disputed" : "active"));
+      const lineItem = await resolveAuthoritativeLineItem(item.body, "user_test_123", checkoutDb("user_test_123", item.body.metadata?.type === "mediation_stake" ? "disputed" : "open"));
       expect(lineItem.authoritativeAmountPence).toBe(item.expectedAmount);
       expect(lineItem.lineItem.price_data.currency).toBe("gbp");
       // Platform owns these products: NEVER client money
@@ -180,7 +180,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
             if (col === "jobs" && docId === "job_override_1") {
               return {
                 exists: true,
-                data: () => ({ homeownerId: "homeowner_user", acceptedTradespersonId: "trader_pro_override", jobNo: "9001", status: "active" })
+                data: () => ({ homeownerId: "homeowner_user", acceptedTradespersonId: "trader_pro_override", jobNo: "9001", status: "open" })
               };
             }
             if (col === "users" && docId === "trader_pro_override") {
