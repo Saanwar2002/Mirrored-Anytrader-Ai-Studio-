@@ -1109,25 +1109,20 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
         startedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
       });
 
-      // 3. Retry after recovery with the same idempotency key
-      const res2 = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+      // 3. Retry must fail closed until the ambiguous external effect is reconciled.
+      await expect(PaymentLedgerEngine.releaseEscrowFunds(db, {
         jobId,
         quoteId,
         milestoneId,
         authUid,
         idempotencyKey: crashOpKey,
-      });
+      })).rejects.toThrow("requires reconciliation");
 
-      expect(res2.success).toBe(true);
-      expect(res2.releasedAmount).toBe(500);
-
-      // VERIFY: Still exactly 1 ledger record, no duplicate financial effect created!
+      // VERIFY: Still exactly 1 ledger record; retry created no duplicate effect.
       const ledgerSnap2 = await db.collection("payment_ledger").get();
       expect(ledgerSnap2.docs.length).toBe(1);
-
-      // Verify idempotency record is marked completed
       const idempSnap = await idempRef.get();
-      expect(idempSnap.data()?.status).toBe("completed");
+      expect(idempSnap.data()?.status).toBe("reconciliation_required");
     });
   });
 });
