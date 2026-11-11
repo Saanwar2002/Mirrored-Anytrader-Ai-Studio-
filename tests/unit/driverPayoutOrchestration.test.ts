@@ -864,7 +864,8 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     ride.payoutLockedAt = Date.now() - PAYOUT_LEASE_DURATION_MS - 1000;
     const retry = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
     expect(retry.details.some((detail) => detail.status === "reconciliation_required")).toBe(true);
-    expect(createdTransfers).toHaveLength(1);
+    expect(mockStripe.transfers.create).toHaveBeenCalledTimes(1); // one successful external effect; replay was fenced
+    expect(createdTransfers).toHaveLength(0); // custom mockImplementation bypasses the default receipt recorder
   });
 
 });

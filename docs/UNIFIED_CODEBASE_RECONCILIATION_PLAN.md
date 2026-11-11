@@ -4247,3 +4247,10 @@ CI run 43089809704 passed the Firebase Security Rules and real Firestore emulato
 - The lost-lease test attempted a second orchestration while its simulated successor still held a processing ride, which is excluded by the completed-ride query. It now models the successor lease expiring and the ride re-entering the eligible queue; that invocation must hit the durable operation barrier and remain blocked before any second Stripe transfer.
 
 This checkpoint is a test-only correction. No payout safety invariant is relaxed: an existing prepared/Stripe-success operation still prevents blind replay. Re-run the full CI gate and retain the Firestore emulator result.
+
+
+## Section 169 — CI #938 mock receipt instrumentation mismatch (11 November 2026)
+
+CI #938: Firebase Security Rules/Firestore emulator concurrency gate passed; unit suite had 1,253 passing and one failure. The remaining assertion in test 20 expected the shared `createdTransfers` array to contain the custom Stripe transfer. Its one-shot `mockImplementationOnce` intentionally replaces the default Stripe mock implementation, which is the only code that appends to that array. Therefore the actual mocked transfer returned successfully but bypassed the receipt recorder; the test's array count was not an external-call count.
+
+Corrected the regression assertion to count calls on `mockStripe.transfers.create` (exactly one) and separately verify the default recorder remains empty. This keeps the intended invariant—one external attempt, zero replay—without altering production behavior or conflating mock return receipts with API invocation tracking.
