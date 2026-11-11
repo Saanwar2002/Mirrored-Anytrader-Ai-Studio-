@@ -385,6 +385,10 @@ describe("Stripe Connect Fail-Closed Security & Mock Payment Gating", () => {
                 exists: !!mockStore[`${col}/${id}`],
                 data: () => mockStore[`${col}/${id}`],
               }),
+              set: async (data: any, options?: any) => {
+                const path = `${col}/${id}`;
+                mockStore[path] = options?.merge ? { ...(mockStore[path] || {}), ...data } : { ...data };
+              },
             }),
           }),
         };

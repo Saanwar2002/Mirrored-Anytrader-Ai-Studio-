@@ -627,19 +627,20 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(mockStore["ride_requests/ride_retry_key"].payoutStatus).toBe("failed");
     expect(mockStore["ride_requests/ride_retry_key"].payoutRetryCount).toBe(1);
 
-    // Second attempt succeeds
+    // A failed/ambiguous external request is now fenced for reconciliation; do not replay automatically
     const result2 = await executeDriverPayoutOrchestrationCommand({
       db: mockDb,
       stripeClient: mockStripe,
     });
 
-    expect(result2.processedCount).toBe(1);
-    expect(createdTransfers.length).toBe(1);
+    expect(result2.processedCount).toBe(0);
+    expect(result2.details.some((d) => d.status === "reconciliation_required")).toBe(true);
+    expect(createdTransfers.length).toBe(0);
     expect(createdTransfers[0].requestOptions.idempotencyKey).toBe(
       "payout:ride:ride_retry_key:driver_legit:4400"
     );
-    expect(mockStore["ride_requests/ride_retry_key"].payoutTransferred).toBe(true);
-    expect(mockStore["ride_requests/ride_retry_key"].payoutStatus).toBe("transferred");
+    expect(mockStore["ride_requests/ride_retry_key"].payoutTransferred).toBe(false);
+    expect(mockStore["ride_requests/ride_retry_key"].payoutStatus).toBe("reconciliation_required");
   });
 
   // =========================================================================

@@ -647,7 +647,8 @@ export async function executeDriverPayoutOrchestrationCommand(
         // a successful Stripe effect; the operation record is an immutable replay barrier.
         try {
           await operationRef.set({
-            status: "reconciliation_required", lastError: String(transferErr.message || transferErr),
+            status: stripeTransferId && !stripeTransferId.startsWith("mock_transfer_") ? "stripe_succeeded" : "reconciliation_required",
+            reconciliationRequired: true, lastError: String(transferErr.message || transferErr),
             reconciliationRequiredAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
         } catch (e: any) {
