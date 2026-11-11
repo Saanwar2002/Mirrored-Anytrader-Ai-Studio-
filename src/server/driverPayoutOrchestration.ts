@@ -515,6 +515,33 @@ export async function executeDriverPayoutOrchestrationCommand(
         continue;
       }
 
+      // 9. Durable payout operation evidence. A prepared record is a replay barrier:
+      // after a crash/ambiguous Stripe response, never issue a fresh transfer blindly.
+      const operationId = require("crypto").createHash("sha256")
+        .update(`driver-payout:${rideId}:${assignedDriverId}:${transferAmountPence}`).digest("hex");
+      const operationRef = db.collection("driver_payout_operations").doc(operationId);
+      const priorOperation = await operationRef.get();
+      if (priorOperation.exists) {
+        const prior = priorOperation.data() || {};
+        logger.error(`[Payout Orchestrator] Durable operation ${operationId} already exists (${prior.status}); manual reconciliation required before replay.`);
+        await rideDoc.ref.update({
+          payoutStatus: "reconciliation_required",
+          payoutLastError: "Durable payout operation exists; reconcile Stripe evidence before retry",
+        });
+        failedCount++;
+        details.push({ rideId, driverId: assignedDriverId, stripeAccountId, amount: driverEarningsGbp,
+          status: "reconciliation_required", ...(prior.stripeTransferId ? { transferId: prior.stripeTransferId } : {}),
+          reason: "Existing durable payout operation blocks automatic replay" });
+        continue;
+      }
+      await operationRef.set({
+        operationId, rideId, driverId: assignedDriverId, stripeAccountId,
+        amountPence: transferAmountPence, currency: "gbp",
+        idempotencyKey: `payout:ride:${rideId}:${assignedDriverId}:${transferAmountPence}`,
+        status: "prepared", preparedAt: admin.firestore.FieldValue.serverTimestamp(),
+        claimToken,
+      });
+
       // 9. Deterministic Stripe Transfer Execution with Idempotency Key
       const idempotencyKey = `payout:ride:${rideId}:${assignedDriverId}:${transferAmountPence}`;
       let stripeTransferId = `mock_transfer_${rideId}`;
@@ -559,6 +586,15 @@ export async function executeDriverPayoutOrchestrationCommand(
             }
           );
           stripeTransferId = transfer.id;
+          // Persist the external-effect receipt before attempting ride finalization.
+          await operationRef.set({
+            status: "stripe_succeeded", stripeTransferId: transfer.id,
+            stripeAmountPence: transfer.amount, stripeCurrency: "gbp",
+            stripeDestination: transfer.destination,
+            stripeConfirmedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        } else {
+          await operationRef.set({ status: "mock_succeeded", stripeTransferId, stripeConfirmedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         }
 
         // 10. Post-Commit State Transition with Token Ownership Verification (Finding 35G-2)
@@ -606,6 +642,16 @@ export async function executeDriverPayoutOrchestrationCommand(
         });
       } catch (transferErr: any) {
         logger.error(`[Payout Orchestrator] Stripe Transfer/finalization failed for ride ${rideId}:`, transferErr.message);
+        // Preserve uncertainty across worker/lease recovery. Even an error may follow
+        // a successful Stripe effect; the operation record is an immutable replay barrier.
+        try {
+          await operationRef.set({
+            status: "reconciliation_required", lastError: String(transferErr.message || transferErr),
+            reconciliationRequiredAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        } catch (e: any) {
+          logger.error("[Payout Orchestrator] Could not persist payout reconciliation marker:", e.message);
+        }
         // Failure state is also lease-owned. A stale worker must not overwrite a
         // successor's state; a lost lease after Stripe success remains reconciliation-required.
         let failureStateWritten = false;

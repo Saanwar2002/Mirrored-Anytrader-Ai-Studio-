@@ -95,6 +95,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
             get: async () => ({
               exists: !!mockStore[path],
               data: () => (mockStore[path] ? { ...mockStore[path] } : undefined),
+              data: () => (mockStore[path] ? { ...mockStore[path] } : undefined),
             }),
             update: async (fields: any) => {
               if (!mockStore[path]) mockStore[path] = {};
