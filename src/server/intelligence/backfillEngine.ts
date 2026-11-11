@@ -355,10 +355,17 @@ export class ControlledBackfillEngine {
         query = query.orderBy('__name__');
       }
       if (effectiveCursor && typeof query.startAfter === 'function') {
-        // A document reference is the canonical cursor value for __name__.
-        // Passing a bare string can be treated differently by emulator SDKs
-        // and silently return an empty page on resume.
-        query = query.startAfter(firestoreDb.collection(targetCollection).doc(effectiveCursor));
+        // Resume from the actual persisted document snapshot. With a tenant
+        // equality filter plus __name__ ordering, a DocumentReference cursor
+        // can be interpreted as a field value by emulator/SDK combinations
+        // and yield an empty page; the snapshot is unambiguous.
+        const cursorSnapshot = await firestoreDb.collection(targetCollection).doc(effectiveCursor).get();
+        if (cursorSnapshot.exists) {
+          query = query.startAfter(cursorSnapshot);
+        } else {
+          // Cursor doc may have been deleted; fall back to its document name.
+          query = query.startAfter(firestoreDb.collection(targetCollection).doc(effectiveCursor));
+        }
       }
 
       // Bound the resumed page after applying its cursor checkpoint.
