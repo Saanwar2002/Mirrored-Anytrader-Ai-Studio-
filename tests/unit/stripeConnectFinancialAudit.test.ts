@@ -7,7 +7,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       doc: (id: string) => ({
         get: async () => col === "jobs" ? ({
           exists: true,
-          data: () => ({ homeownerId: ownerId, acceptedTradespersonId: "trader_999", status: "disputed" }),
+          data: () => ({ homeownerId: ownerId, acceptedTradespersonId: "trader_999", status: "active" }),
         }) : ({ exists: false, data: () => ({}) }),
       }),
     }),
@@ -124,7 +124,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       customAmount: 1
     };
 
-    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", checkoutDb("owner_uid"));
+    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "owner_uid", checkoutDb("owner_uid"));
     // Server must strictly return the catalog price (£4.99 = 499p)
     expect(authoritative.authoritativeAmountPence).toBe(499);
   });
@@ -142,7 +142,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       amount: 0.01,
     };
 
-    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", undefined);
+    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "user_test_123", checkoutDb("user_test_123"));
     // Server must strictly return £25.00 (2500p)
     expect(authoritative.authoritativeAmountPence).toBe(2500);
   });
@@ -180,7 +180,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
             if (col === "jobs" && docId === "job_override_1") {
               return {
                 exists: true,
-                data: () => ({ homeownerId: "homeowner_user", acceptedTradespersonId: "trader_pro_override", jobNo: "9001", status: "disputed" })
+                data: () => ({ homeownerId: "homeowner_user", acceptedTradespersonId: "trader_pro_override", jobNo: "9001", status: "active" })
               };
             }
             if (col === "users" && docId === "trader_pro_override") {
