@@ -3632,6 +3632,13 @@ async function startServer() {
         db,
         idempotencyKey,
         "DRIVER_STRIPE_PAYOUT",
+        {
+          version: 1,
+          driverId,
+          currency: "gbp",
+          amountMode: amount !== undefined && amount !== null && amount !== "" ? "fixed" : "full_available_balance",
+          amountPence: amount !== undefined && amount !== null && amount !== "" ? Math.round(Number(amount) * 100) : null,
+        },
         async () => {
           const driverDoc = await db.collection("users").doc(driverId).get();
           if (!driverDoc.exists) throw new BadRequestError("Driver not found");

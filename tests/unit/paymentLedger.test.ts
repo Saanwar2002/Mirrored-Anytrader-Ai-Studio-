@@ -113,6 +113,7 @@ describe("Payment Ledger & Invariants", () => {
       mockDb,
       "test_key_1",
       "TEST_OP",
+      { version: 1, testResource: "resource-1" },
       task
     );
     expect(firstCall.wasReplayed).toBe(false);
@@ -143,6 +144,25 @@ describe("Payment Ledger & Invariants", () => {
     await PaymentLedgerEngine.executeIdempotentOperation(db, "key", "PAYMENT_CAPTURE", async () => "done");
     await expect(PaymentLedgerEngine.executeIdempotentOperation(db, "key", "REFUND", async () => "wrong"))
       .rejects.toThrow("different financial operation");
+  });
+
+  it("rejects reuse of a completed idempotency key for different transaction details", async () => {
+    const store = new Map<string, any>();
+    const db = {
+      collection: () => ({ doc: (id: string) => ({ id, update: async (v: any) => store.set(id, {...store.get(id), ...v}), set: async (v: any) => store.set(id,v), delete: async () => store.delete(id) }) }),
+      runTransaction: async (fn: any) => fn({
+        get: async (ref: any) => ({ exists: store.has(ref.id), data: () => store.get(ref.id) }),
+        set: (ref: any, value: any) => store.set(ref.id, value),
+        update: (ref: any, value: any) => store.set(ref.id, {...store.get(ref.id), ...value}),
+        delete: (ref: any) => store.delete(ref.id),
+      }),
+    };
+    const binding = { version: 1, jobId: "job-A", milestoneId: "milestone-A", amountPence: 5000 };
+    await PaymentLedgerEngine.executeIdempotentOperation(db, "semantic-key", "RELEASE_MILESTONE", binding, async () => "released");
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(
+      db, "semantic-key", "RELEASE_MILESTONE",
+      { ...binding, amountPence: 9000 }, async () => "wrong"
+    )).rejects.toThrow("different transaction details");
   });
 
   it("does not let a stale executor complete or delete a successor idempotency claim", async () => {

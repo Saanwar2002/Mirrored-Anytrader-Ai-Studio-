@@ -36,11 +36,34 @@ export class PaymentLedgerEngine {
     db: any,
     idempotencyKey: string,
     operationName: string,
+    semanticBinding: Record<string, unknown>,
     executor: () => Promise<T>
   ): Promise<{ result: T; wasReplayed: boolean }> {
-    if (!idempotencyKey || typeof idempotencyKey !== "string") {
+    if (!idempotencyKey || typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) {
       throw new BadRequestError("A valid, non-empty idempotencyKey is required for financial operations.");
     }
+    if (!semanticBinding || typeof semanticBinding !== "object" || Array.isArray(semanticBinding)) {
+      throw new BadRequestError("A semantic binding is required for financial idempotency.");
+    }
+    const canonicalize = (value: any): any => {
+      if (Array.isArray(value)) return value.map(canonicalize);
+      if (value && typeof value === "object") {
+        return Object.keys(value).sort().reduce((result: any, key) => {
+          result[key] = canonicalize(value[key]);
+          return result;
+        }, {});
+      }
+      if (typeof value === "number" && !Number.isFinite(value)) {
+        throw new BadRequestError("Semantic binding contains a non-finite number.");
+      }
+      if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+        throw new BadRequestError("Semantic binding contains an unsupported value.");
+      }
+      return value;
+    };
+    const bindingJson = JSON.stringify(canonicalize(semanticBinding));
+    if (!bindingJson) throw new BadRequestError("Semantic binding could not be serialized.");
+    const bindingHash = crypto.createHash("sha256").update(bindingJson).digest("hex");
 
     if (!db) {
       // In development fallback without db, run executor directly
@@ -59,6 +82,9 @@ export class PaymentLedgerEngine {
         if (data.operationName !== operationName) {
           throw new ConflictError("Idempotency key is already bound to a different financial operation.");
         }
+        if (typeof data.bindingHash !== "string" || data.bindingHash !== bindingHash) {
+          throw new ConflictError("Idempotency key is already bound to different transaction details or requires reconciliation.");
+        }
         if (data.status === "completed") {
           return { shouldExecute: false, result: data.response as T, wasReplayed: true };
         }
@@ -71,7 +97,7 @@ export class PaymentLedgerEngine {
         }
       }
       transaction.set(idempotencyRef, {
-        operationName, status: "in_progress", startedAt: new Date().toISOString(), claimToken,
+        operationName, bindingHash, status: "in_progress", startedAt: new Date().toISOString(), claimToken,
       });
       return { shouldExecute: true };
     });
@@ -134,7 +160,10 @@ export class PaymentLedgerEngine {
       throw new BadRequestError("Verified amount must be a strictly positive finite number in minor units (pence).");
     }
 
-    const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "FUND_MILESTONE_ESCROW", async () => {
+    const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "FUND_MILESTONE_ESCROW", {
+      version: 1, jobId, milestoneId, customerId, traderId,
+      verifiedAmount, currency: currency.toLowerCase(), paymentIntentId,
+    }, async () => {
       const platformFee = Math.round(verifiedAmount * 0.12); // Standard 12% platform fee
       const netPayout = verifiedAmount - platformFee;
 
@@ -214,7 +243,10 @@ export class PaymentLedgerEngine {
       throw new BadRequestError("jobId and quoteId must be valid strings");
     }
 
-    const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "RELEASE_MILESTONE", async () => {
+    const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "RELEASE_MILESTONE", {
+      version: 1, jobId, quoteId, milestoneId: milestoneId || null, authUid,
+      authorizationMode: isAdmin ? "admin" : isQrHandshake ? "qr_handshake" : "owner",
+    }, async () => {
       if (!db) {
         throw new InternalServerError("Database is required for financial escrow release.");
       }
