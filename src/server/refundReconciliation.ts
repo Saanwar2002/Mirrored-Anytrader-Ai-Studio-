@@ -24,6 +24,7 @@ export interface ConfirmedRefundInput {
   currency: string;
   operationId?: string;
   reason?: string | null;
+  stripeRefundStatus: string;
 }
 
 export interface RefundLedgerEntry {
@@ -136,6 +137,10 @@ export async function recordConfirmedRefund(
   const originalLedgerEntryId = requireText(input.originalLedgerEntryId, "originalLedgerEntryId");
   const amountPence = requirePositiveMinorAmount(input.amountPence, "amountPence");
   const currency = requireText(input.currency, "currency").toLowerCase();
+  const stripeRefundStatus = requireText(input.stripeRefundStatus, "stripeRefundStatus");
+  if (stripeRefundStatus !== "succeeded") {
+    throw new ConflictError("Only Stripe refunds with succeeded status can be recorded in the financial ledger.");
+  }
   const operationId = input.operationId ? requireText(input.operationId, "operationId") : undefined;
 
   const refundRef = db.collection("refund_records").doc(refundId);

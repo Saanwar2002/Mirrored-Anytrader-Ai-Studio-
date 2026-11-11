@@ -2189,7 +2189,7 @@ async function startServer() {
             try {
               await recordConfirmedRefund(db, { refundId: refund.id, chargeId: charge.id, paymentIntentId,
                 originalLedgerEntryId: eligible[0].id, amountPence: refund.amount, currency: refund.currency,
-                operationId: refund.metadata?.refundOperationId || undefined, reason: refund.reason || null });
+                stripeRefundStatus: refund.status || "unknown", operationId: refund.metadata?.refundOperationId || undefined, reason: refund.reason || null });
               await reviewRef.delete().catch(() => undefined);
             } catch (refundError: any) {
               if (![400, 404, 409].includes(Number(refundError?.statusCode))) throw refundError;
