@@ -2148,9 +2148,19 @@ async function startServer() {
           }
         }
       // Reconcile each individual Stripe refund against the original completed ledger entry.
-      if (event.type === "charge.refunded") {
-        const charge = event.data.object as Stripe.Charge;
-        const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id || null;
+      if (event.type === "charge.refunded" || event.type === "refund.updated") {
+        // charge.refunded can arrive while an individual refund is still pending.
+        // Stripe emits refund.updated when that refund later changes state, so
+        // re-fetch its charge and reconcile the updated refund independently.
+        const refundUpdate = event.type === "refund.updated" ? event.data.object as Stripe.Refund : null;
+        const charge = refundUpdate
+          ? await stripeClient.charges.retrieve(typeof refundUpdate.charge === "string" ? refundUpdate.charge : refundUpdate.charge.id)
+          : event.data.object as Stripe.Charge;
+        const chargePaymentIntent = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id || null;
+        const refundPaymentIntent = refundUpdate
+          ? (typeof refundUpdate.payment_intent === "string" ? refundUpdate.payment_intent : refundUpdate.payment_intent?.id || null)
+          : null;
+        const paymentIntentId = chargePaymentIntent || refundPaymentIntent;
         const eventRefundRef = db.collection("refund_events").doc(`ref_${event.id}`);
         if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before refund reconciliation.");
         if (!paymentIntentId) {
@@ -2160,7 +2170,7 @@ async function startServer() {
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true });
         } else {
-          const refunds = charge.refunds?.data || [];
+          const refunds = refundUpdate ? [refundUpdate] : charge.refunds?.data || [];
           await eventRefundRef.set({ chargeId: charge.id, paymentIntentId, amountRefunded: charge.amount_refunded,
             currency: charge.currency, refundIds: refunds.map(refund => refund.id), status: "reconciliation_started",
             createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -2199,13 +2209,13 @@ async function startServer() {
                 sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
             }
           }
-          if (charge.refunds?.has_more) await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).set({
+          if (!refundUpdate && charge.refunds?.has_more) await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).set({
             chargeId: charge.id, paymentIntentId, reason: "stripe_charge_refunds_list_has_more_items; retrieve remaining refunds from Stripe",
             status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp()
           }, { merge: true });
           if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before refund event completion.");
           await eventRefundRef.set({ status: "reconciled", reconciledRefundCount: refunds.length,
-            requiresPaginationReview: Boolean(charge.refunds?.has_more), reconciledAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            requiresPaginationReview: !refundUpdate && Boolean(charge.refunds?.has_more), reconciledAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         }
       }
       // Mediation stake payment lifecycle is server-authoritative and validates the reserved attempt.
