@@ -215,7 +215,7 @@ This section supersedes the older "Stage 3B remediation: Not started" status abo
 - Refund initiation reserves one durable per-match operation with a stable Stripe idempotency key, amount/currency/PaymentIntent binding, a claim token and a five-minute lease.
 - Expired processing claims can be reclaimed with the same Stripe idempotency key only inside a conservative 23-hour retry window. Stale workers cannot overwrite a successor claim; pending Stripe responses receive a retry cooldown; expired/unknown idempotency windows require reconciliation rather than a new refund.
 - The read-only Stripe refund inspector scans all PaymentIntent refund pages, rejects malformed/non-advancing pagination, deduplicates repeated refund IDs, flags multiple/mismatched candidates, and only reports a match when the Stripe refund status is `succeeded`.
-- CI run `43065421728` passed all stages at commit `aaa5f364aa95965683dc6a46f3565b3415d2c170` for the refund-inspector changes. Runs `43065811061` and `43066046301` are still in progress for the subsequent claim-fencing/cooldown changes; do not treat those commits as verified until their full CI gates complete.
+- CI run `43065421728` passed all stages at commit `aaa5f364aa95965683dc6a46f3565b3415d2c170` for the refund-inspector changes. The subsequent claim-fencing and pending-response cooldown changes also passed all stages: run `43065811061` at commit `8a8d01397939cbb9cd935efc26ece68e53640f9a` and run `43066046301` at commit `6d8a16f3262fe90dcf4b15ab99131aa1d5ed5c38` both completed successfully.
 
 ### FIN-05 — cross-operation read-only reconciliation
 
