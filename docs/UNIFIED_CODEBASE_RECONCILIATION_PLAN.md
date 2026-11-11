@@ -4022,3 +4022,37 @@ Reviewed `server.ts` lines 4891–5050 and `src/server/paymentLedger.ts` lines 4
 - Integration branch head verified unchanged at `1811b23bd0cf6d11d7c09c28cb227762db6a83a5`; this audit made no application/test changes and did not run CI.
 - The preceding CI run #895 is green for that exact snapshot, but it does not remediate these source-level findings.
 - This remains a read-only audit. Implement release executor, route fencing, aggregate recomputation, UI/notification status handling and their tests together in the consolidated source/test batch; then run the agreed single full CI gate.
+
+
+## Section 162 — FIN-04 driver payout caller and orchestration follow-through (11 November 2026)
+
+### Verified branch and CI checkpoint
+
+- Audited the existing branch only: `integration/pr-consolidation-20261109`.
+- Branch head at this checkpoint: `4e27011d6acf8fecc93832c2107a7431aa797e32`.
+- Compared with `main`: 493 commits ahead, 0 behind; merge base remains `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- Latest branch workflow run #923 is `success` for this exact head. This is a CI result, not evidence that the read-only audit findings below are fixed.
+- PR #5 remains open, draft and unmerged, targeting this integration branch.
+- No application code, tests, production configuration, Firebase data, Stripe object, deployment, or workflow was changed in this audit.
+
+### Additional source findings
+
+Reviewed the branch versions of `server.ts`, `src/server/paymentLedger.ts`, and `src/server/driverPayoutOrchestration.ts`.
+
+1. **Generic idempotency cleanup can erase an ambiguous payout claim.** `executeIdempotentOperation` conditionally deletes its claim after any executor error. In the driver payout route, Stripe `payouts.create` can succeed and the subsequent domain-event dispatch can fail. The helper then releases the claim even though the external payout may exist. A retry can create a second payout after Stripe's finite idempotency retention expires. The route needs a durable external-effect state/reconciliation boundary; post-Stripe event failure must not be treated as proof that no payout occurred.
+2. **Stripe payout response is not independently validated.** The route returns the `payouts.create` object after event dispatch without checking that its ID is present and that amount, currency, destination/account context and status match the request. Validate response evidence before recording completion; mismatch or missing evidence must enter reconciliation, not success.
+3. **Automated driver transfer finalization can become ambiguous after Stripe success.** The orchestration calls `transfers.create`, then performs a Firestore transaction. If the transaction fails after Stripe has created the transfer, the catch path can write `failed` and leave `payoutTransferred: false` when the worker still owns the claim. This is unsafe to retry as a definite failure. Any error after a confirmed Stripe transfer must preserve transfer ID and enter `reconciliation_required`; only failures proven to occur before the external request may be classified as retryable definite failures.
+4. **Lease-loss handling is safer but incomplete as a durable recovery contract.** If the lease token is lost after transfer creation, the detail result correctly reports reconciliation required and avoids overwriting the successor's ride state. Ensure the transfer evidence is also durably discoverable by operation key/ride ID so that a successor/operator can reconcile it without issuing another transfer.
+5. **Driver payout endpoint uses a stable Stripe idempotency key but still depends on the generic helper's unsafe failure cleanup.** The external key is `stripe_payout_<caller key>`; preserve it for already-attempted effects. Do not solve this by rotating the key or by blindly retrying after an ambiguous result.
+
+### Required consolidated implementation batch
+
+- Extend the idempotency helper contract so an executor can distinguish pre-effect definite failure from post-effect/ambiguous outcome. Do not delete or expire a claim that may represent an external Stripe effect; persist an explicit reconciliation-required state with operation binding and evidence.
+- Update the driver payout route to validate the Stripe response and durably record the payout ID/status before dispatching downstream domain events, or use a transactional outbox so event-dispatch failure cannot release the financial operation.
+- Update automated driver orchestration so post-Stripe Firestore finalization errors are always reconciliation-required, retaining the Stripe transfer ID and deterministic operation key. A retry must inspect/reconcile the existing transfer before any new create call.
+- Add regression tests for: Stripe payout succeeds then domain event throws; Stripe payout response has missing ID or mismatched amount/currency; transfer succeeds then Firestore finalization throws; lease expires after Stripe success; stale worker cannot overwrite successor state; repeated calls never create a second external effect.
+- Keep this work in one coherent helper/caller/test batch. Run focused local tests and a complete call-site search on the exact integration checkout before editing; run the consolidated full CI gate only after the batch.
+
+### Verification status
+
+This is a branch-specific read-only audit. The latest workflow run #923 is green for the branch head, but the above scenarios remain source-level risks until fixed and covered by regression tests. No local test command was run in this audit. Do not report FIN-04 complete. All writes remain restricted to `integration/pr-consolidation-20261109`; do not merge PR #5, update `main`, deploy, or alter production Firebase/Stripe.
