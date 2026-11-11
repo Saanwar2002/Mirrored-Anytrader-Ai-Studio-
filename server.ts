@@ -5,6 +5,7 @@ import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch,
 import { ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
 import { createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure } from "./src/server/mediationStake.ts";
 import { getRefundEventReconciliationStatus, recordConfirmedRefund } from "./src/server/refundReconciliation.ts";
+import { listAllChargeRefunds } from "./src/server/stripeRefundPagination.ts";
 import { evaluateCheckoutIntentBinding } from "./src/server/checkoutIntentIntegrity.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -2183,7 +2184,8 @@ async function startServer() {
             status: "requires_review", requiresReview: true, reason: "charge_refund_missing_payment_intent_reference",
             sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         } else {
-          const refunds = refundUpdate ? [refundUpdate] : charge.refunds?.data || [];
+          // Always retrieve the complete Charge refund list; the embedded Charge expansion is only a partial page.
+          const { refunds, pagesScanned: refundPagesScanned } = await listAllChargeRefunds(stripeClient, charge.id);
           let requiresReview = false;
           await eventRefundRef.set({ chargeId: charge.id, paymentIntentId, amountRefunded: charge.amount_refunded,
             currency: charge.currency, refundIds: refunds.map(refund => refund.id), status: "reconciliation_started",
@@ -2199,15 +2201,16 @@ async function startServer() {
               updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
           }
           for (const refund of refunds) {
-            const refundPi = typeof refund.payment_intent === "string" ? refund.payment_intent : refund.payment_intent?.id || paymentIntentId;
+            const refundChargeId = typeof refund.charge === "string" ? refund.charge : refund.charge?.id || null;
+            const refundPi = typeof refund.payment_intent === "string" ? refund.payment_intent : refund.payment_intent?.id || null;
             const reviewRef = db.collection("refund_review").doc(refund.id);
-            if (refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase() || eligible.length !== 1) {
+            if (refundChargeId !== charge.id || refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase() || eligible.length !== 1) {
               requiresReview = true;
               await reviewRef.set({ refundId: refund.id, chargeId: charge.id, paymentIntentId,
                 amountPence: refund.amount, currency: refund.currency,
                 candidateLedgerEntryIds: eligible.map((doc: any) => doc.id),
-                reason: refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase()
-                  ? "refund_payment_intent_or_currency_mismatch" : eligible.length === 0
+                reason: refundChargeId !== charge.id || refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase()
+                  ? "refund_charge_payment_intent_or_currency_mismatch" : eligible.length === 0
                     ? "no_matching_completed_original_payment_ledger_entry" : "multiple_matching_original_payment_ledger_entries",
                 status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
               continue;
@@ -2226,17 +2229,12 @@ async function startServer() {
                 sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
             }
           }
-          const requiresPaginationReview = !refundUpdate && Boolean(charge.refunds?.has_more);
-          if (requiresPaginationReview) {
-            requiresReview = true;
-            await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).set({
-              chargeId: charge.id, paymentIntentId, reason: "stripe_charge_refunds_list_has_more_items; retrieve remaining refunds from Stripe",
-              status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
-          }
+          // The full Stripe list was retrieved successfully, so clear any stale pagination-only review marker.
+          await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).delete().catch(() => undefined);
+          const requiresPaginationReview = false;
           if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before refund event completion.");
           await eventRefundRef.set({ status: getRefundEventReconciliationStatus(requiresReview, requiresPaginationReview),
-            requiresReview, reconciledRefundCount: refunds.length, requiresPaginationReview,
+            requiresReview, reconciledRefundCount: refunds.length, refundPagesScanned, requiresPaginationReview,
             reconciledAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         }
       }
