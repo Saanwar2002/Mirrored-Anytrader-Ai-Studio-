@@ -2,6 +2,7 @@ process.env.FIRESTORE_EMULATOR_HOST = "127.0.0.1:8088";
 
 import { describe, it, beforeAll, expect } from "vitest";
 import * as admin from "firebase-admin";
+import crypto from "crypto";
 import { PaymentLedgerEngine } from "../../src/server/paymentLedger.ts";
 import { ConflictError, ForbiddenError, BadRequestError } from "../../src/server/httpErrors.ts";
 
@@ -279,8 +280,18 @@ describe("Task 6 — Real Firestore Emulator Concurrency & Escrow Security Verif
 
     // 2. Simulate worker crash before idempotency doc reached completed: set status to in_progress with stale timestamp
     const idempRef = db.collection("payment_idempotency").doc(crashKey);
+    const bindingJson = JSON.stringify({
+      authUid: homeownerUid,
+      authorizationMode: "owner",
+      jobId,
+      milestoneId,
+      quoteId,
+      version: 1,
+    });
+    const bindingHash = crypto.createHash("sha256").update(bindingJson).digest("hex");
     await idempRef.set({
       operationName: "RELEASE_MILESTONE",
+      bindingHash,
       status: "in_progress",
       startedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
     });
