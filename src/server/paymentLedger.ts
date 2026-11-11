@@ -242,6 +242,35 @@ export class PaymentLedgerEngine {
     if (!jobId || typeof jobId !== "string" || !quoteId || typeof quoteId !== "string") {
       throw new BadRequestError("jobId and quoteId must be valid strings");
     }
+    if (!db) {
+      throw new InternalServerError("Database is required for financial escrow release.");
+    }
+
+    // Revalidate current authorization before idempotency replay can return a cached
+    // result. The transaction below repeats these checks against its own snapshot
+    // before any new release transition is committed.
+    const authorizationJobSnap = await db.collection("jobs").doc(jobId).get();
+    if (!authorizationJobSnap.exists) throw new BadRequestError("Job not found");
+    const authorizationJob = authorizationJobSnap.data();
+    const currentlyOwner = Boolean(
+      (authorizationJob?.homeownerId && authorizationJob.homeownerId === authUid) ||
+      (authorizationJob?.userId && authorizationJob.userId === authUid) ||
+      (authorizationJob?.customerId && authorizationJob.customerId === authUid)
+    );
+    const currentlyAcceptedTrader = Boolean(
+      (authorizationJob?.acceptedTradespersonId && authorizationJob.acceptedTradespersonId === authUid) ||
+      (authorizationJob?.acceptedTraderId && authorizationJob.acceptedTraderId === authUid) ||
+      (authorizationJob?.tradespersonId && authorizationJob.tradespersonId === authUid)
+    );
+    const expectedHandshakeCode = (authorizationJob?.handshakeCode || authorizationJob?.verificationPin || "").toString().trim();
+    const suppliedHandshakeCode = (handshakeCode || "").toString().trim();
+    const currentlyValidHandshake = Boolean(
+      currentlyAcceptedTrader && isQrHandshake && expectedHandshakeCode !== "" &&
+      suppliedHandshakeCode !== "" && expectedHandshakeCode === suppliedHandshakeCode
+    );
+    if (!currentlyOwner && !isAdmin && !currentlyValidHandshake) {
+      throw new ForbiddenError("Unauthorized: current caller is not permitted to release milestone funds");
+    }
 
     const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "RELEASE_MILESTONE", {
       version: 1, jobId, quoteId, milestoneId: milestoneId || null, authUid,
