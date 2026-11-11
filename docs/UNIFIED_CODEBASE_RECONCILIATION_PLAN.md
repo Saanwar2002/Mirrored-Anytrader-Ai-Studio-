@@ -4254,3 +4254,10 @@ This checkpoint is a test-only correction. No payout safety invariant is relaxed
 CI #938: Firebase Security Rules/Firestore emulator concurrency gate passed; unit suite had 1,253 passing and one failure. The remaining assertion in test 20 expected the shared `createdTransfers` array to contain the custom Stripe transfer. Its one-shot `mockImplementationOnce` intentionally replaces the default Stripe mock implementation, which is the only code that appends to that array. Therefore the actual mocked transfer returned successfully but bypassed the receipt recorder; the test's array count was not an external-call count.
 
 Corrected the regression assertion to count calls on `mockStripe.transfers.create` (exactly one) and separately verify the default recorder remains empty. This keeps the intended invariant—one external attempt, zero replay—without altering production behavior or conflating mock return receipts with API invocation tracking.
+
+
+## Section 170 — Validate Stripe payout transfer receipts before durable confirmation (11 November 2026)
+
+The automated driver payout path now validates the Stripe Transfer response against the immutable request before writing `stripe_succeeded` evidence or finalizing the ride. Required receipt properties are a transfer ID with the Stripe transfer prefix, exact integer amount in pence, GBP currency, exact connected-account destination, and matching ride ID, driver ID and payout type in response metadata. A mismatch throws into the existing reconciliation-required/error path; it does not set `payoutTransferred` or authorize another transfer. The operation remains a replay barrier because the external request may already have succeeded despite a malformed response.
+
+The shared Stripe test fixture and successful custom transfer fixtures now return currency and metadata. Added a regression for an amount-mismatched response: ride remains unpaid for payout purposes, the operation is reconciliation-required and only one Stripe call is made. Validation is pending the complete GitHub Actions gate. No production Stripe/Firestore state was touched.
