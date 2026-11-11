@@ -5541,7 +5541,7 @@ const libraries: any[] = ['places', 'geometry'];
                   </div>
                   <div>
                     <h3 className="font-bold text-amber-900">Payment Pending</h3>
-                    <p className="text-amber-700 text-xs text-balance mt-0.5">Wait for the homeowner to pay, or mark as paid if you received the funds via cash/transfer.</p>
+                    <p className="text-amber-700 text-xs text-balance mt-0.5">Payment confirmation must be recorded through the verified payment process. If you received payment outside the platform, contact support so it can be reconciled safely.</p>
                   </div>
                 </div>
                 
@@ -5594,42 +5594,6 @@ const libraries: any[] = ['places', 'geometry'];
                   </button>
                 )}
 
-                <button 
-                  onClick={async () => {
-                    if (!id) return;
-                    try {
-                      const updatePromises = [
-                         updateDoc(doc(db, "jobs", id), {
-                           paymentStatus: "handshake_complete",
-                           isPaid: true
-                         })
-                      ];
-                      
-                      // Upward path for fairness score
-                      if (job.homeownerId) {
-                         updatePromises.push(updateDoc(doc(db, "users", job.homeownerId), {
-                            fairnessScore: increment(2)
-                         }));
-                      }
-                      if (job.acceptedTradespersonId) {
-                         updatePromises.push(updateDoc(doc(db, "users", job.acceptedTradespersonId), {
-                            fairnessScore: increment(2)
-                         }));
-                      }
-                      
-                      await Promise.all(updatePromises);
-                      setJob((prev: any) => ({ ...prev, paymentStatus: "handshake_complete", isPaid: true }));
-                      toast.success("Job marked as Paid!");
-                    } catch (e) {
-                      console.error("Error marking as paid", e);
-                      toast.error("Failed to update payment status");
-                    }
-                  }}
-                  className="w-full bg-amber-600 text-white p-4 rounded-2xl font-bold hover:bg-amber-700 transition-all flex items-center justify-center gap-2"
-                >
-                  <CheckCircle2 className="w-5 h-5" />
-                  Mark as Paid Manually
-                </button>
               </div>
             )}
 

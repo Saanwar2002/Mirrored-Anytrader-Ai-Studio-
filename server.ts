@@ -4994,22 +4994,28 @@ async function startServer() {
           const qSnap = await tx.get(qRef);
           if (qSnap.exists) {
             const qData = qSnap.data();
+            let matchedCurrentOperation = false;
             const milestones = (qData?.milestones || []).map((m: any) => {
-              if (m.id === (result.milestoneId || milestoneId)) {
-                return {
-                  ...m,
-                  status: "funded", // Revert back to funded!
-                  releaseStatus: "failed",
-                  lastTransferError: stripeTransferResult.error,
-                  releaseOperationId: null, // Clear operation ID so it can be retried safely!
-                };
+              if (m.id !== (result.milestoneId || milestoneId) || m.releaseOperationId !== idempotencyKey) {
+                return m;
               }
-              return m;
+              matchedCurrentOperation = true;
+              return {
+                ...m,
+                status: "funded",
+                releaseStatus: "failed",
+                lastTransferError: stripeTransferResult.error,
+                releaseOperationId: null,
+              };
             });
-            tx.update(qRef, { milestones });
+            if (matchedCurrentOperation) {
+              tx.update(qRef, { milestones });
+              // Do not let a stale failure response overwrite a newer milestone operation
+              // or the job-level payment projection.
+              const jRef = firestoreDb.collection("jobs").doc(jobId);
+              tx.update(jRef, { paymentStatus: "funded", isPaid: false });
+            }
           }
-          const jRef = firestoreDb.collection("jobs").doc(jobId);
-          tx.update(jRef, { paymentStatus: "funded", isPaid: false });
         });
 
         // Also update ledger
