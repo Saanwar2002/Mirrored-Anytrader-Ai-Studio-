@@ -4,6 +4,7 @@ import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockS
 import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
 import { createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure } from "./src/server/mediationStake.ts";
+import { recordConfirmedRefund } from "./src/server/refundReconciliation.ts";
 import { evaluateCheckoutIntentBinding } from "./src/server/checkoutIntentIntegrity.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -2146,6 +2147,67 @@ async function startServer() {
             }
           }
         }
+      // Reconcile each individual Stripe refund against the original completed ledger entry.
+      if (event.type === "charge.refunded") {
+        const charge = event.data.object as Stripe.Charge;
+        const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id || null;
+        const eventRefundRef = db.collection("refund_events").doc(`ref_${event.id}`);
+        if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before refund reconciliation.");
+        if (!paymentIntentId) {
+          await db.collection("refund_review").doc(`charge_${charge.id}`).set({
+            chargeId: charge.id, amountRefunded: charge.amount_refunded, currency: charge.currency,
+            reason: "charge_refund_missing_payment_intent_reference", status: "requires_review", sourceEventId: event.id,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+        } else {
+          const refunds = charge.refunds?.data || [];
+          await eventRefundRef.set({ chargeId: charge.id, paymentIntentId, amountRefunded: charge.amount_refunded,
+            currency: charge.currency, refundIds: refunds.map(refund => refund.id), status: "reconciliation_started",
+            createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          const ledger = await db.collection("payment_ledger").where("transactionId", "==", paymentIntentId).get();
+          const preferred = ledger.docs.filter((doc: any) => doc.data()?.status === "completed" && doc.data()?.type === "ESCROW_DEPOSIT");
+          const eligible = preferred.length ? preferred : ledger.docs.filter((doc: any) => doc.data()?.status === "completed" && doc.data()?.type === "PLATFORM_COMMISSION");
+          if (!refunds.length && charge.amount_refunded > 0) {
+            await db.collection("refund_review").doc(`charge_${charge.id}`).set({ chargeId: charge.id, paymentIntentId,
+              amountRefunded: charge.amount_refunded, currency: charge.currency,
+              reason: "charge_refunded_event_has_no_individual_refund_objects", status: "requires_review", sourceEventId: event.id,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          }
+          for (const refund of refunds) {
+            const refundPi = typeof refund.payment_intent === "string" ? refund.payment_intent : refund.payment_intent?.id || paymentIntentId;
+            const reviewRef = db.collection("refund_review").doc(refund.id);
+            if (refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase() || eligible.length !== 1) {
+              await reviewRef.set({ refundId: refund.id, chargeId: charge.id, paymentIntentId,
+                amountPence: refund.amount, currency: refund.currency,
+                candidateLedgerEntryIds: eligible.map((doc: any) => doc.id),
+                reason: refundPi !== paymentIntentId || refund.currency.toLowerCase() !== charge.currency.toLowerCase()
+                  ? "refund_payment_intent_or_currency_mismatch" : eligible.length === 0
+                    ? "no_matching_completed_original_payment_ledger_entry" : "multiple_matching_original_payment_ledger_entries",
+                status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+              continue;
+            }
+            try {
+              await recordConfirmedRefund(db, { refundId: refund.id, chargeId: charge.id, paymentIntentId,
+                originalLedgerEntryId: eligible[0].id, amountPence: refund.amount, currency: refund.currency,
+                operationId: refund.metadata?.refundOperationId || undefined, reason: refund.reason || null });
+              await reviewRef.delete().catch(() => undefined);
+            } catch (refundError: any) {
+              if (![400, 404, 409].includes(Number(refundError?.statusCode))) throw refundError;
+              await reviewRef.set({ refundId: refund.id, chargeId: charge.id, paymentIntentId,
+                originalLedgerEntryId: eligible[0].id, amountPence: refund.amount, currency: refund.currency,
+                reason: refundError.message || "refund_reconciliation_conflict", status: "requires_review",
+                sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            }
+          }
+          if (charge.refunds?.has_more) await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).set({
+            chargeId: charge.id, paymentIntentId, reason: "stripe_charge_refunds_list_has_more_items; retrieve remaining refunds from Stripe",
+            status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+          if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before refund event completion.");
+          await eventRefundRef.set({ status: "reconciled", reconciledRefundCount: refunds.length,
+            requiresPaginationReview: Boolean(charge.refunds?.has_more), reconciledAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        }
+      }
       // Mediation stake payment lifecycle is server-authoritative and validates the reserved attempt.
       if (event.type === "payment_intent.succeeded" || event.type === "payment_intent.payment_failed") {
         const pi = event.data.object as Stripe.PaymentIntent;
