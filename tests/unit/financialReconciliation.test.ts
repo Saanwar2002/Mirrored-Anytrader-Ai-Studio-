@@ -67,6 +67,14 @@ describe("FIN-05 pure financial reconciliation", () => {
     expect(report.findings.map(x=>x.code)).toContain("TRANSFER_DESTINATION_MISMATCH");
   });
 
+  it("detects payout totals above an explicit allocation cap", () => {
+    const report=evaluateFinancialReconciliation({ledger:[],payouts:[
+      {operationId:"p1",amount:700,currency:"gbp",destination:"acct_1"},
+      {operationId:"p2",amount:400,currency:"gbp",destination:"acct_1"},
+    ],payoutAllocationCaps:[{destination:"acct_1",amount:1000}]});
+    expect(report.findings.map(x=>x.code)).toContain("PAYOUT_ALLOCATION_EXCEEDED");
+  });
+
   it("does not mutate any input snapshot", () => {
     const snapshot=structuredClone(balanced);
     const before=JSON.stringify(snapshot);
