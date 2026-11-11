@@ -3819,3 +3819,31 @@ Implement Phase A calculator + unit tests on integration branch only. Repository
 - Section 154 is documentation only; no code, test, financial data or production changes.
 - No test/lint/build/emulator/CI execution in this session.
 - Reconciliation branch remains integration-only; `main` untouched.
+
+
+
+## Section 155 — FIN-04 idempotency binding audit and execution boundary (11 November 2026)
+
+### Current integration-branch evidence
+- The branch still points to `0376186214e03afa6c90ecb44cdd4d661e575307`; comparison against the previously recorded HEAD is identical (0 commits ahead, 0 behind). No application changes were made during this review.
+- `src/server/paymentLedger.ts` implements `executeIdempotentOperation(db, idempotencyKey, operationName, executor)`. The persisted `payment_idempotency/{idempotencyKey}` record binds only `operationName`, status, timestamps, claim token and cached response. It does not persist or compare authenticated actor, resource identity, destination/account, currency or canonical request payload.
+- Existing safeguards are meaningful but narrower: a different operation name is rejected; in-progress requests are rejected during the lease; stale executor completion/deletion is fenced by claim token. Existing unit tests cover operation-name conflict and stale-claim takeover, but not same-operation key reuse across different owners/resources/amounts.
+- Production call sites include the driver Stripe payout route and milestone escrow funding/release helpers. For driver payout, the route derives the driver from the URL and checks resource ownership, but the idempotency record does not bind the driver, connected Stripe account or requested amount. A replay under the same key can therefore return a cached result without proving it belongs to the same semantic request.
+- The helper runs the executor outside the claim transaction and persists its response only after side effects. This is not an atomic transaction spanning Stripe and Firestore; the claim token fences stale completion but cannot itself resolve an ambiguous external Stripe result. Preserve the separate operation-specific Stripe idempotency key and reconciliation-required behavior.
+
+### FIN-04 implementation contract before editing
+1. Add a required, explicit binding object to financial idempotency calls: authenticated actor ID, operation/resource type and ID, canonical target account/destination where relevant, currency, and canonical minor-unit amount or canonical payload hash.
+2. Persist a versioned binding fingerprint with the claim. On every replay or takeover, compare the full fingerprint before returning a cached response or executing. Reject missing/invalid binding fields for production financial operations; do not silently fall back to the legacy unbound form.
+3. Keep user-supplied idempotency key separate from the fingerprint. Namespace/hash the storage document ID safely; do not expose raw caller keys in paths or logs.
+4. Do not treat this helper as a substitute for Stripe's own stable idempotency key, durable operation records, or reconciliation of ambiguous Stripe outcomes. Preserve existing claim-token fencing.
+5. Add regression tests for same key + same operation but different actor, resource, destination, amount, currency, payload, plus exact replay, expired-claim takeover, and stale executor completion. Update every production call site and relevant tests together.
+
+### CI checkpoint
+- Rechecked the recorded branch HEAD: the compare endpoint reports no delta from `0376186214e03afa6c90ecb44cdd4d661e575307`.
+- Commit-associated workflow lookup returned no PR-triggered workflow runs, and the combined commit status returned no status records. This does not prove that no push-triggered Actions run exists; the available commit-run wrapper is explicitly PR-triggered-only. CI run #889 therefore remains unverified, not passed.
+- GitHub's available repository tooling in this session does not expose a general list-workflow-runs-by-branch operation. Do not infer a result from the empty PR-only response.
+
+### Status and next action
+- Section 155 is a source audit and plan update only. No application code, test, Firebase data, Stripe object, deployment, or production configuration was changed.
+- Next safe code change: implement FIN-04 binding with required context at the helper and all production call sites, then add the cross-owner/resource/amount/currency replay tests. Run the focused Vitest file, full lint/build and the integration CI workflow before marking complete.
+- Keep all writes on `integration/pr-consolidation-20261109`; do not create branches, merge, deploy, or modify `main`.
