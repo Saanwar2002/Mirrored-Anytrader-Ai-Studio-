@@ -3918,3 +3918,40 @@ Before changing production callers, define one versioned canonical binding schem
 - This is a read-only call-site trace. No source or test files changed, and no tests, emulator, lint, build or CI were run.
 - FIN-04 remains open. Add the funding partial-fulfillment replay case to the same coherent source/test implementation batch where possible, but do not conflate it with the core binding fingerprint or claim it fixed by the helper alone.
 - All writes remain restricted to `integration/pr-consolidation-20261109`; `main`, production Firebase and Stripe remain untouched.
+
+
+## Section 159 — FIN-04 complete caller inventory and safe migration boundary (11 November 2026)
+
+### Repository-wide direct-helper inventory
+
+The GitHub code search for `executeIdempotentOperation(` returned the following application/test call sites on the indexed repository snapshot:
+
+- Production: `src/server/paymentLedger.ts` (the escrow funding and milestone release wrappers) and `server.ts` (driver Stripe payout route).
+- Direct helper tests: `tests/unit/paymentLedger.test.ts` and `tests/unit/adversarialRedTeam.test.ts`.
+- `SECURITY_ENGINEERING_AUDIT.md` documents the helper but is not an executable caller.
+- No additional direct generic-helper callers were returned by this search. Because GitHub code search is indexed against the default branch, this inventory is a locator, not proof that the integration branch has no additional call sites; re-run a local ripgrep across the checked-out integration branch before implementation.
+
+### FIN-04 migration details
+
+1. Extend the helper API with a mandatory, versioned semantic binding argument. Validate it before the no-database development fallback as well as before any Firestore operation.
+2. Canonicalize a restricted JSON-compatible binding deterministically (stable key ordering, normalized currency, integer minor units, no undefined, NaN, Infinity, functions, secrets or arbitrary object instances). Hash the canonical representation with SHA-256. Persist the schema version and fingerprint alongside operation name and claim state.
+3. Derive the Firestore idempotency document ID from a cryptographic hash of the caller key to avoid storing raw caller-provided keys in document paths. Preserve existing external Stripe idempotency key derivation and business operation IDs; do not silently rotate keys for already-attempted external effects.
+4. Compare operation name, binding version and fingerprint before returning a cached response and before taking over an expired lease. Missing fingerprints on legacy in-progress/completed records must fail closed into an explicit reconciliation path; do not auto-replay or overwrite them.
+5. Keep stale-claim fencing based on claimToken. Cleanup may delete only the exact claim generation owned by the failing executor. The executor's ambiguous Stripe outcome still requires durable reconciliation, not a blind retry.
+6. Migrate funding, release, payout, both direct helper tests and all wrapper tests in one source/test batch. Add exact replay success and mismatch rejection for actor, resource, destination account, amount, currency, and payload; add a legacy-record fail-closed test and expired-lease takeover / stale-completion tests.
+
+### Call-site binding contract
+
+- Funding: verified customer, job, milestone, trader, PaymentIntent ID, normalized currency, integer verified pence, and a binding schema version. The PaymentIntent must be verified by the webhook/payment authority before the helper is entered.
+- Release: authenticated UID, job, quote, milestone, canonical authorization mode (owner/admin/QR), and a digest of the stable release request facts. Never fingerprint the QR handshake code or persist it in the idempotency record. The release transaction remains authoritative for milestone amount, payee, quote acceptance and destination account; validate those facts inside the transaction before financial effects.
+- Driver payout: authenticated actor, driver ID, verified connected Stripe account, GBP, and a normalized request mode. For explicit payout amounts, bind the validated integer pence. For “all available”, bind an explicit full-available mode plus driver/account and keep the external Stripe idempotency key stable. Load and verify the driver/account before the helper can return a cached response. Reject malformed/non-positive/unsafe amounts before claiming.
+
+### Separate consistency finding
+
+The funding webhook updates the quote milestone before invoking the ledger helper. FIN-04 binding prevents a mismatched replay from returning a cached response, but it does not make that quote update atomic with the job milestone, payment ledger and domain event. A separate idempotent webhook fulfillment coordinator or a transactionally staged outbox/state machine is required to make partial fulfillment recoverable. Do not mark webhook fulfillment consistency complete solely because the helper fingerprint is implemented.
+
+### Implementation readiness
+
+- Read-only tracing is complete enough to define the helper contract, but code migration should begin only after a local checkout of the exact integration branch is available for complete call-site search and focused test execution.
+- Do not make a helper-only change that leaves production callers or tests on the old signature. Do not use a compatibility overload that permits missing bindings.
+- CI remains batched: local focused checks first; one consolidated integration CI run after the full source/test batch. No CI should be run for this plan-only update.
