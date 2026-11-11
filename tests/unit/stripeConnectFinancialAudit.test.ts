@@ -2,12 +2,12 @@ import { describe, it, expect } from "vitest";
 import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer } from "../../src/server/pricingCatalog";
 
 describe("Stripe Connect & Financial Flow Invariants", () => {
-  const checkoutDb = (ownerId: string) => ({
+  const checkoutDb = (ownerId: string, status = "active") => ({
     collection: (col: string) => ({
       doc: (id: string) => ({
         get: async () => col === "jobs" ? ({
           exists: true,
-          data: () => ({ homeownerId: ownerId, acceptedTradespersonId: "trader_999", status: "active" }),
+          data: () => ({ homeownerId: ownerId, acceptedTradespersonId: "trader_999", status }),
         }) : ({ exists: false, data: () => ({}) }),
       }),
     }),
@@ -26,7 +26,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
     ];
 
     for (const item of catalogEntries) {
-      const lineItem = await resolveAuthoritativeLineItem(item.body, "user_test_123", checkoutDb("user_test_123"));
+      const lineItem = await resolveAuthoritativeLineItem(item.body, "user_test_123", checkoutDb("user_test_123", item.body.metadata?.type === "mediation_stake" ? "disputed" : "active"));
       expect(lineItem.authoritativeAmountPence).toBe(item.expectedAmount);
       expect(lineItem.lineItem.price_data.currency).toBe("gbp");
       // Platform owns these products: NEVER client money
@@ -142,7 +142,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       amount: 0.01,
     };
 
-    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "user_test_123", checkoutDb("user_test_123"));
+    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "user_test_123", checkoutDb("user_test_123", "disputed"));
     // Server must strictly return £25.00 (2500p)
     expect(authoritative.authoritativeAmountPence).toBe(2500);
   });
