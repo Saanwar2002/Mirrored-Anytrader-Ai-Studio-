@@ -205,19 +205,23 @@ describe("refund reconciliation", () => {
     }
   });
 
-  it("does not record pending Stripe refunds as completed ledger outflows", async () => {
-    const db = createMemoryDb({ "payment_ledger/ledg_original": original });
-    await expect(recordRefund(db, {
-      refundId: "re_pending",
-      chargeId: "ch_123",
-      paymentIntentId: "pi_original",
-      originalLedgerEntryId: "ledg_original",
-      amountPence: 2500,
-      currency: "gbp",
-      stripeRefundStatus: "pending",
-    })).rejects.toThrow(ConflictError);
-    expect(db.store.has("refund_records/re_pending")).toBe(false);
-  });
+  it.each(["pending", "requires_action", "failed", "canceled", "unknown"])(
+    "does not record a Stripe refund with %s status as a completed ledger outflow",
+    async (stripeRefundStatus) => {
+      const db = createMemoryDb({ "payment_ledger/ledg_original": original });
+      await expect(recordRefund(db, {
+        refundId: `re_${stripeRefundStatus}`,
+        chargeId: "ch_123",
+        paymentIntentId: "pi_original",
+        originalLedgerEntryId: "ledg_original",
+        amountPence: 2500,
+        currency: "gbp",
+        stripeRefundStatus,
+      })).rejects.toThrow(ConflictError);
+      expect(db.store.has(`refund_records/re_${stripeRefundStatus}`)).toBe(false);
+      expect([...db.store.keys()].some((key) => key.startsWith("payment_refund_totals/"))).toBe(false);
+    }
+  );
 
   it("rejects invalid minor-unit refund amounts", async () => {
     const db = createMemoryDb({ "payment_ledger/ledg_original": original });
