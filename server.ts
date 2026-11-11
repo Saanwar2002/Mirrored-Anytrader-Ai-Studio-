@@ -3,6 +3,7 @@ import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
 import { ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
+import { createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure } from "./src/server/mediationStake.ts";
 import { evaluateCheckoutIntentBinding } from "./src/server/checkoutIntentIntegrity.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -2145,6 +2146,30 @@ async function startServer() {
             }
           }
         }
+      // Mediation stake payment lifecycle is server-authoritative and validates the reserved attempt.
+      if (event.type === "payment_intent.succeeded" || event.type === "payment_intent.payment_failed") {
+        const pi = event.data.object as Stripe.PaymentIntent;
+        const meta = pi.metadata || {};
+        if (meta.type === "mediation_stake") {
+          const isSuccess = event.type === "payment_intent.succeeded";
+          if (!meta.jobId || !meta.paymentAttemptId || !meta.userId || pi.currency !== "gbp" || pi.amount !== 2500) {
+            await db.runTransaction(async (tx: any) => {
+              const claim = await tx.get(eventRef);
+              if (!ownsStripeWebhookClaim(claim.data() || {}, claimToken)) throw new Error("Webhook claim lost before rejecting mediation payment.");
+              tx.update(eventRef, { status: "rejected", rejectionReason: isSuccess ? "invalid_mediation_stake_success_metadata_or_amount" : "invalid_mediation_stake_failure_metadata_or_amount", rejectedAt: admin.firestore.FieldValue.serverTimestamp() });
+            });
+            return res.status(400).send("Invalid mediation stake payment");
+          }
+          if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before mediation payment mutation.");
+          if (isSuccess) {
+            await confirmMediationStakePayment(db, { jobId: meta.jobId, userId: meta.userId, attemptId: meta.paymentAttemptId, paymentIntentId: pi.id, serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp() });
+          } else {
+            await recordMediationStakePaymentFailure(db, { jobId: meta.jobId, userId: meta.userId, attemptId: meta.paymentAttemptId, paymentIntentId: pi.id, paymentIntentStatus: pi.status, lastPaymentError: pi.last_payment_error?.message || "Payment attempt failed", serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp() });
+            await db.collection("failed_payments").doc(`fail_${event.id}`).set({ paymentIntentId: pi.id, lastError: pi.last_payment_error?.message || "Failed", status: "failed", createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          }
+        }
+      }
+
       // Synchronize product entitlements from the current Stripe subscription state.
       // Invoice events are triggers only: payment events never grant access by themselves.
       if (isStripeSubscriptionLifecycleEventType(event.type)) {
@@ -3043,102 +3068,29 @@ async function startServer() {
     }
   });
 
-  // Dispute Mediation Stake Stripe PaymentIntent (£25.00)
+  // Dispute Mediation Stake Stripe PaymentIntent (£25.00); never simulate payment success.
   app.post("/api/disputes/create-stake-intent", requireAuth, paymentLimiter, async (req, res) => {
+    const authUid = (req as any).user.uid;
+    const { jobId, disputeReason, technicalFaultReport, isPropertyDamage = false, photos = [] } = req.body || {};
+    if (!jobId || typeof jobId !== "string") return res.status(400).json({ error: "jobId is required" });
+    if (!db) return res.status(503).json({ error: "Database service unavailable" });
     try {
-      const authUid = (req as any).user.uid;
-      const { jobId, disputeReason, technicalFaultReport, isPropertyDamage = false, photos = [] } = req.body;
-
-      if (!jobId) {
-        return res.status(400).json({ error: "jobId is required" });
-      }
-
-      if (!db) {
-        return res.status(500).json({ error: "Database service unavailable" });
-      }
-
-      const jobDoc = await db.collection("jobs").doc(jobId).get();
-      if (!jobDoc.exists) {
-        return res.status(404).json({ error: "Job not found" });
-      }
-
-      const jobData = jobDoc.data() || {};
-      const stakeAmountPence = 2500; // £25.00
-
       let stripe;
-      try {
-        stripe = getStripe();
-      } catch (e) {
-        // Fallback for mock/dev environment
-        await db.collection("jobs").doc(jobId).update({
-          status: "disputed",
-          dispute: {
-            raisedBy: authUid,
-            reason: disputeReason || "Dispute raised",
-            technicalFaultReport: technicalFaultReport || "",
-            isPropertyDamage: Boolean(isPropertyDamage),
-            mediationStakePaid: true,
-            mediationStakeAmount: 25.00,
-            stakePaymentId: "mock_pi_stake_" + Math.random().toString(36).substring(7),
-            photos: Array.isArray(photos) ? photos : [],
-            status: "pending_arbitration",
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-          },
-          disputedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-
-        return res.json({
-          success: true,
-          mock: true,
-          amount: 25.00,
-          status: "succeeded",
-          message: "Mediation stake of £25.00 authorized successfully. Dispute is now pending arbitration."
-        });
+      try { stripe = getStripe(); }
+      catch (stripeError: any) {
+        console.error("Stripe unavailable for mediation stake:", stripeError?.message || stripeError);
+        return res.status(503).json({ error: "Payment service temporarily unavailable. Please try again shortly." });
       }
-
-      // Create real Stripe PaymentIntent
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: stakeAmountPence,
-        currency: "gbp",
-        metadata: {
-          type: "mediation_stake",
-          jobId,
-          disputeReason: disputeReason || "",
-          technicalFaultReport: technicalFaultReport || "",
-          isPropertyDamage: String(isPropertyDamage),
-          userId: authUid
-        },
-        description: `Mediation Dispute Stake for Job #${jobData.jobNo || jobId} (£25.00)`,
-        automatic_payment_methods: {
-          enabled: true
-        }
+      const result = await createMediationStakePaymentIntent(db, stripe, {
+        jobId, userId: authUid, candidateAttemptId: db.collection("payment_attempts").doc().id,
+        disputeReason, technicalFaultReport, isPropertyDamage, photos,
+        serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp()
       });
-
-      // Save pending dispute record
-      await db.collection("jobs").doc(jobId).update({
-        dispute: {
-          raisedBy: authUid,
-          reason: disputeReason || "Dispute raised",
-          technicalFaultReport: technicalFaultReport || "",
-          isPropertyDamage: Boolean(isPropertyDamage),
-          mediationStakePaid: false,
-          mediationStakeAmount: 25.00,
-          paymentIntentId: paymentIntent.id,
-          photos: Array.isArray(photos) ? photos : [],
-          status: "awaiting_payment",
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        }
-      });
-
-      res.json({
-        success: true,
-        clientSecret: paymentIntent.client_secret,
-        paymentIntentId: paymentIntent.id,
-        amount: 25.00
-      });
+      return res.json({ success: true, clientSecret: result.paymentIntent.client_secret, paymentIntentId: result.paymentIntent.id, amount: 25.00 });
     } catch (error: any) {
       console.error("Create Dispute Stake Intent Error:", error);
-      res.status(500).json({ error: error.message || "Failed to initiate mediation stake" });
+      const status = Number(error?.httpStatus) || 500;
+      return res.status(status).json({ error: status === 500 ? "Failed to initiate mediation stake" : error.message });
     }
   });
 
