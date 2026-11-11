@@ -20,6 +20,7 @@
  */
 
 import Stripe from "stripe";
+import { createHash } from "node:crypto";
 import admin from "firebase-admin";
 
 export interface DriverPayoutOrchestrationOptions {
@@ -517,7 +518,7 @@ export async function executeDriverPayoutOrchestrationCommand(
 
       // 9. Durable payout operation evidence. A prepared record is a replay barrier:
       // after a crash/ambiguous Stripe response, never issue a fresh transfer blindly.
-      const operationId = require("crypto").createHash("sha256")
+      const operationId = createHash("sha256")
         .update(`driver-payout:${rideId}:${assignedDriverId}:${transferAmountPence}`).digest("hex");
       const operationRef = db.collection("driver_payout_operations").doc(operationId);
       const priorOperation = await operationRef.get();
