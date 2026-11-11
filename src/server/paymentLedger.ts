@@ -696,6 +696,23 @@ export class PaymentLedgerEngine {
         // incomplete. Never report completion without a durable external transfer ID.
         throw new Error("Stripe returned a transfer response without a valid transfer ID; reconciliation is required.");
       }
+      // A syntactically valid ID is not sufficient: verify the returned Stripe object
+      // is the exact transfer requested before marking the ledger as paid out.
+      const returnedMetadata = transfer?.metadata || {};
+      const responseMatchesRequest =
+        transfer?.amount === netPayoutPence &&
+        String(transfer?.currency || "").toLowerCase() === "gbp" &&
+        transfer?.destination === traderStripeAccountId &&
+        returnedMetadata.jobId === jobId &&
+        returnedMetadata.quoteId === quoteId &&
+        returnedMetadata.milestoneId === (milestoneId || "m0") &&
+        returnedMetadata.traderId === traderId &&
+        returnedMetadata.releaseOperationId === idempotencyKey &&
+        returnedMetadata.stripeIdempotencyKey === stripeIdempotencyKey &&
+        returnedMetadata.operationType === "ANYTRADER_ESCROW_RELEASE";
+      if (!responseMatchesRequest) {
+        throw new Error("Stripe transfer response does not match the requested amount, currency, destination, or operation metadata; reconciliation is required.");
+      }
 
       if (db) {
         const ledgerSnap = await db
