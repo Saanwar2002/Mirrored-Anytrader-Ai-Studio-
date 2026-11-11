@@ -3955,3 +3955,40 @@ The funding webhook updates the quote milestone before invoking the ledger helpe
 - Read-only tracing is complete enough to define the helper contract, but code migration should begin only after a local checkout of the exact integration branch is available for complete call-site search and focused test execution.
 - Do not make a helper-only change that leaves production callers or tests on the old signature. Do not use a compatibility overload that permits missing bindings.
 - CI remains batched: local focused checks first; one consolidated integration CI run after the full source/test batch. No CI should be run for this plan-only update.
+
+
+## Section 160 — FIN-02 Instant Match refund-path verification (11 November 2026)
+
+### Correction to earlier PaymentIntent persistence note
+
+A branch-specific fetch of `server.ts` on `integration/pr-consolidation-20261109` shows that the Instant Match Checkout fulfillment already validates `intent.paymentIntentId` against the Stripe PaymentIntent ID pattern and persists the result as `stripePaymentIntentId` on the newly created `instant_matches/{matchId}` document. When the value is invalid or absent, the match is created in `refund_review_required` with `refundStatus: manual_review`. The earlier audit note claiming that production fulfillment omitted this field is stale; do not implement that already-present field addition again.
+
+### Current terminal no-match routing
+
+The current root-level `instantMatchWorker.ts` exports `expireAndRefundInstantMatch`. Both observed terminal no-match routes call it:
+- `initiateNextAttempt` calls it with `no_eligible_traders` when no eligible traders remain.
+- Both the snapshot listener and timeout interval call it with `attempts_exhausted` after the configured attempt limit.
+
+The function creates a durable `instant_match_refunds/{matchId}` operation record before calling Stripe, with PaymentIntent ID, locally expected amount, currency, stable idempotency key, reason and processing status. It deliberately stops if any operation record already exists, avoiding blind replay after Stripe's finite idempotency retention period. Missing PaymentIntent identity is routed to manual review. Missing Stripe client and thrown Stripe errors are routed to `reconciliation_required`. The added unit tests cover successful recording, missing PaymentIntent, ambiguous Stripe exception/no automatic replay, and completed-operation no replay.
+
+### Remaining concrete gaps
+
+1. **Stripe result is not checked against the persisted operation before success is recorded.** The create call supplies the PaymentIntent ID and metadata, but does not supply the expected amount explicitly. The returned object is not checked for its PaymentIntent, amount, currency, metadata, or a non-empty refund ID before its status/ID are copied into Firestore. A malformed or mismatched response could therefore be recorded as the operation's result.
+2. **The post-Stripe transaction is not fenced to the operation generation or immutable evidence.** It checks only that match and refund documents exist. It should compare the persisted PaymentIntent, amount, currency, idempotency key and expected processing state before writing; it must not let a stale worker overwrite a reconciled/manual-review outcome.
+3. **Existing operation records are a deliberate stop, not a recovery mechanism.** This is safe against duplicate creation but means recovery depends on an explicit reconciliation action. The read-only `inspectInstantMatchRefunds` helper scans all PaymentIntent refund pages, checks operation metadata and compares PaymentIntent/amount/currency, and reports matched/not_found/conflict. Its current unit tests cover pagination, conflict, malformed pages and invalid evidence. The audit has not yet established a complete operator workflow that maps those outcomes into a fenced durable resolution of the refund operation.
+4. **Refund amount semantics need to be made explicit.** The operation stores `chargeAmountPence`, while `stripe.refunds.create` omits `amount` and therefore requests Stripe's default full remaining refund. Confirm that the stored amount is the intended full refundable amount and is in integer safe minor units before using it as reconciliation evidence; do not infer that from a field name alone.
+5. **Checkout's invalid-PaymentIntent terminal state is outside the worker's `searching` state guard.** It is intentionally placed into manual review at creation, but tests should assert that no matching/search listener can accidentally move it back into a refundable/searching path.
+
+### Next implementation batch
+
+- Add strict local evidence validation before creating the operation: non-empty match ID, valid PaymentIntent ID, positive safe-integer pence, normalized three-letter currency, and a known full-refund semantic.
+- Persist an immutable operation fingerprint/version and a claim generation for the external call and completion write. Do not automatically retry an existing ambiguous operation.
+- Pass the explicit expected amount to Stripe only if the business rule confirms it is the intended amount; otherwise retain full-remaining semantics and record that mode explicitly.
+- Validate returned refund ID, PaymentIntent, amount, currency and operation metadata before recording a successful/processing result. Any mismatch becomes a conflict/manual-reconciliation state, never success.
+- Fence the completion transaction against the exact operation generation and expected processing state.
+- Add tests for mismatched returned PaymentIntent, amount, currency, metadata, missing refund ID, stale completion after reconciliation, and full-refund amount semantics. Extend reconciliation tests for multiple matching refunds and successful vs pending/failed Stripe statuses.
+- Verify the integration branch's local test and full call-site inventory before source edits. Batch worker, reconciliation coordinator, tests and any required caller changes together; run one consolidated CI pass only after the meaningful batch.
+
+### Verification status
+
+This section is a branch-specific read-only source/test audit. The GitHub fetch confirms the code and test contents, but no local test command was run and no CI run was started. Do not report the new tests as passing. The branch was still 464 commits ahead of `main` and 0 behind at the start of this checkpoint; the base SHA remained `4b7963c831acbb2ea6f3084f9f4d069fb772792a`. No source, test, production configuration, Firebase data, Stripe object, deployment or CI workflow was changed.
