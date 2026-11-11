@@ -4261,3 +4261,67 @@ Corrected the regression assertion to count calls on `mockStripe.transfers.creat
 The automated driver payout path now validates the Stripe Transfer response against the immutable request before writing `stripe_succeeded` evidence or finalizing the ride. Required receipt properties are a transfer ID with the Stripe transfer prefix, exact integer amount in pence, GBP currency, exact connected-account destination, and matching ride ID, driver ID and payout type in response metadata. A mismatch throws into the existing reconciliation-required/error path; it does not set `payoutTransferred` or authorize another transfer. The operation remains a replay barrier because the external request may already have succeeded despite a malformed response.
 
 The shared Stripe test fixture and successful custom transfer fixtures now return currency and metadata. Added a regression for an amount-mismatched response: ride remains unpaid for payout purposes, the operation is reconciliation-required and only one Stripe call is made. Validation is pending the complete GitHub Actions gate. No production Stripe/Firestore state was touched.
+
+
+## Section 171 — 11 November 2026 live branch and payout recovery review
+
+### Live repository checkpoint
+
+- Reconfirmed that `integration/pr-consolidation-20261109` exists.
+- Compared the current integration branch against `main`: **519 commits ahead, 0 behind**. The common ancestor remains `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- The comparison reports changes across the CI workflow, Firestore rules, server/payment code, payout orchestration, financial reconciliation, application components and regression tests. This is a broad integration candidate, not a narrow financial-only patch.
+- The comparison endpoint did not expose the integration head SHA in its response. Do not infer a head SHA from the base commit, blob SHAs or historical notes; fetch the exact branch head before recording a commit-specific CI claim.
+- PR #5 remains the draft integration review vehicle; no merge or PR mutation was performed.
+- The saved plan and current source files were read from the integration branch. No local checkout/test runner is available in this session; no local test execution is claimed.
+
+### Current payout implementation review
+
+The integration version of `src/server/driverPayoutOrchestration.ts` now:
+
+- Verifies a paid ride against a succeeded GBP PaymentIntent or an explicitly typed completed/captured `RIDE_PAYMENT` ledger receipt.
+- Acquires a token-fenced ride lease before payout.
+- Creates a deterministic `driver_payout_operations` record before calling Stripe.
+- Validates the returned Transfer ID, amount, GBP currency, destination and ride/driver/type metadata.
+- Persists the Stripe receipt before attempting ride finalization.
+- Retains an existing operation as a replay barrier and surfaces reconciliation-required status rather than blindly creating another transfer.
+
+### New finding — payout replay-barrier state write is not lease-fenced
+
+In the existing-operation branch, after `priorOperation.exists` is detected, the code calls `rideDoc.ref.update({ payoutStatus: "reconciliation_required", ... })` directly. This write does not re-read and verify the current `payoutClaimToken` in a transaction.
+
+A worker can therefore lose its lease after acquisition and then overwrite a successor's ride status when it encounters an existing operation record. This does not itself authorize a second Stripe transfer, but it violates the stale-worker state-ownership invariant and can overwrite newer operational state.
+
+**Required correction and regression:**
+
+1. Replace that direct update with a Firestore transaction that reads the ride and verifies the exact claim token before changing the ride status/error fields.
+2. If the token no longer matches, leave the successor's ride state untouched and report the operation as reconciliation-required in the result only.
+3. Add a functional concurrency regression that changes the stored token between operation lookup and the reconciliation-state write; assert the successor's status, token and error fields remain unchanged.
+4. Keep the existing no-second-Stripe-call assertion for an existing operation.
+5. Run the focused payout tests and the complete CI gate after the coherent payout recovery batch is committed.
+
+### FIN-04 / domain-event recovery remains open
+
+Reinspection of `src/server/domainEvents.ts` confirms the Section 165 concern:
+
+- Correlated events use deterministic IDs and transactional create-if-absent persistence.
+- If the event already exists, dispatch returns before invoking handlers.
+- Handler failures are logged and swallowed; there is no durable per-consumer delivery status or retry record.
+- `tests/unit/domainEventIdempotency.test.ts` currently checks source text rather than functionally simulating persistence failure, existing-event replay or consumer retry.
+
+Do not treat event-document existence as proof that consumers completed. The next FIN-04 implementation batch still needs durable per-consumer delivery state, idempotent consumer effects, replay repair for committed funding/release operations, and payout/automated-transfer evidence recovery. Keep these changes together with their functional failure-boundary tests.
+
+### FIN-02 / FIN-05 and validation status
+
+- FIN-02 refund pagination is implemented in the integration workstream, but the financial plan explicitly recorded push-triggered CI as pending at its last pagination checkpoint. Re-fetch current Actions results against the exact branch head before marking it validated.
+- FIN-05 read-only cross-operation reconciliation remains open. Implement the pure discrepancy evaluator and tests first; it must report missing, duplicate, orphaned, mismatched and over-allocated records without changing financial history or initiating money movement.
+- The current CI workflow runs the Firebase Security Rules/emulator concurrency gate, unit/penetration suite, TypeScript/lint, production build and final release audit. A green run must be tied to the exact candidate SHA.
+- No live Firebase/Stripe operation, deployment, AI Studio Pull/Push, merge, or `main` write was performed during this review.
+
+### Next execution order
+
+1. Obtain the exact integration head SHA and current Actions run/job state; do not rely on historical run numbers.
+2. Correct and functionally test the payout replay-barrier lease-fencing finding.
+3. Complete the coherent FIN-04 durable operation/event-delivery recovery batch, including the Section 165 failure matrix.
+4. Implement FIN-05 as a read-only evaluator with discrepancy fixtures.
+5. Re-run the full CI gate on the consolidated integration commit and record exact SHA, run ID, all job outcomes and evidence.
+6. Keep the integration branch as the only write target. Do not merge PR #5, change `main`, deploy, or touch production Firebase/Stripe state.
