@@ -14,6 +14,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
   let mockStripe: any;
   let createdTransfers: any[];
   let transactionMutex: Promise<any>;
+  let onOperationRead: (() => void) | undefined;
 
   const applyFieldValue = (v: any, fieldName?: string) => {
     if (v && typeof v === "object") {
@@ -32,6 +33,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     mockStore = {};
     createdTransfers = [];
     transactionMutex = Promise.resolve();
+    onOperationRead = undefined;
 
     // Helper to simulate Firestore document snapshots, queries, and atomic transactions
     mockDb = {
@@ -92,10 +94,13 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
           const path = `${colName}/${id}`;
           return {
             id,
-            get: async () => ({
-              exists: !!mockStore[path],
-              data: () => (mockStore[path] ? { ...mockStore[path] } : undefined),
-            }),
+            get: async () => {
+              if (colName === "driver_payout_operations") onOperationRead?.();
+              return {
+                exists: !!mockStore[path],
+                data: () => (mockStore[path] ? { ...mockStore[path] } : undefined),
+              };
+            },
             update: async (fields: any) => {
               if (!mockStore[path]) mockStore[path] = {};
               for (const [k, v] of Object.entries(fields)) {
@@ -872,6 +877,37 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(createdTransfers).toHaveLength(0); // custom mockImplementation bypasses the default receipt recorder
   });
 
+
+  it("existing payout operation does not let a stale worker overwrite successor ride state", async () => {
+    const rideId = "ride_existing_operation_stale_worker";
+    const operationId = "660f36fcfeb323f6d0d480741cdf45c05d24d9fb8078cee904685507df3a642c";
+    mockStore[`ride_requests/${rideId}`] = {
+      status: "completed", paymentStatus: "paid", payoutTransferred: false,
+      finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+    mockStore[`driver_payout_operations/${operationId}`] = {
+      operationId, rideId, driverId: "driver_legit", amountPence: 4400,
+      currency: "gbp", status: "prepared", idempotencyKey: "existing-operation",
+    };
+    onOperationRead = () => {
+      const ride = mockStore[`ride_requests/${rideId}`];
+      ride.payoutClaimToken = "successor_claim";
+      ride.payoutStatus = "processing";
+      ride.payoutLastError = "successor-owned diagnostic";
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+    const ride = mockStore[`ride_requests/${rideId}`];
+
+    expect(result.failedCount).toBe(1);
+    expect(result.details.some((detail) => detail.status === "reconciliation_required")).toBe(true);
+    expect(ride.payoutClaimToken).toBe("successor_claim");
+    expect(ride.payoutStatus).toBe("processing");
+    expect(ride.payoutLastError).toBe("successor-owned diagnostic");
+    expect(ride.payoutTransferred).toBe(false);
+    expect(mockStripe.transfers.create).not.toHaveBeenCalled();
+  });
 
   it("rejects a Stripe transfer receipt that does not match requested amount and fences replay", async () => {
     mockStore["ride_requests/ride_bad_transfer_receipt"] = {
