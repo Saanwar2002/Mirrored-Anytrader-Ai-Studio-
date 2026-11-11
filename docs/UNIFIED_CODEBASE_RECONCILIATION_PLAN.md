@@ -3870,3 +3870,34 @@ Implement Phase A calculator + unit tests on integration branch only. Repository
 - This section records a deeper read-only call-site/test audit. No source or test code was changed, and no tests, lint, build, emulator, or CI jobs were run.
 - The currently fetched integration branch compare still reports 460 commits ahead of `main` and 0 behind. `main` remains untouched.
 - FIN-04 is still open. Do not claim idempotency binding is fixed until the helper, every production caller and all direct test callers have been migrated and verified together.
+
+
+## Section 157 — FIN-04 replay-binding edge cases and CI budget policy (11 November 2026)
+
+### Additional source findings
+
+- The current helper's db === null development fallback executes the supplied executor directly. Any binding contract added to the database-backed claim path must still validate required binding fields before this fallback; otherwise tests or non-production callers could silently exercise an unbound financial operation.
+- The storage document currently uses the caller-provided idempotency key directly as the Firestore document ID. The FIN-04 implementation should derive a deterministic storage ID from a cryptographic hash of the caller key, while retaining the stable caller key only where the business operation / Stripe key derivation requires it. Do not log or expose raw caller keys.
+- recordEscrowFunding is invoked from the verified Stripe webhook path and from focused payment-authority tests. Its binding must describe the verified payment facts (job, milestone, customer, trader, amount in minor units, normalized currency and PaymentIntent ID); it must not trust an unrelated client actor.
+- releaseEscrowFunds is invoked by the canonical release route and several method-level tests. The binding must include authenticated caller, job, quote, milestone and canonical authorization mode. QR secret material itself must never be stored in the fingerprint; bind only the authorization mode and resource identity. The authoritative amount/payee remain read from Firestore in the release transaction and must be checked there.
+- Driver payout needs a server-verified driver record and connected account before the helper can return a cached response. Normalize an explicit requested amount to integer pence before claiming. For “all available”, bind the semantic mode (full available balance) plus account and driver, then preserve the Stripe idempotency key; do not bind an unvalidated client amount or accidentally turn a later changed balance into a different request without an explicit new key.
+- The payment-ledger unit fixture's hard-coded test_key_1 transaction reference prevents meaningful multi-key adversarial tests. Replace it with document-reference-aware map operations before relying on cross-key or cross-binding coverage.
+
+### Required implementation gate
+
+Before changing production callers, define one versioned canonical binding schema and a deterministic serializer. Validate actor/resource identity, operation-specific currency and either a safe integer minor-unit amount or a canonical payload digest. Compare the fingerprint before cached replay and before stale-lease takeover. Reject legacy records without a fingerprint rather than silently replaying them. Keep claim-token fencing, Stripe's independent stable idempotency key and explicit reconciliation for ambiguous external outcomes.
+
+### CI budget policy (user-requested)
+
+- Batch related source and test changes into one coherent implementation set.
+- Run focused local checks first where an executable checkout is available.
+- Do not trigger CI after each small commit or for documentation-only commits.
+- Run one consolidated integration CI pass after a meaningful implementation batch, then verify the exact commit and workflow results before marking the item complete.
+- Reuse results only when they apply to the exact commit and workflow. Empty PR-only workflow/status responses do not establish that push-triggered CI passed or failed.
+- Never claim tests or CI passed unless the execution result is actually available and verified.
+
+### Current branch checkpoint
+
+- Live compare against main reports integration/pr-consolidation-20261109 is **461 commits ahead and 0 behind**; base SHA is 4b7963c831acbb2ea6f3084f9f4d069fb772792a. This supersedes Section 156's 460-ahead observation.
+- main was not modified. No application source, tests, Firebase data, Stripe object, deployment or CI workflow was changed or run in this documentation checkpoint.
+- FIN-04 remains open. Next implementation batch is the helper contract + all production call sites + migrated direct-helper tests and adversarial replay matrix; validate the complete batch before triggering one consolidated integration CI run.
