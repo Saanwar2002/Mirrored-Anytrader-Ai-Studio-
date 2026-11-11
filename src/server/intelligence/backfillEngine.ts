@@ -354,17 +354,11 @@ export class ControlledBackfillEngine {
       if (typeof query.orderBy === 'function') {
         query = query.orderBy('__name__');
       }
-      if (effectiveCursor) {
-        const cursorDoc = await firestoreDb.collection(targetCollection).doc(effectiveCursor).get();
-        if (cursorDoc && cursorDoc.exists) {
-          query = query.startAfter(cursorDoc);
-        } else if (typeof query.startAfter === 'function') {
-          try {
-            query = query.startAfter(effectiveCursor);
-          } catch {
-            // startAfter with string id fallback if supported
-          }
-        }
+      if (effectiveCursor && typeof query.startAfter === 'function') {
+        // With orderBy('__name__'), use the document ID as the cursor value.
+        // Fetching a snapshot here is unnecessary and can produce inconsistent
+        // resume behavior across Firestore emulator/client implementations.
+        query = query.startAfter(effectiveCursor);
       }
 
       // Bound the resumed page after applying its cursor checkpoint.
