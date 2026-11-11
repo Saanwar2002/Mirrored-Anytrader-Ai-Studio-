@@ -49,6 +49,7 @@ export interface RefundLedgerEntry {
   direction: "outflow";
   stripeRefundId: string;
   stripeChargeId: string;
+  operationId?: string;
   reversalOfEntryId: string;
   createdAt: string;
 }
@@ -175,6 +176,21 @@ export async function recordConfirmedRefund(
       ) {
         throw new ConflictError("Stripe refund ID already exists with conflicting payment details.");
       }
+      if (operationId) {
+        if (!operationSnap?.exists) {
+          throw new NotFoundError("The reserved refund operation was not found for an existing refund.");
+        }
+        const replayOperation = operationSnap.data();
+        if (
+          replayOperation.paymentIntentId !== paymentIntentId ||
+          replayOperation.requestedAmountPence !== amountPence ||
+          String(replayOperation.currency || "").toLowerCase() !== currency ||
+          replayOperation.status !== "succeeded" ||
+          replayOperation.stripeRefundId !== refundId
+        ) {
+          throw new ConflictError("Existing refund is not linked to the supplied succeeded refund operation.");
+        }
+      }
       if (!originalSnap.exists) {
         throw new ConflictError("Original payment ledger entry is missing for an existing refund.");
       }
@@ -247,9 +263,10 @@ export async function recordConfirmedRefund(
         operation.paymentIntentId !== paymentIntentId ||
         operation.requestedAmountPence !== amountPence ||
         String(operation.currency || "").toLowerCase() !== currency ||
-        (operation.stripeRefundId && operation.stripeRefundId !== refundId)
+        (operation.stripeRefundId && operation.stripeRefundId !== refundId) ||
+        !["pending", "submitted", "requires_review"].includes(operation.status)
       ) {
-        throw new ConflictError("Refund operation does not match the confirmed Stripe refund.");
+        throw new ConflictError("Refund operation does not match an eligible confirmed Stripe refund.");
       }
     }
 
@@ -270,6 +287,7 @@ export async function recordConfirmedRefund(
       direction: "outflow",
       stripeRefundId: refundId,
       stripeChargeId: chargeId,
+      ...(operationId ? { operationId } : {}),
       reversalOfEntryId: originalLedgerEntryId,
       createdAt: new Date().toISOString(),
     };

@@ -202,6 +202,66 @@ describe("refund reconciliation", () => {
     expect(operation.status).toBe("succeeded");
     expect(operation.stripeRefundId).toBe("re_instant_match");
     expect(operation.confirmedAmountPence).toBe(299);
+    expect(db.store.get("refund_records/re_instant_match").operationId).toBe("instant_match_match_1");
+  });
+
+
+  it("rejects a refund replay linked to a different operation", async () => {
+    const db = createMemoryDb({ "payment_ledger/ledg_original": original });
+    await reserveRefundOperation(db, {
+      operationId: "operation_original",
+      paymentIntentId: "pi_original",
+      requestedAmountPence: 500,
+      currency: "gbp",
+    });
+    await recordRefund(db, {
+      refundId: "re_operation_bound",
+      chargeId: "ch_123",
+      paymentIntentId: "pi_original",
+      originalLedgerEntryId: "ledg_original",
+      amountPence: 500,
+      currency: "gbp",
+      operationId: "operation_original",
+    });
+    await reserveRefundOperation(db, {
+      operationId: "operation_other",
+      paymentIntentId: "pi_original",
+      requestedAmountPence: 500,
+      currency: "gbp",
+    });
+    await expect(recordRefund(db, {
+      refundId: "re_operation_bound",
+      chargeId: "ch_123",
+      paymentIntentId: "pi_original",
+      originalLedgerEntryId: "ledg_original",
+      amountPence: 500,
+      currency: "gbp",
+      operationId: "operation_other",
+    })).rejects.toThrow(ConflictError);
+  });
+
+  it("does not allow a failed refund operation to be promoted to succeeded", async () => {
+    const db = createMemoryDb({ "payment_ledger/ledg_original": original });
+    await reserveRefundOperation(db, {
+      operationId: "operation_failed",
+      paymentIntentId: "pi_original",
+      requestedAmountPence: 500,
+      currency: "gbp",
+    });
+    db.store.set("refund_operations/operation_failed", {
+      ...db.store.get("refund_operations/operation_failed"),
+      status: "failed",
+    });
+    await expect(recordRefund(db, {
+      refundId: "re_failed_operation",
+      chargeId: "ch_123",
+      paymentIntentId: "pi_original",
+      originalLedgerEntryId: "ledg_original",
+      amountPence: 500,
+      currency: "gbp",
+      operationId: "operation_failed",
+    })).rejects.toThrow(ConflictError);
+    expect(db.store.has("refund_records/re_failed_operation")).toBe(false);
   });
 
   it("prevents cumulative partial refunds from exceeding the original payment", async () => {
