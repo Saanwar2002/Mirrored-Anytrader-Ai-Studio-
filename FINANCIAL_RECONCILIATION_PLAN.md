@@ -227,3 +227,13 @@ This section supersedes the older "Stage 3B remediation: Not started" status abo
 - All code/documentation changes in this progress section are on `integration/pr-consolidation-20261109`.
 - No merge, deployment, production Firebase mutation, live Stripe financial operation, or AI Studio Pull/Push was performed.
 - No local test execution is claimed. CI status is cited per exact commit above; newer pending commits remain unverified.
+
+### FIN-02 — Charge refund webhook pagination — 11 November 2026
+
+- The `charge.refunded` and `refund.updated` paths now retrieve the complete Charge refund collection through Stripe's `refunds.list({ charge, limit: 100, starting_after })` API rather than relying on the embedded Charge expansion or processing only the triggering refund.
+- Added `src/server/stripeRefundPagination.ts` to follow every cursor, deduplicate repeated refund IDs, and fail closed on malformed pages, missing IDs, non-advancing cursors or conflicting financial details for a repeated ID. A Stripe retrieval failure propagates so the webhook is not marked complete against an incomplete page set.
+- Each returned refund is checked against the exact Charge ID, PaymentIntent ID and currency before ledger reconciliation. The event records the number of pages scanned. A stale pagination-only review marker is cleared only after the complete list has been fetched.
+- Added focused tests in `tests/unit/stripeRefundPagination.test.ts` for multi-page retrieval, cursor use, duplicate handling, conflicting duplicate details, malformed responses and non-advancing pagination.
+- Integration-branch commits: `3a15d55a0dac65cce8f5f9e579d99910cd830f02`, `0470442f1854c0792469a94262029a4df6615b9f`, `d78f3b39673d26d958a83f7ac7ef024104cb2a58`, `5a191b29880c83f8f7dea5ab150886f3f23b10ef`, `c8d0039d699f8138c54d469d93ad8a7845929466`.
+- **Verification pending:** no local test execution is claimed. The latest commit's combined status endpoint currently returns no status checks; the push-triggered CI result must be checked before treating this remediation as verified. No live Stripe/Firebase operation was performed.
+
