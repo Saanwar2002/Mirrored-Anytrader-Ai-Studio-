@@ -354,8 +354,6 @@ export class ControlledBackfillEngine {
       if (typeof query.orderBy === 'function') {
         query = query.orderBy('__name__');
       }
-      query = query.limit(batchSize);
-
       if (effectiveCursor) {
         const cursorDoc = await firestoreDb.collection(targetCollection).doc(effectiveCursor).get();
         if (cursorDoc && cursorDoc.exists) {
@@ -368,6 +366,9 @@ export class ControlledBackfillEngine {
           }
         }
       }
+
+      // Bound the resumed page after applying its cursor checkpoint.
+      query = query.limit(batchSize);
 
       const snapshot = await query.get();
 
