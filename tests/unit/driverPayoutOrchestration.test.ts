@@ -162,6 +162,8 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
             id: `tr_test_${Date.now()}_${createdTransfers.length}`,
             amount: payload.amount,
             destination: payload.destination,
+            currency: payload.currency,
+            metadata: payload.metadata,
           };
         }),
       },
@@ -538,6 +540,8 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
         id: "tr_interrupted_123",
         amount: payload.amount,
         destination: payload.destination,
+        currency: payload.currency,
+        metadata: payload.metadata,
       };
     });
 
@@ -866,6 +870,28 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(retry.details.some((detail) => detail.status === "reconciliation_required")).toBe(true);
     expect(mockStripe.transfers.create).toHaveBeenCalledTimes(1); // one successful external effect; replay was fenced
     expect(createdTransfers).toHaveLength(0); // custom mockImplementation bypasses the default receipt recorder
+  });
+
+
+  it("rejects a Stripe transfer receipt that does not match requested amount and fences replay", async () => {
+    mockStore["ride_requests/ride_bad_transfer_receipt"] = {
+      status: "completed", paymentStatus: "paid", payoutTransferred: false,
+      finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+    mockStripe.transfers.create.mockImplementationOnce(async (payload: any) => ({
+      id: "tr_mismatched_receipt", amount: payload.amount - 1,
+      currency: payload.currency, destination: payload.destination, metadata: payload.metadata,
+    }));
+    const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+    const ride = mockStore["ride_requests/ride_bad_transfer_receipt"];
+    const operationId = Object.keys(mockStore).find((key) => key.startsWith("driver_payout_operations/"));
+    expect(result.processedCount).toBe(0);
+    expect(result.failedCount).toBe(1);
+    expect(ride.payoutTransferred).toBe(false);
+    expect(ride.payoutStatus).toBe("failed");
+    expect(mockStore[operationId!].status).toBe("reconciliation_required");
+    expect(mockStripe.transfers.create).toHaveBeenCalledTimes(1);
   });
 
 });
