@@ -3992,3 +3992,33 @@ The function creates a durable `instant_match_refunds/{matchId}` operation recor
 ### Verification status
 
 This section is a branch-specific read-only source/test audit. The GitHub fetch confirms the code and test contents, but no local test command was run and no CI run was started. Do not report the new tests as passing. The branch was still 464 commits ahead of `main` and 0 behind at the start of this checkpoint; the base SHA remained `4b7963c831acbb2ea6f3084f9f4d069fb772792a`. No source, test, production configuration, Firebase data, Stripe object, deployment or CI workflow was changed.
+
+
+## Section 161 — FIN-04 release failure fencing and payment aggregate integrity (11 November 2026)
+
+### Branch-specific source confirmation
+
+Reviewed `server.ts` lines 4891–5050 and `src/server/paymentLedger.ts` lines 467–620 at integration head `1811b23bd0cf6d11d7c09c28cb227762db6a83a5`.
+
+1. **Definite-failure rollback is not operation-fenced.** The `transferStatus === "failed"` route transaction finds the milestone by ID only; unlike the ambiguous-outcome path, it does not require `m.releaseOperationId === idempotencyKey`. A stale preflight failure can reset a later release's milestone to `funded`, set `releaseStatus: failed`, and clear its operation key.
+2. **Job aggregate is overwritten, not recomputed.** That same failure transaction unconditionally writes job `paymentStatus: funded` and `isPaid: false`, even if another milestone has already been released or the job is otherwise partially/fully paid. This can corrupt aggregate state and mislead the existing JobDetails payment badge.
+3. **Stripe response is trusted too broadly.** `executeStripeEscrowTransfer` reads `transfer?.id` but returns `completed` without requiring a valid transfer ID or checking response amount, currency, destination, or release metadata against the request. A malformed/mismatched response must not become a completed payout.
+4. **Ledger selection is ambiguous.** Success and exception handling query `payment_ledger` by caller `idempotencyKey` and update the first result. The release transaction already returns `ledgerEntryId`; the transfer side effect should carry and update that exact entry, verify its operation/resource/payee/amount and expected state, and use a fenced state transition.
+5. **Skip states are not consistently safe.** Non-destination skips (`skipped_no_trader`, `skipped_no_stripe`, `skipped_mock_account`) fall through the route's normal response/notification path. They must be explicit non-success outcomes; only `skipped_destination_charge` is a valid completed settlement path where the destination charge itself is authoritative.
+6. **Ambiguous-vs-definite boundary must stay strict.** Only a preflight condition proven to happen before Stripe invocation may release the milestone claim for retry. Once a Stripe request has been attempted, exceptions/timeouts remain reconciliation-required and keep the original operation locked.
+
+### Required implementation and test changes
+
+- Fence every release status mutation (success, definite failure, reconciliation) by quote + milestone + exact release operation ID and expected current status/generation.
+- Replace unconditional job payment-flag writes with a transaction-safe aggregate recomputation from authoritative milestone/quote/ledger states; define paid/funded/released semantics explicitly. Never infer aggregate paid from one milestone.
+- Pass the exact `ledgerEntryId` returned by `releaseEscrowFunds` to the transfer executor; reject missing or mismatched entry and transition only that entry from its expected state.
+- Validate Stripe transfer response identity and request facts (non-empty `tr_...` ID, amount, GBP currency, destination account, and metadata/release operation identity). A mismatch is conflict/manual reconciliation, not completed.
+- Return and handle every transfer status exhaustively. Make the route/UI and `formatReleaseNotification` distinguish completed destination charge, completed transfer, failed preflight, ambiguous outcome, and non-production skip; never toast/label a skip as paid.
+- Add regressions: stale failed operation versus newer release key; concurrent/other milestone aggregate preservation; already-paid job stays paid after one failure; exact ledger row updated; absent/malformed/mismatched Stripe transfer response; each skip state; destination-charge special case; ambiguous exception never unlocks.
+- Preserve Firestore rules that deny client-side financial field mutation. Manual payment confirmation remains a separate server-authoritative, auditable action—not a rules relaxation or a Stripe-verified claim.
+
+### Checkpoint / safety
+
+- Integration branch head verified unchanged at `1811b23bd0cf6d11d7c09c28cb227762db6a83a5`; this audit made no application/test changes and did not run CI.
+- The preceding CI run #895 is green for that exact snapshot, but it does not remediate these source-level findings.
+- This remains a read-only audit. Implement release executor, route fencing, aggregate recomputation, UI/notification status handling and their tests together in the consolidated source/test batch; then run the agreed single full CI gate.
