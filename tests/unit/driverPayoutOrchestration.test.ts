@@ -635,10 +635,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
 
     expect(result2.processedCount).toBe(0);
     expect(result2.details.some((d) => d.status === "reconciliation_required")).toBe(true);
-    expect(createdTransfers.length).toBe(0);
-    expect(createdTransfers[0].requestOptions.idempotencyKey).toBe(
-      "payout:ride:ride_retry_key:driver_legit:4400"
-    );
+    expect(createdTransfers).toHaveLength(0); // Stripe was called once and rejected; no successful transfer receipt exists
     expect(mockStore["ride_requests/ride_retry_key"].payoutTransferred).toBe(false);
     expect(mockStore["ride_requests/ride_retry_key"].payoutStatus).toBe("reconciliation_required");
   });
@@ -861,7 +858,10 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(operation).toBeDefined();
     expect(operation.status).toBe("stripe_succeeded");
     expect(operation.stripeTransferId).toBe("tr_ambiguous_456");
-    // A later worker sees the durable operation barrier and does not call Stripe again.
+    // Simulate the successor lease expiring and the ride returning to the eligible queue.
+    // The next worker must encounter the durable operation barrier before Stripe.
+    ride.payoutStatus = "completed";
+    ride.payoutLockedAt = Date.now() - PAYOUT_LEASE_DURATION_MS - 1000;
     const retry = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
     expect(retry.details.some((detail) => detail.status === "reconciliation_required")).toBe(true);
     expect(createdTransfers).toHaveLength(1);

@@ -4237,3 +4237,13 @@ The operation record is an evidence barrier, not yet a complete reconciliation/r
 - Extended the existing successful-Stripe/lost-lease test to assert durable transfer evidence and that a subsequent orchestration invocation is blocked without a second Stripe call.
 - The implementation and test changes are committed on `integration/pr-consolidation-20261109`; CI must pass before this checkpoint is treated as validated.
 - Remaining FIN-04 and payout reconciliation work: reconcile prepared/ambiguous operations with complete Stripe transfer search, verify exact amount/currency/destination/metadata, operator-fenced finalization, and test Firestore write failure after Stripe success. Preserve `main`, production services and draft PR #5 unchanged.
+
+
+## Section 168 — Payout replay-barrier regression tests corrected (11 November 2026)
+
+CI run 43089809704 passed the Firebase Security Rules and real Firestore emulator concurrency gate but reported two failures in the payout orchestration test file (1,252 passing tests overall). Both were test expectation/setup defects rather than observed production-code regressions:
+
+- The Stripe-rejection test asserted against `createdTransfers[0]` despite explicitly expecting zero successful transfer receipts. Removed the invalid dereference; the mock records only successful returns, and the test continues to assert no automatic replay, reconciliation-required state and no payout flag.
+- The lost-lease test attempted a second orchestration while its simulated successor still held a processing ride, which is excluded by the completed-ride query. It now models the successor lease expiring and the ride re-entering the eligible queue; that invocation must hit the durable operation barrier and remain blocked before any second Stripe transfer.
+
+This checkpoint is a test-only correction. No payout safety invariant is relaxed: an existing prepared/Stripe-success operation still prevents blind replay. Re-run the full CI gate and retain the Firestore emulator result.
