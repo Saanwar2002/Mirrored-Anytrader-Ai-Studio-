@@ -586,6 +586,19 @@ export async function executeDriverPayoutOrchestrationCommand(
               idempotencyKey,
             }
           );
+          // Validate the returned receipt against the immutable request before treating it as
+          // confirmed payout evidence. A malformed/mismatched response is ambiguous: keep the
+          // prepared operation as a replay barrier and require reconciliation.
+          if (
+            !transfer || typeof transfer.id !== "string" || !transfer.id.startsWith("tr_") ||
+            transfer.amount !== transferAmountPence || transfer.currency !== "gbp" ||
+            transfer.destination !== stripeAccountId || !transfer.metadata ||
+            transfer.metadata.rideId !== rideId ||
+            transfer.metadata.driverId !== assignedDriverId ||
+            transfer.metadata.type !== "orchestrated_driver_payout"
+          ) {
+            throw new Error("STRIPE_TRANSFER_RECEIPT_MISMATCH");
+          }
           stripeTransferId = transfer.id;
           // Persist the external-effect receipt before attempting ride finalization.
           await operationRef.set({
