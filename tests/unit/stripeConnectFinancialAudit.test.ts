@@ -229,7 +229,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
         quoteId: "quote_override_1",
         milestoneId: "m_custom"
       }
-    }, "cust_override", mockDbWithAdminOverrides);
+    }, "homeowner_user", mockDbWithAdminOverrides);
     expect(milestoneResult.authoritativeAmountPence).toBe(100000); // £1,000.00
     // 2% of £1,000 = £20.00 (2000p)
     expect(milestoneResult.paymentIntentData?.application_fee_amount).toBe(2000);
