@@ -4193,3 +4193,30 @@ The present dispatcher provides a useful deterministic audit-record identity, bu
 - The current workflow does not provide a local checkout/test runner; do not claim local tests until a real checkout is available and the commands are executed.
 - Once the full batch is ready, run focused tests where available, commit the complete batch to `integration/pr-consolidation-20261109` only, then run one full CI suite against that consolidated commit. Wait for completion, inspect every failed step, fix in a coherent follow-up batch and rerun full CI. Record exact SHA, run ID and result here.
 - Do not create another branch, modify `main`, merge PR #5, deploy, touch production Firebase/Stripe state, or weaken security rules/tests.
+
+
+## Section 166 — Post-Section-165 CI and integration-branch checkpoint
+
+### Verified state
+
+- Section 165 documentation commit: `d9acc7b5897120768a42383b781a1132224d7f66`.
+- Full CI run #927 completed successfully for that commit: [run #927](https://github.com/Saanwar2002/AnyTrader/actions/runs/43076492674). All substantive gates passed: Firebase Security Rules and real Firestore emulator concurrency, unit and penetration tests, TypeScript/lint, production build, and final release audit.
+- Integration branch comparison against `main`: 497 commits ahead, 0 behind; merge base `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- PR #5 remains open, draft and unmerged, with base `integration/pr-consolidation-20261109`. It has not been merged or modified by this work.
+- This checkpoint makes no application/test changes and does not imply FIN-04 has been fixed.
+
+### Next execution gate
+
+The analysis has converged on a single coherent implementation batch rather than isolated patches. Before editing production code, the batch must include:
+
+1. A durable operation-state model and typed outcomes for pre-effect definite failure, ambiguous external attempt, confirmed external success/local persistence failure, and post-commit event-delivery failure.
+2. Safe stale-claim handling: elapsed time alone cannot authorize a second side effect; retain operation identity and reconcile possibly-attempted operations.
+3. Funding and release replay paths that repair the deterministic audit event without repeating the committed ledger transition.
+4. Durable, per-consumer event delivery state. Existing-event replay must not blindly rerun completed/non-idempotent handlers.
+5. Driver Stripe payout response validation and durable evidence before event delivery; event failure must not release the claim or authorize another payout.
+6. Automated ride-transfer evidence persistence and reconciliation-required handling after confirmed Stripe success, including lease-loss recovery.
+7. Functional tests for every failure boundary listed in Section 165, while preserving current authorization, security rules and stale-worker fencing.
+
+The available GitHub workflow can inspect and commit repository files, but this session has no verified local checkout/test runner. Therefore no application-code batch is being represented as tested or safe to merge at this checkpoint. Do not substitute source-text assertions for functional failure/retry tests. Obtain a real checkout/test execution path before implementation, then keep the complete code/test batch on this integration branch and run one full CI cycle after the consolidated commit.
+
+Continue with the integration branch only. Do not create another branch, change `main`, merge PR #5, deploy, or touch production Firebase/Stripe state.
