@@ -4136,3 +4136,60 @@ The helper's common catch path (around lines 126–138) deletes the current clai
 - No local checkout/test runner is available in this workflow; no local tests are claimed.
 - FIN-04 remains open. The green #925 run validates the documentation-only commit, not these unimplemented recovery requirements.
 - Continue on `integration/pr-consolidation-20261109` only. Do not create another branch, merge PR #5, modify `main`, deploy, change production Firebase/Stripe state, or weaken security rules.
+
+
+## Section 165 — Domain-event persistence versus handler-delivery recovery
+
+### Verification checkpoint
+
+- Reviewed the current integration-branch implementations of `src/server/domainEvents.ts` and `src/server/paymentLedger.ts` at the Section 164 follow-up snapshot.
+- CI run #926 for commit `bf79d387c7013b65dbcfa3b3ae6a72fb0db32b28` completed successfully: [run #926](https://github.com/Saanwar2002/AnyTrader/actions/runs/43073817157). Firebase security/emulator concurrency, unit/penetration tests, TypeScript/lint, production build and final release audit all passed.
+- This is still a documentation checkpoint. No application code, test code, production configuration, Firebase data, Stripe object, deployment, or workflow was changed. FIN-04 remains unresolved.
+
+### Confirmed dispatcher behavior
+
+1. Correlated events derive a deterministic ID from event type, aggregate ID and correlation ID: `evt_` plus the first 32 hexadecimal characters of the SHA-256 digest.
+2. When Firestore transaction support is available, the dispatcher transactionally checks `domain_events/{eventId}`; if the document already exists it returns immediately, otherwise it writes the event.
+3. A Firestore persistence error for a correlated event is rethrown to the caller. Therefore the caller can observe an event-persistence failure after its business-state transaction has already committed.
+4. The existing-document path returns before registered handlers are invoked. Re-dispatching an already-persisted event does not retry its handlers.
+5. Registered handlers are invoked sequentially only after a newly persisted event (or after the non-transactional path), but handler exceptions are caught and logged rather than propagated. The dispatcher therefore treats a persisted audit record as success even when one or more in-process handlers fail.
+6. The current `tests/unit/domainEventIdempotency.test.ts` coverage is source-inspection/string-assertion based for key implementation details. It does not functionally simulate a failed persistence attempt followed by successful deterministic-ID recovery, nor a handler failure followed by a delivery retry.
+
+### Required semantic distinction
+
+The next implementation must not conflate these separate guarantees:
+
+- **Business transition committed:** the authoritative ledger/milestone/quote or Stripe operation has a durable outcome.
+- **Audit event persisted:** the deterministic domain-event document exists exactly once.
+- **Event consumers processed:** each required downstream handler/consumer has durably completed its work, or is explicitly pending/retryable.
+
+The present dispatcher provides a useful deterministic audit-record identity, but it does not provide durable per-handler delivery. A duplicate dispatch after the audit document exists currently short-circuits handlers; a handler exception is logged and forgotten. Consequently, “event document exists” cannot be used as proof that all event-driven work completed.
+
+### Design direction for the consolidated FIN-04 batch
+
+- Preserve the current deterministic event identity so event persistence retries cannot create duplicate audit records.
+- Make the already-committed funding and release paths call an explicit event-repair operation on replay, rather than skipping dispatch solely because the business transition is already committed.
+- Separate event-document creation from consumer delivery. If handlers perform required side effects, introduce a durable outbox/consumer-delivery record (or equivalent durable dispatch state) with stable event and consumer identities, attempt metadata, and retryable status. Consumer effects must themselves be idempotent.
+- Do not simply invoke all handlers again whenever an existing event is encountered: that would risk duplicating non-idempotent side effects. The dispatcher needs per-consumer completion/idempotency semantics before redelivery is safe.
+- Handler delivery failure must remain visible as pending/retryable operational work without rolling back or misclassifying an already-committed ledger transition or successful Stripe payout.
+- Driver payout recovery must persist and validate Stripe payout evidence before event delivery; a missing/failed event delivery must never authorize a second payout create.
+- Ride-transfer recovery from Sections 162–164 remains in scope: persist transfer evidence and reconciliation state independently of event delivery and preserve lease fencing.
+
+### Required functional regression matrix
+
+1. **Correlated event persistence failure:** force the first Firestore write/transaction to fail, retry the same event identity, assert one durable event document and no duplicate audit record.
+2. **Committed release + event persistence failure:** commit release state, fail event persistence, replay the same release operation, and assert the missing event is repaired without a second ledger/release effect.
+3. **Committed funding + event persistence failure:** commit funding state/ledger row, fail event persistence, replay, and assert deterministic event repair without duplicate funding/ledger effects.
+4. **Existing event + failed consumer:** persist event, make one consumer fail, retry delivery, and assert that only the incomplete consumer is retried while completed consumers are not repeated.
+5. **Consumer idempotency:** simulate worker restart/retry around a consumer side effect and prove the consumer's stable identity prevents duplicate effects.
+6. **Stripe payout + event delivery failure:** confirm payout response/evidence is durably recorded, fail event persistence or consumer delivery, retry the operation, and assert no second Stripe payout create.
+7. **Automated transfer + finalization failure:** assert transfer ID and binding evidence survive a Firestore finalization failure and a subsequent invocation reconciles rather than creating a second transfer.
+8. **Expired possibly-attempted claim:** age an in-progress operation beyond the lease threshold and prove age alone cannot authorize re-execution of an external effect.
+9. **Stale worker fencing:** prove a superseded worker cannot overwrite a successor's claim, financial state, event status or reconciliation evidence.
+
+### Implementation gate and branch discipline
+
+- Treat the typed idempotency outcome contract, durable operation evidence, event outbox/consumer-delivery semantics, all three generic-helper callers, automated ride-transfer recovery, and functional regressions as one coherent code/test batch.
+- The current workflow does not provide a local checkout/test runner; do not claim local tests until a real checkout is available and the commands are executed.
+- Once the full batch is ready, run focused tests where available, commit the complete batch to `integration/pr-consolidation-20261109` only, then run one full CI suite against that consolidated commit. Wait for completion, inspect every failed step, fix in a coherent follow-up batch and rerun full CI. Record exact SHA, run ID and result here.
+- Do not create another branch, modify `main`, merge PR #5, deploy, touch production Firebase/Stripe state, or weaken security rules/tests.
