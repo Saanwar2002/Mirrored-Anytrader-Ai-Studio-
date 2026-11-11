@@ -1635,6 +1635,16 @@ async function startServer() {
     message: { error: "Too many postcode lookups, please try again after a minute" },
   });
   
+  // QR handshake PINs are low entropy: constrain release attempts independently of the
+  // high-capacity general API limiter. Persistent per-job lockout is an additional control.
+  const handshakeLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    keyGenerator: limitKeyGenerator,
+    validate: false,
+    message: { error: "Too many escrow release attempts. Please wait 15 minutes." },
+  });
+
   const reviewLimiter = rateLimit({
     windowMs: 1 * 60 * 1000,
     max: 10,
@@ -4888,7 +4898,7 @@ async function startServer() {
   });
 
   // Server-Authoritative Milestone Release Route & QR Handshake (V6 Hardened)
-  app.post("/api/release-milestone", requireAuth, async (req, res) => {
+  app.post("/api/release-milestone", requireAuth, handshakeLimiter, async (req, res) => {
     try {
       const { jobId, quoteId, milestoneId, isQrHandshake } = req.body;
       const handshakeCode = req.body.handshakeCode || req.body.pin || req.body.verificationPin;
