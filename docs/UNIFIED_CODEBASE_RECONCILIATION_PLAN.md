@@ -4056,3 +4056,37 @@ Reviewed the branch versions of `server.ts`, `src/server/paymentLedger.ts`, and 
 ### Verification status
 
 This is a branch-specific read-only audit. The latest workflow run #923 is green for the branch head, but the above scenarios remain source-level risks until fixed and covered by regression tests. No local test command was run in this audit. Do not report FIN-04 complete. All writes remain restricted to `integration/pr-consolidation-20261109`; do not merge PR #5, update `main`, deploy, or alter production Firebase/Stripe.
+
+
+## Section 163 — FIN-04 ambiguous transfer recovery gap and CI confirmation (11 November 2026)
+
+### Verified checkpoint
+
+- Branch: `integration/pr-consolidation-20261109`.
+- Source snapshot audited: `45560833a49c31ae1e2850a71d4a8c0e1c82b1a7`.
+- Branch remains 494 commits ahead of `main`, 0 behind; merge base is `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- Workflow run #924 for this exact snapshot completed successfully. Security rules/emulator concurrency, unit/penetration tests, TypeScript/lint, production build and final release audit all passed.
+- PR #5 remains open, draft and unmerged. No application code or tests were changed in this checkpoint.
+
+### Confirmed implementation gap
+
+A more exact pass over the helper, orchestration catch path and existing regression tests confirms two linked recovery defects:
+
+1. **An expired generic idempotency claim is automatically executable again.** In `PaymentLedgerEngine.executeIdempotentOperation`, an existing `in_progress` record older than five minutes falls through to a new claim generation and runs the executor. The helper does not distinguish an expired worker that died before Stripe from one that completed the Stripe side effect and then died before persisting completion. This makes lease expiry itself an unsafe retry authorization for external financial effects.
+2. **Post-transfer Firestore finalization errors can be recorded as definite failure.** The orchestration receives `transfer.id` from `stripeClient.transfers.create`, then attempts the Firestore success transaction. Its catch path writes `payoutStatus: "failed"` for any error other than the special `LEASE_TOKEN_LOST` message, provided the worker still owns the claim. A transient Firestore error after Stripe success therefore leaves `payoutTransferred: false` and a retryable failed state, despite the transfer already existing. The deterministic Stripe key is helpful but must not be the only recovery control because Stripe idempotency retention is finite.
+3. **The existing lost-lease regression exposes a durability hole.** Test 20 in `tests/unit/driverPayoutOrchestration.test.ts` expects the result to contain `tr_ambiguous_456`, while also asserting the ride document's `stripeTransferId` remains undefined. The successor's state is correctly not overwritten, but the transfer evidence is only in the transient result and is not durably discoverable on the ride or a separate reconciliation record.
+4. **Current tests cover the wrong failure boundary.** Test 11 verifies a Stripe request rejection followed by a retry using the same key. Test 20 covers a lost claim after a successful transfer. The missing regression is: Stripe resolves successfully, then the *success finalization transaction itself* throws while the original claim is still owned. That must persist reconciliation-required evidence and must not transition to ordinary `failed`.
+
+### Required correction and acceptance criteria
+
+- Treat an expired `in_progress` claim for a side-effecting operation as reconciliation-required unless durable evidence proves the external request was never attempted. Do not blindly replace it with a new executor claim.
+- Persist an operation record before the Stripe call with deterministic operation identity, then persist the returned transfer ID and response facts immediately after success using a safe recovery write that does not overwrite a successor's ride state.
+- Separate Stripe request rejection known to be pre-effect from ambiguous transport outcomes and from confirmed Stripe success followed by local persistence failure. Only a proven pre-effect failure may become retryable `failed`.
+- On post-success finalization failure, preserve transfer ID, operation key, amount, currency, destination and ride binding in a durable reconciliation record; return `reconciliation_required` and reconcile before another `transfers.create`.
+- Add tests for successful Stripe transfer followed by Firestore finalization rejection, expired generic in-progress claim after a possibly completed Stripe effect, durable transfer evidence after lease loss, and repeated invocation performing no second create.
+- Keep stale-worker fencing: durable evidence must be written to a separately operation-bound record or with a compare-and-set that cannot overwrite successor ride state.
+- Validate the response itself (non-empty transfer ID, amount, currency, destination and metadata binding) before treating it as a confirmed external effect.
+
+### Scope and verification
+
+This checkpoint is still a read-only source audit plus a documentation update. CI #924 is green for the documentation-only snapshot; it does not validate the missing failure-boundary regressions or remediate FIN-04. No local checkout or local test execution was available in this workflow, so no application patch is being made without the required focused test feedback. Continue only on `integration/pr-consolidation-20261109`; do not create branches, merge PR #5, modify `main`, deploy, or alter production Firebase/Stripe state.
