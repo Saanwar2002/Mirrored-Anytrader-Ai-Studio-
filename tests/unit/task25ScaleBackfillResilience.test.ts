@@ -1220,13 +1220,13 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
     expect(job3TaskData.attempts).toBe(1);
     expect(job3TaskData.nextAttemptAt).toBeDefined();
 
-    // Respect real queue retry backoff: wait until nextAttemptAt is due
-    const nextAttemptTime = new Date(job3TaskData.nextAttemptAt!).getTime();
-    // Add a generous clock/Firestore transaction margin; a 50ms edge can race emulator scheduling.
-    const waitMs = Math.max(0, nextAttemptTime - Date.now() + 500);
-    if (waitMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-    }
+    // Verify the durable retry deadline was recorded, then make the retry due
+    // deterministically. The retry policy's timing is covered separately; this
+    // resume test must not depend on emulator scheduling or wall-clock jitter.
+    expect(Number.isFinite(new Date(job3TaskData.nextAttemptAt!).getTime())).toBe(true);
+    await adminDb.collection('intelligence_tasks').doc(job3TaskId).update({
+      nextAttemptAt: new Date(Date.now() - 10000).toISOString(),
+    });
 
     // Fix the handler so job 3 now succeeds
     intelligenceTaskQueue.registerHandler('job_extraction', async (task) => {
