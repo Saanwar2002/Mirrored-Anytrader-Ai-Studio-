@@ -168,7 +168,30 @@ export async function recordConfirmedRefund(
       ) {
         throw new ConflictError("Stripe refund ID already exists with conflicting payment details.");
       }
-      const total = totalSnap?.exists ? Number(totalSnap.data()?.refundedAmountPence || 0) : amountPence;
+      if (!originalSnap.exists) {
+        throw new ConflictError("Original payment ledger entry is missing for an existing refund.");
+      }
+      const replayOriginal = originalSnap.data();
+      if (
+        replayOriginal.transactionId !== paymentIntentId ||
+        String(replayOriginal.currency || "").toLowerCase() !== currency ||
+        !totalSnap?.exists
+      ) {
+        throw new ConflictError("Stored refund totals are missing or do not match the existing refund.");
+      }
+      const replayTotal = totalSnap.data();
+      const total = Number(replayTotal.refundedAmountPence);
+      if (
+        replayTotal.paymentIntentId !== paymentIntentId ||
+        replayTotal.originalLedgerEntryId !== originalLedgerEntryId ||
+        replayTotal.originalAmountPence !== replayOriginal.amount ||
+        String(replayTotal.currency || "").toLowerCase() !== currency ||
+        !Number.isSafeInteger(total) ||
+        total < amountPence ||
+        total > replayOriginal.amount
+      ) {
+        throw new ConflictError("Stored refund total is inconsistent with the existing refund.");
+      }
       return { entry: existing, wasReplayed: true, cumulativeRefundedPence: total };
     }
 

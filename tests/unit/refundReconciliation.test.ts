@@ -108,6 +108,23 @@ describe("refund reconciliation", () => {
     expect(db.store.get(Object.keys(Object.fromEntries(db.store)).find(k => k.startsWith("payment_refund_totals/"))!)?.remainingAmountPence).toBe(7500);
   });
 
+  it("fails closed when an existing refund has no matching aggregate total", async () => {
+    const db = createMemoryDb({ "payment_ledger/ledg_original": original });
+    const input = {
+      refundId: "re_missing_total",
+      chargeId: "ch_123",
+      paymentIntentId: "pi_original",
+      originalLedgerEntryId: "ledg_original",
+      amountPence: 500,
+      currency: "gbp",
+    };
+    await recordRefund(db, input);
+    const totalKey = [...db.store.keys()].find(key => key.startsWith("payment_refund_totals/"));
+    expect(totalKey).toBeTruthy();
+    db.store.delete(totalKey!);
+    await expect(recordRefund(db, input)).rejects.toThrow(ConflictError);
+  });
+
   it("rejects replay of a Stripe refund ID with a different charge or currency", async () => {
     const db = createMemoryDb({ "payment_ledger/ledg_original": original });
     const input = {
