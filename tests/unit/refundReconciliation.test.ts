@@ -125,6 +125,29 @@ describe("refund reconciliation", () => {
     await expect(recordRefund(db, input)).rejects.toThrow(ConflictError);
   });
 
+  it.each([
+    ["pending", "ESCROW_DEPOSIT", 10000],
+    ["completed", "DIRECT_PAYOUT", 10000],
+    ["completed", "ESCROW_DEPOSIT", 0],
+    ["completed", "ESCROW_DEPOSIT", 10000.5],
+  ])(
+    "fails closed when replay's original payment is no longer eligible (%s, %s, %s)",
+    async (status, type, amount) => {
+      const db = createMemoryDb({ "payment_ledger/ledg_original": original });
+      const input = {
+        refundId: `re_ineligible_${status}_${type}_${amount}`,
+        chargeId: "ch_123",
+        paymentIntentId: "pi_original",
+        originalLedgerEntryId: "ledg_original",
+        amountPence: 500,
+        currency: "gbp",
+      };
+      await recordRefund(db, input);
+      db.store.set("payment_ledger/ledg_original", { ...original, status, type, amount });
+      await expect(recordRefund(db, input)).rejects.toThrow(ConflictError);
+    }
+  );
+
   it("rejects replay of a Stripe refund ID with a different charge or currency", async () => {
     const db = createMemoryDb({ "payment_ledger/ledg_original": original });
     const input = {

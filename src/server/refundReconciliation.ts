@@ -175,9 +175,13 @@ export async function recordConfirmedRefund(
       if (
         replayOriginal.transactionId !== paymentIntentId ||
         String(replayOriginal.currency || "").toLowerCase() !== currency ||
+        replayOriginal.status !== "completed" ||
+        !["ESCROW_DEPOSIT", "PLATFORM_COMMISSION"].includes(replayOriginal.type) ||
+        !Number.isSafeInteger(replayOriginal.amount) ||
+        replayOriginal.amount <= 0 ||
         !totalSnap?.exists
       ) {
-        throw new ConflictError("Stored refund totals are missing or do not match the existing refund.");
+        throw new ConflictError("Stored refund totals are missing or do not match an eligible original payment.");
       }
       const replayTotal = totalSnap.data();
       const total = Number(replayTotal.refundedAmountPence);
