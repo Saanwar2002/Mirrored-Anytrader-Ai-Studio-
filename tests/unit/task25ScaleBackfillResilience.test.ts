@@ -1207,12 +1207,12 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
 
     const runDoc1 = (await adminDb.collection('intelligence_backfill_runs').doc(runId).get()).data();
     expect(runDoc1?.status).toBe('failed');
-    expect(runDoc1?.cursor).toBe('job_emu_25_002');
+    expect(runDoc1?.cursor).toBe('job_vec10_002');
     expect(runDoc1?.processed).toBe(2);
     expect(runDoc1?.errors).toBe(1);
 
     // Inspect the failed job_003 task document and verify authoritative retry state and nextAttemptAt
-    const job3TaskId = taskDocumentId(buildIdempotencyKey('job_emu_25_003', 'JOB_EXTRACTION', 'v1'));
+    const job3TaskId = taskDocumentId(buildIdempotencyKey('job_vec10_003', 'JOB_EXTRACTION', 'v1'));
     const job3TaskSnap = await adminDb.collection('intelligence_tasks').doc(job3TaskId).get();
     expect(job3TaskSnap.exists).toBe(true);
     const job3TaskData = job3TaskSnap.data() as IntelligenceTask;
@@ -1233,12 +1233,13 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
       return { processed: true, jobId: task.aggregateId, recovered: true };
     });
 
-    // Run 2: Resume with the same runId from saved cursor (job_emu_25_002) -> retries job 3 and processes through 7
+    // Run 2: Resume with the same runId from saved cursor (job_vec10_002) -> retries job 3 and processes through 7
     const run2 = await controlledBackfillEngine.executeFirestoreBackfill(adminDb, {
       runId,
       batchSize: 5,
       dryRun: false,
       rateLimitDelayMs: 0,
+      tenantId: 'estate_vector10_isolated',
     });
 
     expect(run2.processedCount).toBe(7); // 2 previous + 5 new
@@ -1246,7 +1247,7 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
     expect(run2.errorCount).toBe(1);
 
     const runDoc2 = (await adminDb.collection('intelligence_backfill_runs').doc(runId).get()).data();
-    expect(runDoc2?.cursor).toBe('job_emu_25_007');
+    expect(runDoc2?.cursor).toBe('job_vec10_007');
     expect(runDoc2?.processed).toBe(7);
     expect(runDoc2?.errors).toBe(1);
 
