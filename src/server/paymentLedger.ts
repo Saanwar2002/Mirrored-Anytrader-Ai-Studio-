@@ -584,6 +584,11 @@ export class PaymentLedgerEngine {
       );
 
       const stripeTransferId = transfer?.id;
+      if (typeof stripeTransferId !== "string" || stripeTransferId.trim().length === 0) {
+        // Stripe may have created the transfer even if its response is malformed or
+        // incomplete. Never report completion without a durable external transfer ID.
+        throw new Error("Stripe returned a transfer response without a valid transfer ID; reconciliation is required.");
+      }
 
       if (db) {
         const ledgerSnap = await db

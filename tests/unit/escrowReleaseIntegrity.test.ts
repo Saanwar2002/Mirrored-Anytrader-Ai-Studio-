@@ -441,5 +441,39 @@ describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", (
         idempotencyKey: "rel_ambiguous_transfer_new_key",
       })).rejects.toThrow(ConflictError);
     });
+
+    it("does not report a transfer as completed when Stripe omits its transfer ID", async () => {
+      const releaseResult = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: homeownerId,
+        idempotencyKey: "rel_missing_transfer_id",
+      });
+      const mockStripe = {
+        transfers: {
+          create: vi.fn().mockResolvedValue({}),
+        },
+      };
+
+      const result = await PaymentLedgerEngine.executeStripeEscrowTransfer(
+        db,
+        {
+          jobId,
+          quoteId,
+          milestoneId,
+          idempotencyKey: "rel_missing_transfer_id",
+          traderId: releaseResult.traderId,
+          netPayoutPence: releaseResult.netPayoutPence,
+        },
+        { stripe: mockStripe }
+      );
+
+      expect(result.transferStatus).toBe("reconciliation_required");
+      expect(result.error).toContain("without a valid transfer ID");
+      const ledger = store[`payment_ledger/${releaseResult.ledgerEntryId}`];
+      expect(ledger.transferStatus).toBe("reconciliation_required");
+      expect(ledger.stripeTransferId).toBeUndefined();
+    });
   });
 });
