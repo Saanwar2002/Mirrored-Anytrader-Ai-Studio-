@@ -4378,3 +4378,37 @@ The formal FIN-04 in `FINANCIAL_RECONCILIATION_PLAN.md` is **generic idempotency
 - These commits are on `integration/pr-consolidation-20261109` only.
 - CI and focused test execution are pending. Do not mark FIN-04 verified until the exact-head Actions run completes successfully and the unit-test step confirms these cases.
 - The Section 171 domain-event observation remains open as a supplementary item: deterministic event-document persistence currently does not establish durable per-consumer delivery/retry. It should be addressed as a separate event-outbox/recovery workstream, not by changing the FIN-04 identifier.
+
+
+## Section 174 — Exact-head CI validation and FIN-05 handoff (11 November 2026)
+
+### Exact-head verification
+
+The integration branch head was re-fetched as `c6cddd4cef5b5aa93f4e92ca59a21f18e5f0e6bb`. Push-triggered GitHub Actions run **#958** (`43101671335`) for that exact SHA completed with conclusion **success**.
+
+The single `security-and-build-gate` job completed successfully, including all of these steps:
+- Firebase Security Rules and real Firestore emulator concurrency tests
+- Unit and penetration-testing suite
+- TypeScript/linter checks
+- Production build
+- Final release audit
+
+This validates the committed payout lease-fencing regression and FIN-04 idempotency hardening as part of the full CI gate at the exact branch head. It does not establish live Stripe/Firebase production state, nor does it authorize deployment or merge.
+
+### Updated financial workstream status
+
+- **FIN-04:** generic idempotency binding and stop-state/key-path hardening have passed the exact-head full CI gate.
+- **Payout orchestration:** existing-operation replay-barrier state writes are claim-token fenced; the functional stale-worker regression passed within run #958.
+- **FIN-02:** refund pagination and Instant Match refund orchestration are included in the same green branch-head CI run. Production reconciliation remains read-only/unperformed.
+- **FIN-01:** webhook lease fencing is implemented; route-level/concurrent stale-worker financial-side-effect tests remain an acceptance gap.
+- **FIN-03:** escrow transfer identity/recovery controls are implemented; continue reviewing end-to-end recovery evidence and ambiguity boundaries.
+- **FIN-05:** remains the next primary implementation workstream. Build a pure read-only cross-operation discrepancy evaluator and fixture matrix before wiring any runner.
+- **Supplementary domain-event delivery:** per-consumer durable delivery/retry remains open and separate from formal FIN-04.
+
+### Next execution
+
+1. Design FIN-05 input contracts and invariant findings without coupling to Firestore or Stripe clients.
+2. Add deterministic fixtures for missing, duplicate, orphaned, mismatched and over-allocated financial records.
+3. Prove evaluator purity: no writes, no Stripe calls, no mutation of input snapshots.
+4. Separately close FIN-01 route-level stale-worker tests and supplementary domain-event consumer delivery.
+5. Keep all writes on `integration/pr-consolidation-20261109`; no merge, deployment, production mutation, or AI Studio Pull/Push.
