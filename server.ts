@@ -4975,6 +4975,7 @@ async function startServer() {
           idempotencyKey,
           traderId: result.traderId,
           netPayoutPence: result.netPayoutPence,
+          ledgerEntryId: result.ledgerEntryId,
           targetMilestoneTitle: result.targetMilestoneTitle,
           jobNo: result.jobNo,
           stripePaymentIntentId: result.stripePaymentIntentId,

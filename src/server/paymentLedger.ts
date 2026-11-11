@@ -494,6 +494,9 @@ export class PaymentLedgerEngine {
           entryId: ledgerEntryId,
           transactionId: targetMilestone.stripePaymentIntentId || targetMilestone.escrowEntryId || `rel_${jobId}_${quoteId}`,
           idempotencyKey,
+          jobId,
+          quoteId,
+          milestoneId: targetMilestone.id,
           payerId: jobData?.homeownerId || authUid,
           payeeId: quoteData?.tradespersonId || "trader",
           amount: Math.round(releasedAmount * 100),
@@ -584,6 +587,7 @@ export class PaymentLedgerEngine {
       jobNo?: string;
       stripePaymentIntentId?: string;
       isDestinationCharge?: boolean;
+      ledgerEntryId?: string;
     },
     options?: {
       stripe?: any;
@@ -604,6 +608,7 @@ export class PaymentLedgerEngine {
       targetMilestoneTitle = "Work Stage",
       jobNo,
       isDestinationCharge,
+      ledgerEntryId,
     } = params;
 
     const stripeIdempotencyKey = `release:${jobId}:${quoteId}:${milestoneId || "0"}:${idempotencyKey}`;
@@ -715,14 +720,22 @@ export class PaymentLedgerEngine {
       }
 
       if (db) {
-        const ledgerSnap = await db
-          .collection("payment_ledger")
-          .where("idempotencyKey", "==", idempotencyKey)
-          .get();
-        if (!ledgerSnap.empty) {
-          await ledgerSnap.docs[0].ref.update({
+        if (ledgerEntryId) {
+          await db.collection("payment_ledger").doc(ledgerEntryId).update({
             stripeTransferId,
             transferStatus: "completed",
+            transferCompletedAt: new Date().toISOString(),
+          });
+        } else {
+          const ledgerSnap = await db.collection("payment_ledger")
+            .where("idempotencyKey", "==", idempotencyKey).get();
+          const matchingEntry = ledgerSnap.docs.find((doc: any) => {
+            const entry = doc.data();
+            return entry?.type === "ESCROW_RELEASE" && entry.jobId === jobId &&
+              entry.quoteId === quoteId && entry.milestoneId === (milestoneId || "m0");
+          });
+          if (matchingEntry) await matchingEntry.ref.update({
+            stripeTransferId, transferStatus: "completed",
             transferCompletedAt: new Date().toISOString(),
           });
         }
@@ -742,12 +755,21 @@ export class PaymentLedgerEngine {
 
       if (db) {
         try {
-          const ledgerSnap = await db
-            .collection("payment_ledger")
-            .where("idempotencyKey", "==", idempotencyKey)
-            .get();
-          if (!ledgerSnap.empty) {
-            await ledgerSnap.docs[0].ref.update({
+          if (ledgerEntryId) {
+            await db.collection("payment_ledger").doc(ledgerEntryId).update({
+              transferStatus: "reconciliation_required",
+              transferError: errorMessage,
+              lastTransferAttemptAt: new Date().toISOString(),
+            });
+          } else {
+            const ledgerSnap = await db.collection("payment_ledger")
+              .where("idempotencyKey", "==", idempotencyKey).get();
+            const matchingEntry = ledgerSnap.docs.find((doc: any) => {
+              const entry = doc.data();
+              return entry?.type === "ESCROW_RELEASE" && entry.jobId === jobId &&
+                entry.quoteId === quoteId && entry.milestoneId === (milestoneId || "m0");
+            });
+            if (matchingEntry) await matchingEntry.ref.update({
               transferStatus: "reconciliation_required",
               transferError: errorMessage,
               lastTransferAttemptAt: new Date().toISOString(),
