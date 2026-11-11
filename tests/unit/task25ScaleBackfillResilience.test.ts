@@ -1175,9 +1175,15 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
   it('Production Emulator Vector 10: Partial failure & resume — Failed items halt batch without advancing cursor and are retried on resume', async () => {
     const runId = 'bf_run_emu_partial_failure';
 
-    // Register a handler that fails specifically on job_emu_25_003
+    // Seed an isolated tenant dataset so unrelated emulator jobs cannot alter cursor assertions.
+    for (let i = 1; i <= 7; i++) {
+      const jobId = `job_vec10_${String(i).padStart(3, '0')}`;
+      await adminDb.collection('jobs').doc(jobId).set({ id: jobId, title: `Vector 10 job ${i}`, estateId: 'estate_vector10_isolated' });
+    }
+
+    // Register a handler that fails specifically on job_vec10_003
     intelligenceTaskQueue.registerHandler('job_extraction', async (task) => {
-      if (task.aggregateId === 'job_emu_25_003') {
+      if (task.aggregateId === 'job_vec10_003') {
         throw new Error('Simulation: extraction failed on unit 3');
       }
       return { processed: true, jobId: task.aggregateId };
@@ -1189,12 +1195,13 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
       batchSize: 5,
       dryRun: false,
       rateLimitDelayMs: 0,
+      tenantId: 'estate_vector10_isolated',
     });
 
     // Exactly 2 succeeded, 1 failed, 0 skipped past the failure
     expect(run1.processedCount).toBe(2);
     expect(run1.errorCount).toBe(1);
-    expect(run1.nextCursor).toBe('job_emu_25_002'); // Invariant: cursor strictly stops at last success (before failure)
+    expect(run1.nextCursor).toBe('job_vec10_002'); // Invariant: cursor strictly stops at last success (before failure)
     expect(run1.isComplete).toBe(false);
     expect(run1.terminationReason).toBe('item_failed');
 
@@ -1235,7 +1242,7 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
     });
 
     expect(run2.processedCount).toBe(7); // 2 previous + 5 new
-    expect(run2.nextCursor).toBe('job_emu_25_007');
+    expect(run2.nextCursor).toBe('job_vec10_007');
     expect(run2.errorCount).toBe(1);
 
     const runDoc2 = (await adminDb.collection('intelligence_backfill_runs').doc(runId).get()).data();
