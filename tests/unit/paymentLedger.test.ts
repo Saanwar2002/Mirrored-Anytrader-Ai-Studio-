@@ -190,4 +190,27 @@ describe("Payment Ledger & Invariants", () => {
     expect(store.get("claim").status).toBe("in_progress");
   });
 
+  it("blocks automatic replay of an expired in-progress financial claim", async () => {
+    const store = new Map<string, any>([["expired-key", {
+      operationName: "TRANSFER", bindingHash: "binding-hash", status: "in_progress",
+      startedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(), claimToken: "old-worker",
+    }]]);
+    const db = {
+      collection: () => ({ doc: (id: string) => ({ id }) }),
+      runTransaction: async (fn: any) => fn({
+        get: async (ref: any) => ({ exists: store.has(ref.id), data: () => store.get(ref.id) }),
+        set: (ref: any, value: any) => store.set(ref.id, value),
+        update: (ref: any, value: any) => store.set(ref.id, { ...store.get(ref.id), ...value }),
+        delete: (ref: any) => store.delete(ref.id),
+      }),
+    };
+    let executions = 0;
+    await expect(PaymentLedgerEngine.executeIdempotentOperation(
+      db, "expired-key", "TRANSFER", { version: 1 }, async () => { executions++; return "transferred"; }
+    )).rejects.toThrow("requires reconciliation");
+    expect(executions).toBe(0);
+    expect(store.get("expired-key").status).toBe("reconciliation_required");
+    expect(store.get("expired-key").claimToken).toBe("old-worker");
+  });
+
 });

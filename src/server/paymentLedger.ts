@@ -97,6 +97,14 @@ export class PaymentLedgerEngine {
           if (ageMs < 5 * 60 * 1000) {
             throw new ConflictError("A concurrent request with the same idempotency key is already processing.");
           }
+          // Timeout is not proof an external financial effect did not happen.
+          // Persist reconciliation state and never replace the claim automatically.
+          transaction.update(idempotencyRef, {
+            status: "reconciliation_required",
+            reconciliationRequiredAt: new Date().toISOString(),
+            reconciliationReason: "Expired in-progress claim may have completed an external effect",
+          });
+          return { shouldExecute: false, reconciliationRequired: true };
         }
       }
       transaction.set(idempotencyRef, {
@@ -105,6 +113,9 @@ export class PaymentLedgerEngine {
       return { shouldExecute: true };
     });
 
+    if (claimResult.reconciliationRequired) {
+      throw new ConflictError("Expired financial operation requires reconciliation; automatic replay is blocked.");
+    }
     if (!claimResult.shouldExecute) {
       return { result: claimResult.result as T, wasReplayed: true };
     }
