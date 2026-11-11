@@ -5010,10 +5010,9 @@ async function startServer() {
             });
             if (matchedCurrentOperation) {
               tx.update(qRef, { milestones });
-              // Do not let a stale failure response overwrite a newer milestone operation
-              // or the job-level payment projection.
-              const jRef = firestoreDb.collection("jobs").doc(jobId);
-              tx.update(jRef, { paymentStatus: "funded", isPaid: false });
+              // The job-level payment fields aggregate multiple milestones/quotes.
+              // Leave that projection to the canonical reconciler rather than marking
+              // the entire job funded because one milestone release failed.
             }
           }
         });
