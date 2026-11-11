@@ -237,3 +237,22 @@ This section supersedes the older "Stage 3B remediation: Not started" status abo
 - Integration-branch commits: `3a15d55a0dac65cce8f5f9e579d99910cd830f02`, `0470442f1854c0792469a94262029a4df6615b9f`, `d78f3b39673d26d958a83f7ac7ef024104cb2a58`, `5a191b29880c83f8f7dea5ab150886f3f23b10ef`, `c8d0039d699f8138c54d469d93ad8a7845929466`.
 - **Verification pending:** no local test execution is claimed. The latest commit's combined status endpoint currently returns no status checks; the push-triggered CI result must be checked before treating this remediation as verified. No live Stripe/Firebase operation was performed.
 
+
+
+## FIN-04 final audit hardening — 11 November 2026
+
+The formal FIN-04 scope remains generic idempotency resource/payload binding. The implementation already canonicalizes semantic bindings and binds them to the operation name, but final review found two additional gaps:
+
+1. An expired `in_progress` claim is moved to `reconciliation_required` and blocks the current call, but a later call previously could fall through and replace that state with a new claim. This could replay a possibly completed external financial effect.
+2. Caller-provided idempotency keys were used directly as Firestore document IDs without rejecting path separators or bounding their length.
+
+Both are corrected on `integration/pr-consolidation-20261109`:
+- Existing `reconciliation_required` and unknown operation states now fail closed on every replay.
+- Keys containing `/` or exceeding 200 characters are rejected before Firestore access.
+- Regression tests now cover a second retry after the reconciliation stop state, canonical object-key ordering, owner/resource mismatch, and unsafe/oversized keys.
+
+Commits: `d8784e5ad57ad170a69dde7b9d50c4e96298d6c3` and `bce37dd205ff58046057286c9fad6b3504afda62`.
+
+**Verification pending:** no local execution is claimed; run the focused `tests/unit/paymentLedger.test.ts` suite and full CI against the exact integration head before marking FIN-04 complete.
+
+The domain-event dispatcher observation recorded in the unified plan is a separate supplementary reliability finding; it is not the formal FIN-04 scope and does not change this acceptance criteria.
