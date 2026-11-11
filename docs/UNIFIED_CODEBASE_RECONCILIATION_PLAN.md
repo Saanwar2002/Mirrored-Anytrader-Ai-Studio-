@@ -4268,10 +4268,11 @@ The shared Stripe test fixture and successful custom transfer fixtures now retur
 ### Live repository checkpoint
 
 - Reconfirmed that `integration/pr-consolidation-20261109` exists.
-- Compared the current integration branch against `main`: **519 commits ahead, 0 behind**. The common ancestor remains `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- Before this checkpoint documentation commit, the comparison showed 519 commits ahead, 0 behind. After recording this checkpoint, the branch comparison is **520 commits ahead, 0 behind**. The common ancestor remains `4b7963c831acbb2ea6f3084f9f4d069fb772792a`.
+- The checkpoint commit is `1566b7d918643bce8dd2786f0343606a3c37df58`, written to this integration branch. Its combined commit-status response currently contains no status entries; this is not evidence of a passing CI run. The available commit-workflow lookup only returns pull-request-triggered runs, so the push-triggered CI result still needs a reliable Actions run lookup.
 - The comparison reports changes across the CI workflow, Firestore rules, server/payment code, payout orchestration, financial reconciliation, application components and regression tests. This is a broad integration candidate, not a narrow financial-only patch.
 - The comparison endpoint did not expose the integration head SHA in its response. Do not infer a head SHA from the base commit, blob SHAs or historical notes; fetch the exact branch head before recording a commit-specific CI claim.
-- PR #5 remains the draft integration review vehicle; no merge or PR mutation was performed.
+- The last recorded PR #5 state in the reconciliation history was draft and unmerged. The current PR search response did not expose a reliable state field, so re-fetch PR metadata before relying on that status. No merge or PR mutation was performed in this session.
 - The saved plan and current source files were read from the integration branch. No local checkout/test runner is available in this session; no local test execution is claimed.
 
 ### Current payout implementation review
