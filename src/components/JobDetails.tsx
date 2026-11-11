@@ -5466,13 +5466,21 @@ const libraries: any[] = ['places', 'geometry'];
                     );
                   })()}
                 </div>
-                {(job.paymentStatus === "pending" || job.paymentStatus === "unpaid") ? (
-                  <div className="bg-amber-100 text-amber-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
-                    <AlertCircle className="w-3.5 h-3.5" /> Payment Pending
+                {(job.isPaid === true || job.paymentStatus === "handshake_complete") ? (
+                  <div className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Fully Paid
+                  </div>
+                ) : job.paymentStatus === "funded" ? (
+                  <div className="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5" /> Escrow Funded · Awaiting Release
+                  </div>
+                ) : ["failed", "reconciliation_required", "refunded"].includes(String(job.paymentStatus || "").toLowerCase()) ? (
+                  <div className="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5" /> Payment Under Review
                   </div>
                 ) : (
-                  <div className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> {(job.paymentStatus === "handshake_complete" || job.isPaid) ? "Fully Paid" : "Paid"}
+                  <div className="bg-amber-100 text-amber-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5" /> Payment Pending
                   </div>
                 )}
               </div>
@@ -5491,7 +5499,7 @@ const libraries: any[] = ['places', 'geometry'];
                 </div>
                 <div className="h-px bg-slate-100 w-full my-1 border-b-2 border-dashed border-black"></div>
                 <div className="flex justify-between items-center pt-1">
-                   <span className="text-black font-black text-[18px]">Total {job.paymentStatus === "pending" ? "Due" : "Paid"}:</span>
+                   <span className="text-black font-black text-[18px]">Total {(job.isPaid === true || job.paymentStatus === "handshake_complete") ? "Paid" : "Due"}:</span>
                    <span className="text-black font-black text-[18px]">£{((quotes.find(q => q.status === "accepted")?.amount || 0) * 1.20).toFixed(2)}</span>
                 </div>
               </div>
