@@ -3901,3 +3901,20 @@ Before changing production callers, define one versioned canonical binding schem
 - Live compare against main reports integration/pr-consolidation-20261109 is **461 commits ahead and 0 behind**; base SHA is 4b7963c831acbb2ea6f3084f9f4d069fb772792a. This supersedes Section 156's 460-ahead observation.
 - main was not modified. No application source, tests, Firebase data, Stripe object, deployment or CI workflow was changed or run in this documentation checkpoint.
 - FIN-04 remains open. Next implementation batch is the helper contract + all production call sites + migrated direct-helper tests and adversarial replay matrix; validate the complete batch before triggering one consolidated integration CI run.
+
+
+## Section 158 — FIN-04 webhook funding call-site semantics (11 November 2026)
+
+### Verified webhook path details
+
+- The `recordEscrowFunding` call is inside the Stripe webhook's `authoritativeResult.mode === 'payment'` / `meta.type === 'milestone_funding'` fulfillment branch. The webhook has already resolved the PaymentIntent and authoritative amount, and supplies the authenticated customer metadata, trader metadata / quote recipient, amount in pence and GBP currency.
+- The call currently supplies a deterministic key formatted as `mock_fund_${jobId}_${milestoneId}`. This key is stable per job/milestone but is not visibly bound to the PaymentIntent ID. The FIN-04 binding must include the verified PaymentIntent ID and exact financial/resource facts; separately review whether the key namespace should be renamed without changing retry identity for already-created operations.
+- Before calling `recordEscrowFunding`, this webhook branch updates the quote's milestone array to `status: 'funded'`, `fundedAt` and `stripePaymentIntentId` using a standalone `quoteRef.update`. The subsequent ledger helper separately reads and updates `jobs/{jobId}/milestones/{milestoneId}` and writes `payment_ledger`. These are different document paths and are not one atomic transaction. A failure between the quote update and ledger operation can leave partially fulfilled funding state; this must be treated as a separate webhook/ledger consistency issue, not assumed solved by FIN-04 fingerprinting.
+- The webhook later completes its event claim only after processing returns, and failures return HTTP 500 through the existing retry path. That provides a retry opportunity, but the funding branch still needs a replay-safe state transition across quote milestone, job milestone, ledger and domain event. Tests should simulate failure after the quote update and before ledger completion, then redelivery of the same Stripe event / PaymentIntent.
+- The release route delegates to `releaseEscrowFunds` with authenticated UID, QR mode, optional handshake code and server-computed admin status. Only the QR mode / actor / resource belong in the idempotency binding; never include the secret handshake code itself.
+
+### Status
+
+- This is a read-only call-site trace. No source or test files changed, and no tests, emulator, lint, build or CI were run.
+- FIN-04 remains open. Add the funding partial-fulfillment replay case to the same coherent source/test implementation batch where possible, but do not conflate it with the core binding fingerprint or claim it fixed by the helper alone.
+- All writes remain restricted to `integration/pr-consolidation-20261109`; `main`, production Firebase and Stripe remain untouched.
