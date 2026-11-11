@@ -845,7 +845,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     mockStripe.transfers.create.mockImplementationOnce(async (payload: any) => {
       mockStore["ride_requests/ride_success_lost_claim"].payoutClaimToken = "successor_claim";
       mockStore["ride_requests/ride_success_lost_claim"].payoutStatus = "processing";
-      return { id: "tr_ambiguous_456", amount: payload.amount, destination: payload.destination };
+      return { id: "tr_ambiguous_456", amount: payload.amount, currency: payload.currency, destination: payload.destination, metadata: payload.metadata };
     });
     const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
     const ride = mockStore["ride_requests/ride_success_lost_claim"];
