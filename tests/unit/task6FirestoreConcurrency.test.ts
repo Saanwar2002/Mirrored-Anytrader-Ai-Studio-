@@ -296,19 +296,24 @@ describe("Task 6 — Real Firestore Emulator Concurrency & Escrow Security Verif
       startedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
     });
 
-    // 3. Retry after recovery with same key
-    const res2 = await PaymentLedgerEngine.releaseEscrowFunds(db, {
-      jobId,
-      quoteId,
-      milestoneId,
-      authUid: homeownerUid,
-      idempotencyKey: crashKey,
-    });
+    // 3. Retry must fail closed: a stale in-progress claim is not proof that
+    // the original operation had no effect, even when the authoritative state
+    // currently appears released. Reconciliation is required before replay.
+    await expect(
+      PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: homeownerUid,
+        idempotencyKey: crashKey,
+      })
+    ).rejects.toThrow("requires reconciliation");
 
-    expect(res2.success).toBe(true);
-    expect(res2.releasedAmount).toBe(800);
+    const claim = (await idempRef.get()).data();
+    expect(claim.status).toBe("reconciliation_required");
+    expect(claim.claimToken).toBeUndefined();
 
-    // VERIFY ON REAL EMULATOR: exactly 1 ledger record exists! Zero double payouts!
+    // VERIFY ON REAL EMULATOR: original release produced exactly one ledger record.
     const ledgerSnap = await db.collection("payment_ledger")
       .where("payerId", "==", homeownerUid)
       .where("transactionId", "==", `pi_funded_${suffix}`)
