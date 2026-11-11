@@ -3847,3 +3847,26 @@ Implement Phase A calculator + unit tests on integration branch only. Repository
 - Section 155 is a source audit and plan update only. No application code, test, Firebase data, Stripe object, deployment, or production configuration was changed.
 - Next safe code change: implement FIN-04 binding with required context at the helper and all production call sites, then add the cross-owner/resource/amount/currency replay tests. Run the focused Vitest file, full lint/build and the integration CI workflow before marking complete.
 - Keep all writes on `integration/pr-consolidation-20261109`; do not create branches, merge, deploy, or modify `main`.
+
+
+## Section 156 — FIN-04 call-site and test-fixture audit (11 November 2026)
+
+### Verified source locations on the integration branch
+- `src/server/paymentLedger.ts` contains three production entry points using the generic helper:
+  - `recordEscrowFunding` calls `executeIdempotentOperation` with `FUND_MILESTONE_ESCROW`. The semantic request includes job ID, milestone ID, customer ID, trader ID, verified minor-unit amount, currency and Stripe PaymentIntent ID.
+  - `releaseEscrowFunds` calls it with `RELEASE_MILESTONE`. The semantic request includes authenticated UID, job ID, quote ID, milestone ID and QR/admin authorization mode; the release amount and payee are resolved from persisted job/quote/milestone state inside the executor.
+- `server.ts` contains the driver payout route call at approximately line 3621. It checks `assertResourceOwner(user, driverId)` before calling the helper, but reads the connected Stripe account and calculates the final payout amount inside the executor after the generic claim is acquired. The binding therefore must be constructed from server-verified data before a cached replay can be returned; amount selection (explicit requested amount versus full available balance) needs a deliberate canonical policy. Do not bind a client-supplied amount without server-side normalization and validation.
+- `tests/unit/paymentLedger.test.ts` directly exercises the helper with its older four-argument signature. `tests/unit/adversarialRedTeam.test.ts` also has direct helper calls for replay behavior. Both fixtures must be migrated to explicit binding objects; retaining an unbound compatibility overload would defeat the production invariant.
+- The existing payment-ledger mock database hardcodes one document key (`test_key_1`) in transaction operations. It is adequate for its narrow historical replay test but is not a reliable multi-key / multi-binding fixture. Replace or extend it to resolve transaction refs by document ID before adding the adversarial binding matrix.
+
+### Implementation sequencing decision
+1. First change the helper contract and deterministic binding canonicalizer/fingerprint, with strict validation and a version marker. The helper must compare the fingerprint before both cached replay and stale-lease takeover.
+2. Update `recordEscrowFunding` and `releaseEscrowFunds` to pass complete, server-derived binding data. For release, include the caller and job/quote/milestone identity plus a canonical authorization mode; use server-read release amount/currency/payee where the helper contract permits a preflight read, or bind a canonical request identity and explicitly verify the resolved persisted financial facts before side effects. Avoid introducing a race by treating a preflight read as authoritative.
+3. Refactor the driver payout route so driver identity and connected account are loaded and verified before entering the generic helper. Decide and document how “pay available balance” is replay-safe when the available balance changes; do not silently replay a payout cached for a different amount/account.
+4. Migrate direct helper tests and add mismatch tests for actor/resource/account/amount/currency/payload, exact replay, stale takeover, and claim fencing. Add method-level tests for all three production call paths.
+5. Keep the helper's external-effect ambiguity limitations explicit. A fingerprint mismatch must fail closed; it must not clear another request's claim or retry Stripe with a new key.
+
+### Status
+- This section records a deeper read-only call-site/test audit. No source or test code was changed, and no tests, lint, build, emulator, or CI jobs were run.
+- The currently fetched integration branch compare still reports 460 commits ahead of `main` and 0 behind. `main` remains untouched.
+- FIN-04 is still open. Do not claim idempotency binding is fixed until the helper, every production caller and all direct test callers have been migrated and verified together.
