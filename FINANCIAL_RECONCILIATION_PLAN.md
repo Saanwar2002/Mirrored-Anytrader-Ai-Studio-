@@ -302,3 +302,10 @@ Exact integration HEAD `acd6834e2591829be2ace6f238206711b404922e` passed full CI
 Webhook claim terminal writes now use `completeStripeWebhookClaim` and `failStripeWebhookClaimIfOwned` helpers in `src/server/stripeWebhookIdempotency.ts`. Both reread claim ownership transactionally; stale completion throws and stale failure returns false without touching successor state. Tests exercise owner completion, stale worker completion/failure against a successor lease, and owner failure. Server webhook route calls both helpers.
 
 Exact HEAD `1cde50b25ea8de0d9c901f34871febac747d1bd1` passed CI #986 in full (emulator/security, unit/pen-testing, TS/lint, build, release audit). This is helper and handler wiring coverage, not a full two-request route concurrency test. Remaining: route-level lease-takeover regression and FIN-05 production-safe operator report path (read-only only).
+
+
+## FIN-05 source schema audit — 12 November 2026
+
+Reviewed collector mappings against current writers. Payment ledger release records are stored under `payment_ledger`; quote milestones under `jobs/{jobId}/quotes/{quoteId}.milestones[]` link via `escrowReleaseLedgerId`; transfer metadata uses `jobId`, `quoteId`, `milestoneId`, `releaseOperationId`, `operationType=ANYTRADER_ESCROW_RELEASE`; transfer amount is net payout in minor units. Refund record docs keyed by Stripe refund ID persist PaymentIntent in `transactionId`, with operation and aggregate fields aligned to collector. Checkout intent registry internal doc ID differs from Stripe PaymentIntent ID, and collector reads explicit `paymentIntentId`. Destination charge skip behavior is confirmed in release code.
+
+Schema mapping is confirmed for current write paths, not every historical document variant. Legacy orphan/missing evidence remains reportable/manual review; no production dataset was accessed.
