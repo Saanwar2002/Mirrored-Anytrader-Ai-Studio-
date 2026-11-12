@@ -88,7 +88,8 @@ describe("FIN-05 pure financial reconciliation", () => {
     expect(report.findings.map(x=>x.code)).toContain("DUPLICATE_TRANSFER_ID");
     expect(report.findings.map(x=>x.code)).toContain("REFUND_AMOUNT_MISMATCH");
   });
-\n  it("does not mutate any input snapshot", () => {
+
+  it("does not mutate any input snapshot", () => {
     const snapshot=structuredClone(balanced);
     const before=JSON.stringify(snapshot);
     evaluateFinancialReconciliation(snapshot);
