@@ -82,7 +82,9 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
     const stripe = {
       paymentIntents: { retrieve: vi.fn().mockResolvedValue({ id: "pi_123", status: "processing" }) },
       refunds: { list: vi.fn().mockResolvedValue({ data: [], has_more: false }) },
-      transfers: { list: vi.fn().mockResolvedValue({ data: [{ id: "tr_1" }], has_more: true }) },
+      transfers: { list: vi.fn()
+        .mockResolvedValueOnce({ data: [{ id: "tr_1" }], has_more: true })
+        .mockResolvedValueOnce({ data: [{ id: "tr_2" }], has_more: true }) },
     };
     await expect(collectFinancialReconciliationSnapshot(db as any, stripe as any, {
       pageSize: 10, maxDocumentsPerCollection: 10, maxJobs: 10, maxQuotes: 10,
