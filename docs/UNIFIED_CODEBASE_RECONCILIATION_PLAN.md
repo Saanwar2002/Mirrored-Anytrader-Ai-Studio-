@@ -4499,3 +4499,11 @@ Cross-checked the collector's assumptions against current writers:
 - Stripe transfer metadata and payout operation shape are aligned with evaluator fields; destination charge release correctly avoids platform transfer expectation.
 
 Still not a live audit: legacy/partial historical records can omit linkage, which intentionally surfaces findings or manual-review exceptions. Production data and credentials were not accessed.
+
+
+## Section 181 — Reconciliation candidate and Gemini hand-off readiness (12 November 2026)
+
+- Integration HEAD 38b417309fa8b44ed0cbd3c2724a05dea10b6768 is exact-head CI green: Actions run #990 (43177128010) completed successfully, including security/emulator, unit/pen-testing, TypeScript/lint, production build and release audit.
+- Financial remediation is substantially implemented across FIN-01 through FIN-05. Detailed acceptance matrix and residuals are in FINANCIAL_RECONCILIATION_PLAN.md; remaining work is explicit (route-level concurrency test, historical-source coverage, operator-only FIN-05 report path/live read-only audit, and separate domain-event delivery reliability).
+- Added GEMINI_AI_STUDIO_RECONCILIATION_HANDOFF.md for safe branch sync: compare workspace first, preserve AI Studio-only changes, pull this branch only after backup/diff review, and push Gemini edits to integration—not main—then validate exact SHA CI.
+- No AI Studio Pull/Push was executed; no production Firebase/Stripe access or money movement occurred. Main/PR #5 remain untouched.
