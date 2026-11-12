@@ -295,3 +295,10 @@ Corrected newline and committed `723475d38860444911554ead29b3d27d60c5705d`. Exac
 Implemented bounded, read-only collection in `src/server/financialReconciliationCollector.ts` and tests in `tests/unit/financialReconciliationCollector.test.ts`. It scans ledger, payout operations, PaymentIntent registry, refund totals/operations/records, jobs and nested quotes; retrieves Stripe PaymentIntents and exhaustively paginates per-intent refunds plus transfers within a global page budget. Any malformed page/cursor or budget overflow throws; no partial snapshot is returned. Stripe `transfer_data.destination` is the authoritative destination-charge signal. Missing escrow release ledger evidence and reconciliation-required payouts without transfer IDs are now evaluator findings.
 
 Exact integration HEAD `acd6834e2591829be2ace6f238206711b404922e` passed full CI run #983 (`43131521528`) including emulator/security, unit/pen-testing, TS/lint, build and audit. Collector is not yet invoked against production and no real financial report or mutation was performed. Remaining acceptance: historical schema coverage/source completeness review, safe operator-only report entry point, FIN-01 route-level stale worker test, and supplementary domain-event durable consumer delivery.
+
+
+## FIN-01 webhook fencing checkpoint — 12 November 2026
+
+Webhook claim terminal writes now use `completeStripeWebhookClaim` and `failStripeWebhookClaimIfOwned` helpers in `src/server/stripeWebhookIdempotency.ts`. Both reread claim ownership transactionally; stale completion throws and stale failure returns false without touching successor state. Tests exercise owner completion, stale worker completion/failure against a successor lease, and owner failure. Server webhook route calls both helpers.
+
+Exact HEAD `1cde50b25ea8de0d9c901f34871febac747d1bd1` passed CI #986 in full (emulator/security, unit/pen-testing, TS/lint, build, release audit). This is helper and handler wiring coverage, not a full two-request route concurrency test. Remaining: route-level lease-takeover regression and FIN-05 production-safe operator report path (read-only only).
