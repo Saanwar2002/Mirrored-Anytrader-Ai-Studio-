@@ -4478,3 +4478,12 @@ Commits:
 - Exact current integration HEAD `acd6834e2591829be2ace6f238206711b404922e` passed Actions run #983 (`43131521528`) end-to-end: emulator/security, unit & pen-testing, TypeScript/lint, production build, release audit.
 - FIN-05 now has a bounded read-only collector + evaluator, but is **not yet operationally run against production**; no report, production read, or money movement was performed here. Schema coverage and source completeness still need review (including refund-record variants and historical milestone schemas).
 - Next: document operator invocation/credentials and a safe dry-run/report entry point (no automated endpoint/cron yet); test stale FIN-01 route/webhook worker; durable domain-event consumer retry remains separate.
+
+
+## Section 179 — FIN-01 Stripe webhook stale-lease terminal-write fencing (12 November 2026)
+
+- Extracted claim-owner-checked terminal transitions into `completeStripeWebhookClaim` and `failStripeWebhookClaimIfOwned` in `src/server/stripeWebhookIdempotency.ts`; production webhook completion/failure handlers now use these helpers.
+- Regression tests cover owner completion, stale worker unable to complete a successor lease, stale worker unable to mark successor failed, and current owner failure.
+- Exact integration HEAD `1cde50b25ea8de0d9c901f34871febac747d1bd1` passed full CI run #986 (Firebase emulator/security, unit/pen-testing, TypeScript/lint, production build, final audit).
+- This closes the claim-token terminal-write race at helper/handler level. Route-level concurrency/integration coverage (two actual webhook handler executions with lease takeover) remains a follow-up; do not equate this with full end-to-end webhook race verification.
+- Next: finish FIN-05 source schema audit and prepare a strictly operator-only dry-run report interface; then route-level stale payout/webhook integration tests and durable domain-event delivery retry.
