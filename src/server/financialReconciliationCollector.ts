@@ -457,6 +457,7 @@ export async function collectFinancialReconciliationSnapshot(
           releaseAmount: typeof rawLedger.netPayout === "number" ? rawLedger.netPayout : undefined,
           currency: releaseLedger && releaseLedger.currency,
           transferExpected: !destinationCharge && milestone.isDestinationCharge !== true,
+          releaseLedgerPresent: Boolean(releaseLedger),
         });
       }
     }

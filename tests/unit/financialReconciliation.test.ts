@@ -139,6 +139,31 @@ describe("FIN-05 pure financial reconciliation", () => {
     expect(report.criticalCount).toBe(1);
   });
 
+
+  it("reports a missing escrow release ledger row even when transfer evidence is present", () => {
+    const report = evaluateFinancialReconciliation({
+      ledger: [],
+      transfers: [{ transferId: "tr_escrow", amount: 800, currency: "gbp", destination: "acct_1",
+        metadata: { jobId: "job_1", quoteId: "quote_1", milestoneId: "mile_1",
+          releaseOperationId: "release_1", operationType: "ANYTRADER_ESCROW_RELEASE" } }],
+      escrows: [{ jobId: "job_1", quoteId: "quote_1", milestoneId: "mile_1",
+        released: true, releaseLedgerPresent: false, stripeTransferId: "tr_escrow",
+        releaseOperationId: "release_1", transferExpected: true }],
+    });
+    expect(report.findings.map(item => item.code)).toContain("ESCROW_RELEASE_LEDGER_MISSING");
+    expect(report.findings.map(item => item.code)).not.toContain("ESCROW_RELEASE_TRANSFER_MISSING");
+  });
+
+  it("flags reconciliation-required payouts whose Stripe transfer ID is absent", () => {
+    const report = evaluateFinancialReconciliation({
+      ledger: [],
+      payouts: [{ operationId: "payout_ambiguous", amount: 500, currency: "gbp",
+        destination: "acct_1", status: "reconciliation_required" }],
+      transfers: [],
+    });
+    expect(report.findings.map(item => item.code)).toContain("PAYOUT_TRANSFER_ID_MISSING");
+  });
+
   it("does not mutate any input snapshot", () => {
     const snapshot=structuredClone(balanced);
     const before=JSON.stringify(snapshot);

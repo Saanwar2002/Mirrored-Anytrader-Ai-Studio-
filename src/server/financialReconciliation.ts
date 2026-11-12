@@ -23,6 +23,7 @@ export type ReconciliationFindingCode =
   | "TRANSFER_DESTINATION_MISMATCH"
   | "TRANSFER_METADATA_MISMATCH"
   | "PAYOUT_TRANSFER_ID_MISSING"
+  | "ESCROW_RELEASE_LEDGER_MISSING"
   | "ESCROW_RELEASE_TRANSFER_MISSING"
   | "PAYOUT_ALLOCATION_EXCEEDED";
 
@@ -81,6 +82,8 @@ export interface ReconciliationEscrowSnapshot {
   releaseAmount?: number;
   /** False for destination charges, where no platform transfer is expected. */
   transferExpected?: boolean;
+  /** Whether the matching immutable ESCROW_RELEASE ledger row was resolved. */
+  releaseLedgerPresent?: boolean;
   currency?: string;
 }
 export interface FinancialReconciliationSnapshot {
@@ -197,8 +200,8 @@ export function evaluateFinancialReconciliation(
   const linkedTransferIds = new Set<string>();
   for (const payout of payouts) {
     if (!payout.transferId || !payout.transferId.trim()) {
-      if (payout.status === "stripe_succeeded" || payout.status === "completed") {
-        add("PAYOUT_TRANSFER_ID_MISSING", "critical", payout.operationId, "Payout operation claims success but has no Stripe transfer identity.", [payout.operationId]);
+      if (payout.status === "stripe_succeeded" || payout.status === "completed" || payout.status === "reconciliation_required") {
+        add("PAYOUT_TRANSFER_ID_MISSING", "critical", payout.operationId, "Payout operation may have completed or requires reconciliation but has no Stripe transfer identity.", [payout.operationId]);
       }
       continue;
     }
@@ -226,6 +229,9 @@ export function evaluateFinancialReconciliation(
   }
   for(const escrow of escrows) {
     if(!escrow.released) continue;
+    if (escrow.releaseLedgerPresent === false) {
+      add("ESCROW_RELEASE_LEDGER_MISSING", "critical", escrow.milestoneId, "Released escrow has no matching immutable ESCROW_RELEASE ledger entry.", [escrow.jobId, escrow.quoteId || "", escrow.milestoneId, escrow.releaseOperationId || ""]);
+    }
     const linkedId=escrow.stripeTransferId;
     if(!linkedId) {
       if (escrow.transferExpected !== false) {

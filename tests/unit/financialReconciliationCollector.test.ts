@@ -66,7 +66,7 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
     expect(result.snapshot.transfers?.map(transfer => transfer.transferId)).toEqual(["tr_escrow", "tr_payout"]);
     expect(stripe.paymentIntents.retrieve).toHaveBeenCalledTimes(1);
     expect(stripe.paymentIntents.retrieve).toHaveBeenCalledWith("pi_123");
-    expect(result.snapshot.escrows && result.snapshot.escrows[0]).toMatchObject({ transferExpected: true, releaseAmount: 8800, stripeTransferId: "tr_escrow" });
+    expect(result.snapshot.escrows && result.snapshot.escrows[0]).toMatchObject({ transferExpected: true, releaseLedgerPresent: true, releaseAmount: 8800, stripeTransferId: "tr_escrow" });
     expect(evaluateFinancialReconciliation(result.snapshot)).toEqual({ findingCount: 0, criticalCount: 0, findings: [] });
     expect((stripe as any).transfers.create).toBeUndefined();
     expect((stripe as any).refunds.create).toBeUndefined();
@@ -110,6 +110,36 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
     expect(stripe.paymentIntents.retrieve).not.toHaveBeenCalled();
   });
 
+
+  it("reports a released milestone with a missing release ledger link instead of hiding it", async () => {
+    const db = fakeDb({ jobs: [{ id: "job_missing", value: {} }] }, {
+      job_missing: [{
+        id: "quote_missing",
+        value: { milestones: [{
+          id: "mile_missing", status: "funds_released", releaseOperationId: "release_missing",
+          escrowReleaseLedgerId: "ledger_missing", stripeTransferId: "tr_missing_ledger",
+        }] },
+      }],
+    });
+    const stripe = {
+      paymentIntents: { retrieve: vi.fn() },
+      refunds: { list: vi.fn() },
+      transfers: { list: vi.fn().mockResolvedValue({
+        data: [{ id: "tr_missing_ledger", amount: 800, currency: "gbp", destination: "acct_1",
+          metadata: { jobId: "job_missing", quoteId: "quote_missing", milestoneId: "mile_missing",
+            releaseOperationId: "release_missing", operationType: "ANYTRADER_ESCROW_RELEASE" } }],
+        has_more: false,
+      }) },
+    };
+    const result = await collectFinancialReconciliationSnapshot(db as any, stripe as any, {
+      pageSize: 10, maxDocumentsPerCollection: 10, maxJobs: 10, maxQuotes: 10,
+      maxPaymentIntentLookups: 10, maxStripePages: 10,
+    });
+    const report = evaluateFinancialReconciliation(result.snapshot);
+    expect(result.snapshot.escrows?.[0]).toMatchObject({ releaseLedgerPresent: false, stripeTransferId: "tr_missing_ledger" });
+    expect(report.findings.map(item => item.code)).toContain("ESCROW_RELEASE_LEDGER_MISSING");
+  });
+
   it("fails closed when a Stripe page budget ends before pagination is complete", async () => {
     const db = fakeDb({ payment_intents: [{ id: "intent_1", value: { paymentIntentId: "pi_123" } }] });
     const stripe = {
@@ -134,12 +164,19 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
           type: "milestone_funding", jobId: "job_destination", quoteId: "quote_destination", milestoneId: "mile_destination",
         } },
       }],
+      payment_ledger: [{
+        id: "release_destination",
+        value: { entryId: "release_destination", transactionId: "pi_destination", idempotencyKey: "release_destination",
+          jobId: "job_destination", quoteId: "quote_destination", milestoneId: "mile_destination",
+          amount: 1000, netPayout: 880, currency: "gbp", type: "ESCROW_RELEASE", status: "completed" },
+      }],
       jobs: [{ id: "job_destination", value: {} }],
     }, {
       job_destination: [{
         id: "quote_destination",
         value: { milestones: [{
           id: "mile_destination", status: "funds_released", stripePaymentIntentId: "pi_destination",
+          escrowReleaseLedgerId: "release_destination",
           // Deliberately false: Stripe's PaymentIntent transfer target is authoritative.
           isDestinationCharge: false,
         }] },
