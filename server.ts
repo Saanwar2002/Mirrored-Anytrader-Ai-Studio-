@@ -2,7 +2,7 @@ import express from "express";
 import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
-import { ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
+import { completeStripeWebhookClaim, failStripeWebhookClaimIfOwned, ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
 import { createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure } from "./src/server/mediationStake.ts";
 import { getRefundEventReconciliationStatus, recordConfirmedRefund } from "./src/server/refundReconciliation.ts";
 import { listAllChargeRefunds } from "./src/server/stripeRefundPagination.ts";
@@ -2319,12 +2319,7 @@ async function startServer() {
       }
 
       // Completion is fenced: an expired worker cannot complete a successor's claim.
-      await db.runTransaction(async (tx: any) => {
-        const latest = await tx.get(eventRef);
-        const data = latest.data() || {};
-        if (!ownsStripeWebhookClaim(data, claimToken)) throw new Error('Webhook claim lost before completion; reconciliation required.');
-        tx.update(eventRef, { status: 'completed', claimToken: admin.firestore.FieldValue.delete() });
-      });
+      await completeStripeWebhookClaim(db, eventRef, claimToken, admin.firestore.FieldValue.delete());
       res.status(200).json({ received: true });
     } catch (err: any) {
       console.error("Webhook processing error:", err.message);
@@ -2338,17 +2333,10 @@ async function startServer() {
         }
         if (rawEventId) {
           const failedRef = db.collection("processed_stripe_events").doc(rawEventId);
-          await db.runTransaction(async (tx: any) => {
-            const latest = await tx.get(failedRef);
-            const data = latest.data() || {};
-            if (!ownsStripeWebhookClaim(data, claimToken)) return;
-            tx.update(failedRef, {
-              status: 'failed',
-              error: err.message,
-              failedAt: admin.firestore.FieldValue.serverTimestamp(),
-              claimToken: admin.firestore.FieldValue.delete()
-            });
-          }).catch(e => console.error("Could not update failed status", e));
+          await failStripeWebhookClaimIfOwned(
+            db, failedRef, claimToken, err.message,
+            admin.firestore.FieldValue.serverTimestamp(), admin.firestore.FieldValue.delete()
+          ).catch(e => console.error("Could not update failed status", e));
         }
       }
       res.status(500).json({ error: 'Webhook processing failed' });
