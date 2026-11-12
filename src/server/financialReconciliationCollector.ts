@@ -267,7 +267,11 @@ export async function collectFinancialReconciliationSnapshot(
     }
     paymentIntentIds.add(id);
   };
-  for (const doc of paymentIntentDocs) addPaymentIntentId(record(doc.data()).paymentIntentId);
+  for (const doc of paymentIntentDocs) {
+    const item = record(doc.data());
+    const paymentType = text(record(item.metadata).type);
+    if (paymentType === "milestone_funding" || paymentType === "ride_payment") addPaymentIntentId(item.paymentIntentId);
+  }
   for (const entry of ledger) {
     addPaymentIntentId(entry.stripePaymentIntentId);
     if (entry.transactionId && entry.transactionId.startsWith("pi_")) addPaymentIntentId(entry.transactionId);
@@ -321,32 +325,6 @@ export async function collectFinancialReconciliationSnapshot(
     coverage.stripeRefundPages += refundPages;
   }
 
-  const transfersById = new Map<string, ReconciliationTransferSnapshot>();
-  const transferPages = await readStripePages(
-    params => stripe.transfers.list(params),
-    {},
-    stripePageSize,
-    stripeBudget,
-    "transfers",
-    transfer => {
-      const transferId = text(transfer && transfer.id);
-      if (!transferId) throw new Error("Stripe returned a transfer without an ID; no partial report was returned.");
-      const candidate: ReconciliationTransferSnapshot = {
-        transferId,
-        amount: numeric(transfer.amount),
-        currency: String(transfer.currency || "").toLowerCase(),
-        destination: stripeObjectId(transfer.destination),
-        metadata: metadataStrings(transfer.metadata),
-      };
-      const existing = transfersById.get(transferId);
-      if (existing && transferFingerprint(existing) !== transferSourceFingerprint(transfer)) {
-        throw new Error("Stripe returned conflicting financial evidence for transfer " + transferId + "; no partial report was returned.");
-      }
-      if (!existing) transfersById.set(transferId, candidate);
-    }
-  );
-  coverage.stripeTransferPages = transferPages;
-
   let quotesRead = 0;
   let quotePages = 0;
   const quoteDocsByJob = new Map<string, FirestoreDocumentLike[]>();
@@ -362,6 +340,54 @@ export async function collectFinancialReconciliationSnapshot(
     quoteDocsByJob.set(jobDoc.id, quoteResult.docs);
   }
   coverage.firestore.jobQuotes = { documents: quotesRead, pages: quotePages };
+
+  const expectedTransferIds = new Set<string>();
+  for (const entry of ledger) if (entry.stripeTransferId) expectedTransferIds.add(entry.stripeTransferId);
+  for (const payout of payouts) if (payout.transferId) expectedTransferIds.add(payout.transferId);
+  for (const quoteDocs of quoteDocsByJob.values()) {
+    for (const quoteDoc of quoteDocs) {
+      const quote = record(quoteDoc.data());
+      for (const milestoneValue of Array.isArray(quote.milestones) ? quote.milestones : []) {
+        const milestone = record(milestoneValue);
+        const directTransferId = text(milestone.stripeTransferId);
+        if (directTransferId) expectedTransferIds.add(directTransferId);
+        const releaseLedgerId = text(milestone.escrowReleaseLedgerId);
+        const releaseLedger = releaseLedgerId ? ledgerById.get(releaseLedgerId) : undefined;
+        if (releaseLedger && releaseLedger.stripeTransferId) expectedTransferIds.add(releaseLedger.stripeTransferId);
+      }
+    }
+  }
+
+  const transfersById = new Map<string, ReconciliationTransferSnapshot>();
+  const transferPages = await readStripePages(
+    params => stripe.transfers.list(params),
+    {},
+    stripePageSize,
+    stripeBudget,
+    "transfers",
+    transfer => {
+      const transferId = text(transfer && transfer.id);
+      if (!transferId) throw new Error("Stripe returned a transfer without an ID; no partial report was returned.");
+      const transferMetadata = metadataStrings(transfer.metadata);
+      const isAnyTraderTransfer = expectedTransferIds.has(transferId) ||
+        transferMetadata.operationType === "ANYTRADER_ESCROW_RELEASE" ||
+        transferMetadata.type === "orchestrated_driver_payout";
+      if (!isAnyTraderTransfer) return;
+      const candidate: ReconciliationTransferSnapshot = {
+        transferId,
+        amount: numeric(transfer.amount),
+        currency: String(transfer.currency || "").toLowerCase(),
+        destination: stripeObjectId(transfer.destination),
+        metadata: transferMetadata,
+      };
+      const existing = transfersById.get(transferId);
+      if (existing && transferFingerprint(existing) !== transferSourceFingerprint(transfer)) {
+        throw new Error("Stripe returned conflicting financial evidence for transfer " + transferId + "; no partial report was returned.");
+      }
+      if (!existing) transfersById.set(transferId, candidate);
+    }
+  );
+  coverage.stripeTransferPages = transferPages;
 
   const escrows: ReconciliationEscrowSnapshot[] = [];
   for (const [jobId, quoteDocs] of quoteDocsByJob) {
