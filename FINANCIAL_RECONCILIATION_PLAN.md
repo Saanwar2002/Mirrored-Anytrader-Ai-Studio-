@@ -23,9 +23,9 @@ This document is the working checklist for the AnyTrader financial audit and rec
 | Work item | State | Evidence / note |
 |---|---|---|
 | Stages 1, 2 and 2B | Complete | Prior audit history |
-| Stage 3A financial audit | In progress | Findings FIN-01 through FIN-05 below |
-| Stage 3B remediation | Not started | No remediation commit recorded by this review |
-| Integration / merge / deployment | Not authorised | PR #5 remains draft and unmerged |
+| Stage 3A financial audit | Source review substantially complete; historical/production evidence remains | FIN-01–FIN-05 mapped to current code and acceptance gaps documented |
+| Stage 3B remediation | In progress; substantial code + tests landed | FIN-01 fencing, FIN-02 pagination, FIN-03 recovery guard, FIN-04 binding, FIN-05 evaluator/collector; see status matrix below |
+| Integration / merge / deployment | Integration branch CI-ready; promotion not authorised | Exact HEAD 38b4173; run #990 green; PR #5 remains draft/unmerged; no main/deploy/live mutation |
 | PR #5 CI | Pass, historical | Run #455 / `42621657222`, commit `6af712f...`; does not validate future fixes |
 | AI Studio/Firebase live parity | Unverified | Must complete pre-change gate before code changes |
 
@@ -309,3 +309,19 @@ Exact HEAD `1cde50b25ea8de0d9c901f34871febac747d1bd1` passed CI #986 in full (em
 Reviewed collector mappings against current writers. Payment ledger release records are stored under `payment_ledger`; quote milestones under `jobs/{jobId}/quotes/{quoteId}.milestones[]` link via `escrowReleaseLedgerId`; transfer metadata uses `jobId`, `quoteId`, `milestoneId`, `releaseOperationId`, `operationType=ANYTRADER_ESCROW_RELEASE`; transfer amount is net payout in minor units. Refund record docs keyed by Stripe refund ID persist PaymentIntent in `transactionId`, with operation and aggregate fields aligned to collector. Checkout intent registry internal doc ID differs from Stripe PaymentIntent ID, and collector reads explicit `paymentIntentId`. Destination charge skip behavior is confirmed in release code.
 
 Schema mapping is confirmed for current write paths, not every historical document variant. Legacy orphan/missing evidence remains reportable/manual review; no production dataset was accessed.
+
+
+## Current acceptance matrix — 12 November 2026
+
+| Workstream | Current state | Verified evidence | Remaining acceptance / boundary |
+|---|---|---|---|
+| FIN-01 webhook lease fencing | Implemented at claim helper + production handler | Owner-checked terminal transitions and stale-worker unit tests; exact ancestor SHA passed CI #986; current branch CI #990 green | Route-level two-request lease takeover integration test remains follow-up; not full end-to-end race proof. |
+| FIN-02 refund pagination | Implemented in integration | Full Stripe refund pagination helper, identity/currency checks, dedupe/fail-closed cursor tests; included in current exact-head CI #990 | Historical refund source variants and live data not audited. |
+| FIN-03 escrow recovery identity | Conservative recovery guard implemented | Ambiguous outcome keeps operation identity; idempotency key reuse and metadata tests; current branch CI #990 green | Automated read-only transfer lookup/reconciliation for zero/multiple/legacy candidates remains open; never create replacement transfer in reconcile. |
+| FIN-04 idempotency binding | Implemented/hardened | Owner/resource/operation/canonical payload binding, fail-closed reconciliation state, unsafe key checks; current branch CI #990 green | Historical records and real concurrent external-operation behavior require review; no live money operation. |
+| FIN-05 cross-operation reconciliation | Evaluator + bounded read-only collector + source-schema audit | Fixtures and current-writer mapping; current branch CI #990 green | No operator report runner executed; production data not accessed. Safe report entry point and historical variants remain. |
+| CI/release gate | PASS at exact current branch HEAD | Run #990 43177128010, SHA 38b417309fa8b44ed0cbd3c2724a05dea10b6768, all release gate jobs completed success | Gemini changes must rerun CI on their new commit SHA. |
+
+## Promotion and Gemini hand-off gate
+
+This branch is the reconciliation candidate, not an instruction to merge or overwrite main. Use GEMINI_AI_STUDIO_RECONCILIATION_HANDOFF.md before any AI Studio Pull/Push. Preserve AI Studio-only edits, pull only after comparing the workspace against this exact branch, and push Gemini edits to integration first. Main promotion requires explicit owner approval, full diff review and exact-head CI green; no direct push to main is authorized by this plan.
