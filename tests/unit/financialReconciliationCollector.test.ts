@@ -75,14 +75,14 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
 
   it("discovers a PaymentIntent from refund_records so a missing refund ledger entry is reported", async () => {
     const db = fakeDb({
-      refund_records: [{ id: "re_orphan", value: { transactionId: "pi_refund_only" } }],
+      refund_records: [{ id: "re_orphan", value: { transactionId: "pi_refundonly" } }],
     });
     const stripe = {
       paymentIntents: { retrieve: vi.fn().mockResolvedValue({
-        id: "pi_refund_only", status: "succeeded", amount_received: 1000, currency: "gbp",
+        id: "pi_refundonly", status: "succeeded", amount_received: 1000, currency: "gbp",
       }) },
       refunds: { list: vi.fn().mockResolvedValue({
-        data: [{ id: "re_orphan", payment_intent: "pi_refund_only", amount: 100, currency: "gbp", status: "succeeded" }],
+        data: [{ id: "re_orphan", payment_intent: "pi_refundonly", amount: 100, currency: "gbp", status: "succeeded" }],
         has_more: false,
       }) },
       transfers: { list: vi.fn().mockResolvedValue({ data: [], has_more: false }) },
@@ -92,7 +92,7 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
       maxPaymentIntentLookups: 10, maxStripePages: 10,
     });
     const report = evaluateFinancialReconciliation(result.snapshot);
-    expect(stripe.paymentIntents.retrieve).toHaveBeenCalledWith("pi_refund_only");
+    expect(stripe.paymentIntents.retrieve).toHaveBeenCalledWith("pi_refundonly");
     expect(report.findings.map(item => item.code)).toContain("REFUND_ORPHANED");
   });
 
