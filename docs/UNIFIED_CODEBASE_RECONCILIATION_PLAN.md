@@ -4459,3 +4459,11 @@ Commits:
 - CI run #968 (SHA `692e9cf6a0ead3a035b2fb67b2432fd6dca9c6d1`) is pending; prior FIN-05 runs were still in progress. Do not call FIN-05 validated until exact-head full gate passes.
 - FIN-05 remains snapshot-only; source data collection/pagination and an operator-controlled read-only report are not implemented. No auto-repair or money movement.
 - Next: exact-head CI, then add the read-only bounded snapshot collector and audit/report integration only after schema mapping and permission review. FIN-01 route-level stale-worker test and durable domain-event consumer delivery remain outstanding.
+
+
+## Section 177 — FIN-05 CI syntax failure identified and repaired (12 November 2026)
+
+- Exact test commit `692e9cf` failed the Unit & Pen-Testing stage because the FIN-05 test file contained a literal escaped newline sequence before the immutability test (esbuild syntax error at line 91). The evaluator code itself passed the earlier run #967 at `88e545b`.
+- Corrected the test source; new commit `723475d38860444911554ead29b3d27d60c5705d`. Confirmed source now has a real newline and the test block parses structurally.
+- New exact-head CI is pending. Do not consider FIN-05 accepted until it passes unit suite, TypeScript/lint, build and final audit.
+- All prior runs #968–#970 failed solely at the same FIN-05 test syntax parse; 1,264 existing tests passed, with the new test suite unable to load. Fix is on integration only.
