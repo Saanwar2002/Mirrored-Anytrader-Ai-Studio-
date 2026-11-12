@@ -4449,3 +4449,13 @@ Commits:
 - Evaluator is not wired to a scheduled/admin endpoint; it only processes caller-supplied snapshots. Any future runner must be separately authorized, read-only, bounded/paginated, and must not auto-repair or initiate money movement.
 - Continue FIN-05 acceptance tests and review assumptions around duplicate IDs, multiple capture ledger entries, and transfer linkage before declaring complete.
 - FIN-01 stale webhook route-level tests and supplementary durable domain-event consumer delivery remain open.
+
+
+## Section 176 — FIN-05 cross-link hardening (12 November 2026)
+
+- Evaluator now reports duplicate Stripe transfer IDs as critical and flags refund ledger entries linked to a different PaymentIntent than the Stripe refund snapshot.
+- Added regression coverage for both cross-link defects.
+- Commits: `88e545b7f05375d332313b61582f3ed88816d31e` (evaluator), `692e9cf6a0ead3a035b2fb67b2432fd6dca9c6d1` (tests).
+- CI run #968 (SHA `692e9cf6a0ead3a035b2fb67b2432fd6dca9c6d1`) is pending; prior FIN-05 runs were still in progress. Do not call FIN-05 validated until exact-head full gate passes.
+- FIN-05 remains snapshot-only; source data collection/pagination and an operator-controlled read-only report are not implemented. No auto-repair or money movement.
+- Next: exact-head CI, then add the read-only bounded snapshot collector and audit/report integration only after schema mapping and permission review. FIN-01 route-level stale-worker test and durable domain-event consumer delivery remain outstanding.
