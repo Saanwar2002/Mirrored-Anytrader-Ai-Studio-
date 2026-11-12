@@ -125,6 +125,42 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
     })).rejects.toThrow("pagination exceeded its 2-page global budget");
   });
 
+
+  it("uses Stripe PaymentIntent transfer_data to recognise a destination charge without relying on a milestone flag", async () => {
+    const db = fakeDb({
+      payment_intents: [{
+        id: "intent_destination",
+        value: { paymentIntentId: "pi_destination", metadata: {
+          type: "milestone_funding", jobId: "job_destination", quoteId: "quote_destination", milestoneId: "mile_destination",
+        } },
+      }],
+      jobs: [{ id: "job_destination", value: {} }],
+    }, {
+      job_destination: [{
+        id: "quote_destination",
+        value: { milestones: [{
+          id: "mile_destination", status: "funds_released", stripePaymentIntentId: "pi_destination",
+          // Deliberately false: Stripe's PaymentIntent transfer target is authoritative.
+          isDestinationCharge: false,
+        }] },
+      }],
+    });
+    const stripe = {
+      paymentIntents: { retrieve: vi.fn().mockResolvedValue({
+        id: "pi_destination", status: "succeeded", amount_received: 1000, currency: "gbp",
+        transfer_data: { destination: "acct_connected" },
+      }) },
+      refunds: { list: vi.fn().mockResolvedValue({ data: [], has_more: false }) },
+      transfers: { list: vi.fn().mockResolvedValue({ data: [], has_more: false }) },
+    };
+    const result = await collectFinancialReconciliationSnapshot(db as any, stripe as any, {
+      pageSize: 10, maxDocumentsPerCollection: 10, maxJobs: 10, maxQuotes: 10,
+      maxPaymentIntentLookups: 10, maxStripePages: 10,
+    });
+    expect(result.snapshot.escrows?.[0]).toMatchObject({ transferExpected: false });
+    expect(evaluateFinancialReconciliation(result.snapshot).findings.map(item => item.code)).not.toContain("ESCROW_RELEASE_TRANSFER_MISSING");
+  });
+
   it("does not require a platform transfer for an explicitly marked destination charge", () => {
     expect(evaluateFinancialReconciliation({ ledger: [], escrows: [{
       jobId: "job_1", quoteId: "quote_1", milestoneId: "mile_1", released: true, transferExpected: false,

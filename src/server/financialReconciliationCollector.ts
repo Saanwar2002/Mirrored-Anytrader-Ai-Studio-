@@ -240,7 +240,10 @@ export async function collectFinancialReconciliationSnapshot(
     };
   });
   const ledgerById = new Map(ledger.map(entry => [entry.entryId, entry]));
-  const ledgerDocById = new Map(ledgerDocs.map(doc => [doc.id, record(doc.data())]));
+  const ledgerDocByEntryId = new Map(ledgerDocs.map(doc => {
+    const raw = record(doc.data());
+    return [text(raw.entryId) || doc.id, raw] as const;
+  }));
   const payouts: ReconciliationPayoutSnapshot[] = payoutDocs.map(doc => {
     const item = record(doc.data());
     return {
@@ -260,6 +263,7 @@ export async function collectFinancialReconciliationSnapshot(
   });
 
   const paymentIntentIds = new Set<string>();
+  const paymentIntentByMilestone = new Map<string, string>();
   const addPaymentIntentId = (value: unknown) => {
     const id = text(value);
     if (!id) return;
@@ -270,8 +274,18 @@ export async function collectFinancialReconciliationSnapshot(
   };
   for (const doc of paymentIntentDocs) {
     const item = record(doc.data());
-    const paymentType = text(record(item.metadata).type);
-    if (paymentType === "milestone_funding" || paymentType === "ride_payment") addPaymentIntentId(item.paymentIntentId);
+    const metadata = record(item.metadata);
+    const paymentType = text(metadata.type);
+    const paymentIntentId = text(item.paymentIntentId);
+    if (paymentType === "milestone_funding" || paymentType === "ride_payment") addPaymentIntentId(paymentIntentId);
+    if (paymentType === "milestone_funding" && paymentIntentId) {
+      const jobId = text(metadata.jobId);
+      const quoteId = text(metadata.quoteId);
+      const milestoneId = text(metadata.milestoneId);
+      if (jobId && quoteId && milestoneId) {
+        paymentIntentByMilestone.set(JSON.stringify([jobId, quoteId, milestoneId]), paymentIntentId);
+      }
+    }
   }
   for (const entry of ledger) {
     addPaymentIntentId(entry.stripePaymentIntentId);
@@ -288,6 +302,7 @@ export async function collectFinancialReconciliationSnapshot(
 
   const stripeBudget = { pages: 0, maxPages: maxStripePages };
   const captures: ReconciliationCaptureSnapshot[] = [];
+  const destinationChargePaymentIntentIds = new Set<string>();
   const refundsById = new Map<string, ReconciliationRefundSnapshot>();
   for (const paymentIntentId of [...paymentIntentIds].sort()) {
     const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
@@ -301,6 +316,11 @@ export async function collectFinancialReconciliationSnapshot(
         amount: numeric(intent.amount_received),
         currency: String(intent.currency || "").toLowerCase(),
       });
+    }
+    // A destination charge is evidenced by Stripe's own PaymentIntent transfer
+    // target, not by a client- or legacy milestone flag.
+    if (stripeObjectId(record(intent.transfer_data).destination)) {
+      destinationChargePaymentIntentIds.add(paymentIntentId);
     }
     const refundPages = await readStripePages(
       params => stripe.refunds.list(params),
@@ -420,7 +440,12 @@ export async function collectFinancialReconciliationSnapshot(
             releaseLedger.quoteId !== quoteDoc.id || releaseLedger.milestoneId !== milestoneId)) {
           throw new Error("FIN-05 escrow release ledger link does not match " + jobId + "/" + quoteDoc.id + "/" + milestoneId + "; manual review is required.");
         }
-        const rawLedger = releaseLedger ? ledgerDocById.get(releaseLedger.entryId) || {} : {};
+        const rawLedger = releaseLedger ? ledgerDocByEntryId.get(releaseLedger.entryId) || {} : {};
+        const milestonePaymentIntentId = text(milestone.stripePaymentIntentId) ||
+          paymentIntentByMilestone.get(JSON.stringify([jobId, quoteDoc.id, milestoneId]));
+        const destinationCharge = Boolean(
+          milestonePaymentIntentId && destinationChargePaymentIntentIds.has(milestonePaymentIntentId)
+        );
         escrows.push({
           jobId,
           quoteId: quoteDoc.id,
@@ -431,7 +456,7 @@ export async function collectFinancialReconciliationSnapshot(
           // Stripe escrow transfers use netPayout, not gross milestone amount.
           releaseAmount: typeof rawLedger.netPayout === "number" ? rawLedger.netPayout : undefined,
           currency: releaseLedger && releaseLedger.currency,
-          transferExpected: milestone.isDestinationCharge !== true,
+          transferExpected: !destinationCharge && milestone.isDestinationCharge !== true,
         });
       }
     }
