@@ -34,7 +34,7 @@ describe("FIN-05 pure financial reconciliation", () => {
     expect(report.findings.map(x => x.code)).toContain("DUPLICATE_LEDGER_ID");
     const mismatch = evaluateFinancialReconciliation({
       captures: [{ paymentIntentId: "pi_mismatch", amount: 51, currency: "usd" }],
-      ledger: [{ entryId: "wrong", transactionId: "pi_mismatch", amount: 50, currency: "gbp", type: "ESCROW_DEPOSIT" }],
+      ledger: [{ entryId: "wrong", transactionId: "pi_mismatch", amount: 50, currency: "gbp", type: "ESCROW_DEPOSIT", status: "completed" }],
     });
     expect(mismatch.findings.map(x=>x.code)).toContain("CAPTURE_AMOUNT_MISMATCH");
     expect(mismatch.findings.map(x=>x.code)).toContain("CAPTURE_CURRENCY_MISMATCH");
