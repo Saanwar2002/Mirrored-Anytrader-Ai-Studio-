@@ -79,6 +79,8 @@ export interface ReconciliationEscrowSnapshot {
   releaseOperationId?: string;
   stripeTransferId?: string;
   releaseAmount?: number;
+  /** False for destination charges, where no platform transfer is expected. */
+  transferExpected?: boolean;
   currency?: string;
 }
 export interface FinancialReconciliationSnapshot {
@@ -226,7 +228,9 @@ export function evaluateFinancialReconciliation(
     if(!escrow.released) continue;
     const linkedId=escrow.stripeTransferId;
     if(!linkedId) {
-      add("ESCROW_RELEASE_TRANSFER_MISSING","critical",escrow.milestoneId,"Released escrow has no Stripe transfer identity.",[escrow.jobId,escrow.quoteId||"",escrow.milestoneId,escrow.releaseOperationId||""]);
+      if (escrow.transferExpected !== false) {
+        add("ESCROW_RELEASE_TRANSFER_MISSING","critical",escrow.milestoneId,"Released escrow expected a Stripe transfer but has no transfer identity.",[escrow.jobId,escrow.quoteId||"",escrow.milestoneId,escrow.releaseOperationId||""]);
+      }
       continue;
     }
     linkedTransferIds.add(linkedId);

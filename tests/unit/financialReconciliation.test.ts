@@ -13,7 +13,7 @@ const balanced: FinancialReconciliationSnapshot = {
   transfers: [{ transferId: "tr_1", amount: 9000, currency: "gbp", destination: "acct_1",
     metadata: { jobId: "job_1", quoteId: "quote_1", milestoneId: "milestone_1", releaseOperationId: "release_1", operationType: "ANYTRADER_ESCROW_RELEASE" } }],
   payouts: [],
-  escrows: [{ jobId: "job_1", quoteId: "quote_1", milestoneId: "milestone_1", released: true, releaseOperationId: "release_1", stripeTransferId: "tr_1", releaseAmount: 9000, currency: "gbp" }],
+  escrows: [{ jobId: "job_1", quoteId: "quote_1", milestoneId: "milestone_1", released: true, releaseOperationId: "release_1", stripeTransferId: "tr_1", releaseAmount: 9000, currency: "gbp", transferExpected: true }],
 };
 
 describe("FIN-05 pure financial reconciliation", () => {
@@ -58,7 +58,7 @@ describe("FIN-05 pure financial reconciliation", () => {
   it("detects released escrow without transfer and transfer/payout mismatches", () => {
     const report=evaluateFinancialReconciliation({
       ledger:[],
-      escrows:[{jobId:"job_2",milestoneId:"mile_2",released:true}],
+      escrows:[{jobId:"job_2",milestoneId:"mile_2",released:true,transferExpected:true}],
       payouts:[{operationId:"payout_1",transferId:"tr_2",amount:500,currency:"gbp",destination:"acct_expected",status:"stripe_succeeded"}],
       transfers:[{transferId:"tr_2",amount:600,currency:"usd",destination:"acct_other"}],
     });
@@ -119,7 +119,7 @@ describe("FIN-05 pure financial reconciliation", () => {
     const escrowReport = evaluateFinancialReconciliation({
       ledger: [],
       escrows: [{ jobId: "job_1", quoteId: "quote_1", milestoneId: "mile_1", released: true,
-        releaseOperationId: "release_1", stripeTransferId: "tr_escrow", releaseAmount: 900, currency: "gbp" }],
+        releaseOperationId: "release_1", stripeTransferId: "tr_escrow", releaseAmount: 900, currency: "gbp", transferExpected: true }],
       transfers: [{ transferId: "tr_escrow", amount: 900, currency: "gbp", destination: "acct_1",
         metadata: { jobId: "job_other", quoteId: "quote_1", milestoneId: "mile_1",
           releaseOperationId: "release_1", operationType: "ANYTRADER_ESCROW_RELEASE" } }],
