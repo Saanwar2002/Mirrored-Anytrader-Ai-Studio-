@@ -4467,3 +4467,14 @@ Commits:
 - Corrected the test source; new commit `723475d38860444911554ead29b3d27d60c5705d`. Confirmed source now has a real newline and the test block parses structurally.
 - New exact-head CI is pending. Do not consider FIN-05 accepted until it passes unit suite, TypeScript/lint, build and final audit.
 - All prior runs #968–#970 failed solely at the same FIN-05 test syntax parse; 1,264 existing tests passed, with the new test suite unable to load. Fix is on integration only.
+
+
+## Section 178 — FIN-05 bounded collector implemented and exact-head CI green (12 November 2026)
+
+- Added `src/server/financialReconciliationCollector.ts`: read-only bounded Firestore scans for ledger, payout operations, PaymentIntent registry, refund totals/operations/records, jobs and nested quotes; Stripe PaymentIntent retrieval plus fully paginated refunds/transfers.
+- Collector rejects malformed identities/pages, non-advancing cursors and exhausted document/lookup/page budgets rather than returning a truncated report. It has no write/create/update/capture/refund/transfer calls.
+- Cross-check inputs include Stripe-authoritative destination-charge detection (`transfer_data.destination`), released milestone-to-ledger link presence, escrow net payout amount, and refunds sourced even if ledger evidence is absent. Evaluator flags missing escrow ledger evidence and reconciliation-required payouts without transfer IDs.
+- Added collector fixtures for pagination, balanced reconciliation, orphan refund, absent release ledger, destination charge and budget failure.
+- Exact current integration HEAD `acd6834e2591829be2ace6f238206711b404922e` passed Actions run #983 (`43131521528`) end-to-end: emulator/security, unit & pen-testing, TypeScript/lint, production build, release audit.
+- FIN-05 now has a bounded read-only collector + evaluator, but is **not yet operationally run against production**; no report, production read, or money movement was performed here. Schema coverage and source completeness still need review (including refund-record variants and historical milestone schemas).
+- Next: document operator invocation/credentials and a safe dry-run/report entry point (no automated endpoint/cron yet); test stale FIN-01 route/webhook worker; durable domain-event consumer retry remains separate.
