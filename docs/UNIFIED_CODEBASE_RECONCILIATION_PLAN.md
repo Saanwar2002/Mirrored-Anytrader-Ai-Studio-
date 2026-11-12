@@ -4487,3 +4487,15 @@ Commits:
 - Exact integration HEAD `1cde50b25ea8de0d9c901f34871febac747d1bd1` passed full CI run #986 (Firebase emulator/security, unit/pen-testing, TypeScript/lint, production build, final audit).
 - This closes the claim-token terminal-write race at helper/handler level. Route-level concurrency/integration coverage (two actual webhook handler executions with lease takeover) remains a follow-up; do not equate this with full end-to-end webhook race verification.
 - Next: finish FIN-05 source schema audit and prepare a strictly operator-only dry-run report interface; then route-level stale payout/webhook integration tests and durable domain-event delivery retry.
+
+
+## Section 180 — FIN-05 source-schema audit (12 November 2026)
+
+Cross-checked the collector's assumptions against current writers:
+- `payment_ledger` entries carry `entryId`, `transactionId`, `amount`, `netPayout`, `type`, `status`, `jobId`, `quoteId`, `milestoneId`; release entries use immutable `escrowReleaseLedgerId` on the quote milestone and Stripe transfer metadata `jobId/quoteId/milestoneId/releaseOperationId/operationType=ANYTRADER_ESCROW_RELEASE`.
+- Refund records are keyed by Stripe refund ID and persist PaymentIntent in `transactionId`, `stripeRefundId`, amount/currency/status; refund operations persist `paymentIntentId/requestedAmountPence/status/stripeRefundId`; aggregate uses `refundedAmountPence` and `paymentIntentId`.
+- Checkout PaymentIntent registry uses an internal `intentId` doc key and persists external `paymentIntentId` separately; collector correctly reads the external ID field rather than treating doc ID as a Stripe ID.
+- Release milestone state is stored in `jobs/{jobId}/quotes/{quoteId}.milestones[]`; release transaction writes matching ledger row atomically. Stripe transfer amount is `netPayoutPence` (minor units), not gross milestone amount.
+- Stripe transfer metadata and payout operation shape are aligned with evaluator fields; destination charge release correctly avoids platform transfer expectation.
+
+Still not a live audit: legacy/partial historical records can omit linkage, which intentionally surfaces findings or manual-review exceptions. Production data and credentials were not accessed.
