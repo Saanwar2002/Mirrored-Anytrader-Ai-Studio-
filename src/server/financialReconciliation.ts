@@ -8,6 +8,7 @@ export type ReconciliationSeverity = "warning" | "critical";
 export type ReconciliationFindingCode =
   | "DUPLICATE_LEDGER_ID"
   | "DUPLICATE_REFUND_ID"
+  | "DUPLICATE_TRANSFER_ID"
   | "CAPTURE_LEDGER_MISSING"
   | "CAPTURE_AMOUNT_MISMATCH"
   | "CAPTURE_CURRENCY_MISMATCH"
@@ -156,6 +157,7 @@ export function evaluateFinancialReconciliation(
       add("REFUND_ORPHANED", "critical", refund.refundId, "Succeeded Stripe refund has no matching refund ledger entry.", [refund.refundId, refund.paymentIntentId || ""]);
       continue;
     }
+    if (refund.paymentIntentId && refundLedger.some(x => (x.stripePaymentIntentId || x.transactionId) !== refund.paymentIntentId)) add("REFUND_AMOUNT_MISMATCH", "critical", refund.refundId, "Refund ledger entry references a different payment intent.", [refund.refundId, ...refundLedger.map(x=>x.entryId)]);
     const ledgerAmount = refundLedger.reduce((sum,row)=>sum+(safeAmount(row.amount)?row.amount:0),0);
     if (ledgerAmount !== refund.amount) add("REFUND_AMOUNT_MISMATCH","critical",refund.refundId,"Stripe refund amount differs from refund ledger amount.",[refund.refundId,...refundLedger.map(x=>x.entryId)]);
     if (refundLedger.some(x=>normalizeCurrency(x.currency)!==normalizeCurrency(refund.currency))) add("REFUND_AMOUNT_MISMATCH","critical",refund.refundId,"Stripe refund currency differs from refund ledger currency.",[refund.refundId,...refundLedger.map(x=>x.entryId)]);
@@ -168,6 +170,9 @@ export function evaluateFinancialReconciliation(
   const transfersById = new Map<string, ReconciliationTransferSnapshot[]>();
   for (const transfer of transfers) {
     const rows=transfersById.get(transfer.transferId)||[]; rows.push(transfer); transfersById.set(transfer.transferId,rows);
+  }
+  for (const [id, rows] of transfersById) if (rows.length > 1) {
+    add("DUPLICATE_TRANSFER_ID", "critical", id, "Stripe transfer ID occurs more than once in the supplied snapshot.", [id]);
   }
   const linkedTransferIds = new Set<string>();
   for (const payout of payouts) {
