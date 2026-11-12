@@ -274,3 +274,10 @@ Added a pure, snapshot-only evaluator in `src/server/financialReconciliation.ts`
 The evaluator does not access Firestore/Stripe, mutate supplied snapshots, infer an allocation cap, or initiate a financial action. It is not yet wired to a runner. Commits: `638dc4a`, `051c3e4`, `0a80f0e`, `1466f8e`.
 
 **Status: implementation started, validation pending.** Run the focused Vitest file and full exact-head CI; review multi-capture/duplicate handling and transfer identity assumptions before acceptance. FIN-01 route-level stale-worker tests and durable per-consumer domain-event delivery remain open.
+
+
+## FIN-05 hardening checkpoint — 12 November 2026
+
+Evaluator and tests extended to detect duplicate Stripe transfer identities and refund-ledger PaymentIntent cross-link mismatches. Commits: `88e545b`, `692e9cf`. CI at exact test commit SHA `692e9cf6a0ead3a035b2fb67b2432fd6dca9c6d1` is pending. Prior run #966 was at docs-only SHA `f65f971`; #967 at evaluator SHA `88e545b`. FIN-05 remains unvalidated pending complete exact-head CI.
+
+The pure evaluator is not a production runner: no Firestore/Stripe data collection, pagination, endpoint, mutation, repair, or money movement exists. Continue with bounded read-only collection only after schema and access review. FIN-01 route-level stale-worker test and durable domain-event delivery remain open.
