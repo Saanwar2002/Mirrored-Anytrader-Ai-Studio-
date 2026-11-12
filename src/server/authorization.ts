@@ -409,13 +409,12 @@ export function assertCanModifyProperty(
   if (isUserAdminClaim(user)) return;
 
   const ownerId = propertyData.ownerId || propertyData.userId;
-  const isPendingRecipient = propertyData.transferStatus === "pending" && propertyData.pendingTransferToUid === user.uid;
 
-  if (user.uid === ownerId || isPendingRecipient) {
+  if (user.uid === ownerId) {
     return;
   }
 
-  throw new ForbiddenError("Only the property owner or verified transfer recipient can modify this property.");
+  throw new ForbiddenError("Only the property owner can modify this property; ownership claims must use the server transfer command.");
 }
 
 /**

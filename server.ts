@@ -1,4 +1,12 @@
 import express from "express";
+import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
+import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
+import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
+import { completeStripeWebhookClaim, failStripeWebhookClaimIfOwned, ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
+import { createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure } from "./src/server/mediationStake.ts";
+import { getRefundEventReconciliationStatus, recordConfirmedRefund } from "./src/server/refundReconciliation.ts";
+import { listAllChargeRefunds } from "./src/server/stripeRefundPagination.ts";
+import { evaluateCheckoutIntentBinding } from "./src/server/checkoutIntentIntegrity.ts";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import crypto from "crypto";
@@ -37,7 +45,7 @@ import {
 import { AbuseDefenseEngine } from "./src/server/abuseDefense.ts";
 import { BusinessLogicDefense } from "./src/server/businessLogicDefense.ts";
 import { domainEvents } from "./src/server/domainEvents.ts";
-import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer } from "./src/server/pricingCatalog.ts";
+import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer, getDynamicFirestoreConfigs } from "./src/server/pricingCatalog.ts";
 import { resolveTrustedCanonicalIdentity } from "./src/server/identity.ts";
 import { executeCreateJobCommand, resolveCreateJobQuota } from "./src/server/createJobCommand.ts";
 import { executeQuoteCommand, executeAcceptQuoteCommand } from "./src/server/quoteCommands.ts";
@@ -1628,6 +1636,16 @@ async function startServer() {
     message: { error: "Too many postcode lookups, please try again after a minute" },
   });
   
+  // QR handshake PINs are low entropy: constrain release attempts independently of the
+  // high-capacity general API limiter. Persistent per-job lockout is an additional control.
+  const handshakeLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    keyGenerator: limitKeyGenerator,
+    validate: false,
+    message: { error: "Too many escrow release attempts. Please wait 15 minutes." },
+  });
+
   const reviewLimiter = rateLimit({
     windowMs: 1 * 60 * 1000,
     max: 10,
@@ -1661,6 +1679,7 @@ async function startServer() {
   // Stripe Webhook MUST come before express.json()
   app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     let event: Stripe.Event | undefined;
+    let claimToken: string | null = null;
     try {
       let stripeClient;
       try {
@@ -1694,30 +1713,23 @@ async function startServer() {
       // Idempotency: Use a transaction to atomically claim 'processing' state
       const eventRef = db.collection("processed_stripe_events").doc(event.id);
       try {
-        const claimSuccess = await db.runTransaction(async (t: admin.firestore.Transaction) => {
+        claimToken = await db.runTransaction(async (t: admin.firestore.Transaction) => {
           const existing = await t.get(eventRef);
-          if (existing.exists) {
-            const data = existing.data();
-            if (data?.status === 'completed') {
-               return false; // Already processed
-            }
-            if (data?.status === 'processing') {
-               // Check if it's a stale processing claim (e.g., > 5 minutes old)
-               const ageMs = Date.now() - (data.claimedAt?.toMillis ? data.claimedAt.toMillis() : Date.now());
-               if (ageMs < 5 * 60 * 1000) {
-                 return false; // Still processing by another worker
-               }
-            }
+          const existingData = existing.exists ? existing.data() : undefined;
+          if (!shouldClaimStripeWebhookEvent(existingData, Date.now())) {
+            return null;
           }
+          const claimToken = crypto.randomUUID();
           t.set(eventRef, {
             status: 'processing',
             claimedAt: admin.firestore.FieldValue.serverTimestamp(),
-            workerId: `worker_${Math.random().toString(36).substring(7)}`
+            workerId: `worker_${Math.random().toString(36).substring(7)}`,
+            claimToken
           });
-          return true;
+          return claimToken;
         });
 
-        if (!claimSuccess) {
+        if (!claimToken) {
            return res.status(200).send("Already processed or currently processing");
         }
       } catch (txErr) {
@@ -1729,400 +1741,585 @@ async function startServer() {
         const session = event.data.object as Stripe.Checkout.Session;
         if (session.payment_status !== 'paid') {
           console.warn(`[Webhook Warning] Checkout session ${session.id} completed with payment_status '${session.payment_status}'. Skipping fulfillment until paid.`);
-          await eventRef.update({ status: 'completed', skippedReason: 'payment_not_paid' });
+          await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
+            const latest = await tx.get(eventRef);
+            if (latest.data()?.claimToken !== claimToken || latest.data()?.status !== 'processing') throw new Error('Webhook claim lost before unpaid-event completion.');
+            tx.update(eventRef, { status: 'completed', skippedReason: 'payment_not_paid', claimToken: admin.firestore.FieldValue.delete() });
+          });
           return res.status(200).json({ received: true, status: 'skipped_unpaid' });
         }
 
-        const userId = session.client_reference_id;
-          
-          let meta = session.metadata || {};
-          if (session.metadata?.intentId && db) {
-            const intentDoc = await db.collection("payment_intents").doc(session.metadata.intentId).get();
-            if (intentDoc.exists) {
-               meta = intentDoc.data()?.metadata || {};
-               // Mark intent as fulfilled
-               await intentDoc.ref.update({ status: 'completed', completedAt: admin.firestore.FieldValue.serverTimestamp(), paymentIntentId: session.payment_intent });
-            } else {
-               console.error("Payment intent not found for intentId:", session.metadata.intentId);
+        // Checkout fulfillment must be backed by the exact server-created intent.
+        // Never fall back to Stripe session metadata when the authoritative record is absent.
+        if (!db || !session.metadata?.intentId || !session.client_reference_id) {
+          throw new Error("Checkout fulfillment rejected: authoritative intent or database binding is missing.");
+        }
+        const intentRef = db.collection("payment_intents").doc(session.metadata.intentId);
+        const intentDoc = await intentRef.get();
+        if (!intentDoc.exists) {
+          throw new Error("Checkout fulfillment rejected: payment intent record was not found.");
+        }
+        const intent = intentDoc.data() || {};
+        const bindingState = evaluateCheckoutIntentBinding(intent, session as any);
+        if (bindingState === "pending") {
+          // Stripe can deliver checkout.session.completed before the checkout route
+          // persists the returned Session ID on the intent. Keep this retryable.
+          throw new Error("Checkout intent binding is still being finalized; retry webhook processing.");
+        }
+        if (bindingState === "mismatch") {
+          await db.runTransaction(async (tx: any) => {
+            const [claimSnap, latestIntent] = await Promise.all([tx.get(eventRef), tx.get(intentRef)]);
+            const claimData = claimSnap.data() || {};
+            if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+              throw new Error('Webhook claim lost before checkout intent review mutation.');
             }
+            if (latestIntent.exists) tx.update(intentRef, {
+              status: "review_required",
+              reviewReason: "checkout_session_intent_binding_mismatch",
+              reviewSessionId: session.id,
+              reviewAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          });
+          throw new Error("Checkout fulfillment rejected: Stripe session does not match its authoritative payment intent.");
+        }
+        await db.runTransaction(async (tx: any) => {
+          const [claimSnap, latestIntent] = await Promise.all([tx.get(eventRef), tx.get(intentRef)]);
+          const claimData = claimSnap.data() || {};
+          if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+            throw new Error('Webhook claim lost before checkout intent processing mutation.');
           }
+          if (!latestIntent.exists) throw new Error('Checkout intent disappeared before processing.');
+          tx.update(intentRef, {
+            status: "processing",
+            processingStartedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        });
+        const userId = intent.userId;
+        const meta = intent.metadata || {};
           
           if ((meta?.isVideoPro === 'true' || meta?.type === 'video_pro_subscription') && userId && db) {
-            await db.collection("users").doc(userId).update({
-               hasVerifiedVideoProSubscription: true,
-               videoProSubscribedAt: new Date().toISOString(),
-               videoVerificationStatus: "verified",
-               videoProSubscriptionId: session.subscription as string || session.id,
-               updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            if (session.mode !== "subscription" || typeof session.subscription !== "string" || !session.subscription) {
+              throw new Error("Subscription fulfilment requires a valid Stripe Subscription ID.");
+            }
+            const subscriptionId = session.subscription;
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`video_pro_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Video Pro subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.videoProSubscriptionId && current.videoProSubscriptionId !== subscriptionId) {
+                throw new Error("A different Video Pro subscription is already linked; manual reconciliation required.");
+              }
+              tx.update(userRef, {
+                hasVerifiedVideoProSubscription: true,
+                videoProSubscribedAt: current.videoProSubscribedAt || new Date().toISOString(),
+                videoVerificationStatus: "verified",
+                videoProSubscriptionId: subscriptionId,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "video_pro_subscription", createdAt: admin.firestore.FieldValue.serverTimestamp() });
             });
           }
           else if ((meta?.isExclusiveAddon === 'true' || meta?.type === 'exclusive_leads') && userId && db) {
-            await db.collection("users").doc(userId).update({
-               hasExclusiveAddon: true,
-               isExclusiveActive: true,
-               exclusiveSubscribedAt: new Date().toISOString(),
-               exclusiveSubscriptionId: session.subscription as string || session.id, // Depending on mode
-               updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            if (session.mode !== "subscription" || typeof session.subscription !== "string" || !session.subscription) {
+              throw new Error("Subscription fulfilment requires a valid Stripe Subscription ID.");
+            }
+            const subscriptionId = session.subscription;
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`exclusive_leads_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Exclusive Leads subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.exclusiveSubscriptionId && current.exclusiveSubscriptionId !== subscriptionId) {
+                throw new Error("A different Exclusive Leads subscription is already linked; manual reconciliation required.");
+              }
+              tx.update(userRef, {
+                hasExclusiveAddon: true,
+                isExclusiveActive: true,
+                exclusiveSubscribedAt: current.exclusiveSubscribedAt || new Date().toISOString(),
+                exclusiveSubscriptionId: subscriptionId,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "exclusive_leads", createdAt: admin.firestore.FieldValue.serverTimestamp() });
+            });
+          }
+          else if (meta?.type === "driver_gold" || meta?.subscriptionType === "driver_gold") {
+            if (session.mode !== "subscription" || typeof session.subscription !== "string" || !session.subscription) {
+              throw new Error("Gold Driver fulfilment requires a valid Stripe Subscription ID.");
+            }
+            const subscriptionId = session.subscription;
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`driver_gold_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Gold Driver subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.driverSubscriptionId && current.driverSubscriptionId !== subscriptionId) {
+                throw new Error("A different Gold Driver subscription is already linked; manual reconciliation required.");
+              }
+              tx.update(userRef, {
+                isGoldDriver: true,
+                driverTier: "gold",
+                driverSubscriptionId: subscriptionId,
+                driverSubscriptionStatus: "active",
+                commissionRate: 0.10,
+                destinationFilters: 4,
+                advanceBookingDays: 14,
+                priorityDispatch: 50,
+                driverCancelAtPeriodEnd: false,
+                driverSubscribedAt: current.driverSubscribedAt || new Date().toISOString(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "driver_gold", createdAt: admin.firestore.FieldValue.serverTimestamp() });
+            });
+          }
+          else if (meta?.type === "gotham_saas" || meta?.subscriptionType === "gotham_saas") {
+            if (session.mode !== "subscription" || typeof session.subscription !== "string" || !session.subscription) {
+              throw new Error("Gotham SaaS fulfilment requires a valid Stripe Subscription ID.");
+            }
+            const subscriptionId = session.subscription;
+            const doorsCount = Math.max(1, Math.min(100000, Math.floor(Number(meta.gothamDoorsCount) || 100)));
+            const billingCycle = meta.gothamBillingCycle === "annual" ? "annual" : "monthly";
+            const gothamTierName = String(meta.gothamTierName || meta.tierName || "Starter Housing Authority");
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`gotham_saas_${session.id}`);
+            await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Gotham SaaS subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.gothamSubscriptionId && current.gothamSubscriptionId !== subscriptionId) {
+                throw new Error("A different Gotham SaaS subscription is already linked; manual reconciliation required.");
+              }
+              tx.update(userRef, {
+                isGothamSubscriber: true,
+                subscriptionType: "gotham_saas",
+                tier: "gotham",
+                tierId: gothamTierName,
+                gothamSubscriptionId: subscriptionId,
+                gothamSubscriptionStatus: "active",
+                gothamDoorsCount: doorsCount,
+                gothamTierName,
+                gothamBillingCycle: billingCycle,
+                gothamCancelAtPeriodEnd: false,
+                gothamSubscribedAt: current.gothamSubscribedAt || new Date().toISOString(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, type: "gotham_saas", doorsCount, tierName: gothamTierName, billingCycle, createdAt: admin.firestore.FieldValue.serverTimestamp() });
             });
           }
           else if (session.mode === 'subscription') {
-            const subscriptionId = session.subscription as string;
-            if (userId && db) {
-              const rawTier = meta?.tierName || "Pro";
-              const lowerTier = rawTier.toLowerCase();
-              let canonicalTier = 'pro';
-              let isLandlord = false;
-              if (lowerTier.includes('landlord') || meta?.tier === 'landlord' || meta?.subscriptionType === 'landlord') {
-                canonicalTier = 'landlord';
-                isLandlord = true;
+            const subscriptionId = typeof session.subscription === "string" ? session.subscription : "";
+            if (!userId || !db || !subscriptionId) throw new Error("Membership subscription fulfillment is missing user or Stripe subscription ID.");
+            const rawTier = meta?.tierName || "Pro";
+            const lowerTier = String(rawTier).toLowerCase();
+            let canonicalTier = 'pro';
+            let isLandlord = false;
+            if (lowerTier.includes('landlord') || meta?.tier === 'landlord' || meta?.subscriptionType === 'landlord') {
+              canonicalTier = 'landlord'; isLandlord = true;
+            } else if (lowerTier.includes('platinum') || lowerTier.includes('enterprise powerhouse')) canonicalTier = 'platinum';
+            else if (lowerTier.includes('gold') || lowerTier.includes('elite') || lowerTier.includes('premium') || lowerTier.includes('business professional')) canonicalTier = 'premium';
+            else if (lowerTier.includes('silver') || lowerTier.includes('pro') || lowerTier.includes('professional')) canonicalTier = 'pro';
+            else canonicalTier = 'payg';
+            const userRef = db.collection("users").doc(userId);
+            const markerRef = db.collection("stripe_fulfillments").doc(`membership_${session.id}`);
+            const landlordPatch = isLandlord
+              ? buildLandlordCheckoutFulfillmentPatch(
+                  subscriptionId,
+                  await stripeClient.subscriptions.retrieve(subscriptionId) as any
+                )
+              : null;
+            await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
-              else if (lowerTier.includes('platinum') || lowerTier.includes('enterprise powerhouse')) canonicalTier = 'platinum';
-              else if (lowerTier.includes('gold') || lowerTier.includes('elite') || lowerTier.includes('premium') || lowerTier.includes('business professional')) canonicalTier = 'premium';
-              else if (lowerTier.includes('silver') || lowerTier.includes('pro') || lowerTier.includes('professional')) canonicalTier = 'pro';
-              else canonicalTier = 'payg';
-
-              await db.collection("users").doc(userId).update({
-                subscriptionStatus: "active",
-                subscriptionId: subscriptionId,
-                tierId: rawTier,
-                tier: canonicalTier,
-                isLandlord: isLandlord || canonicalTier === 'landlord',
-                subscriptionType: isLandlord ? 'landlord' : (canonicalTier !== 'payg' ? 'tier' : 'standard'),
-                isPro: canonicalTier !== 'payg',
-                isProInvoiceSubscriber: canonicalTier !== 'payg',
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-              });
-            }
+              const [userSnap, markerSnap] = await Promise.all([tx.get(userRef), tx.get(markerRef)]);
+              if (!userSnap.exists) throw new Error("Membership subscription user does not exist.");
+              if (markerSnap.exists) return;
+              const current = userSnap.data() || {};
+              if (current.subscriptionId && current.subscriptionId !== subscriptionId) {
+                const currentStatus = current.subscriptionType === "landlord"
+                  ? current.homeownerSubscriptionStatus
+                  : current.subscriptionStatus;
+                if (["active", "trialing", "past_due", "incomplete", "paused"].includes(String(currentStatus || ""))) {
+                  throw new Error("A different active subscription is already linked; manual reconciliation required.");
+                }
+              }
+              if (landlordPatch) {
+                tx.update(userRef, {
+                  ...landlordPatch,
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              } else {
+                tx.update(userRef, {
+                  subscriptionStatus: "active", subscriptionId, tierId: rawTier, tier: canonicalTier,
+                  isLandlord: false,
+                  subscriptionType: canonicalTier !== 'payg' ? 'tier' : 'standard',
+                  isPro: canonicalTier !== 'payg', isProInvoiceSubscriber: canonicalTier !== 'payg',
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              }
+              tx.create(markerRef, { eventId: event.id, sessionId: session.id, subscriptionId, userId, tier: canonicalTier, type: "membership_subscription", createdAt: admin.firestore.FieldValue.serverTimestamp() });
+            });
           } else if (session.mode === 'payment') {
             if (meta?.type === 'ad_wallet_topup' && userId && db) {
               const topupAmount = Number(meta?.topupAmount) || (session.amount_total ? session.amount_total / 100 : 0);
               if (topupAmount > 0) {
-                await db.collection("users").doc(userId).set({
-                  adWalletBalance: admin.firestore.FieldValue.increment(topupAmount),
-                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                }, { merge: true });
+                // Event-scoped marker and wallet credit commit atomically. If a later
+                // webhook side effect fails and Stripe retries this event, the credit
+                // cannot be applied twice.
+                const fulfillmentRef = db.collection("stripe_fulfillments").doc(`ad_wallet_${event.id}`);
+                const walletRef = db.collection("users").doc(userId);
+                await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
+                  const fulfillment = await tx.get(fulfillmentRef);
+                  if (fulfillment.exists) return;
+                  tx.set(walletRef, {
+                    adWalletBalance: admin.firestore.FieldValue.increment(topupAmount),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                  }, { merge: true });
+                  tx.create(fulfillmentRef, {
+                    eventId: event.id,
+                    sessionId: session.id,
+                    intentId: session.metadata?.intentId || null,
+                    userId,
+                    type: "ad_wallet_topup",
+                    amount: topupAmount,
+                    currency: session.currency || "gbp",
+                    createdAt: admin.firestore.FieldValue.serverTimestamp()
+                  });
+                });
               }
             } else if (meta?.type === 'mediation_stake' && meta?.jobId && db) {
-              await db.collection("jobs").doc(meta.jobId).update({
-                status: "disputed",
-                "dispute.status": "pending_arbitration",
-                "dispute.mediationStakePaid": true,
-                "dispute.mediationStakeAmount": 25.00,
-                "dispute.stakePaymentId": session.id,
-                "dispute.paidAt": admin.firestore.FieldValue.serverTimestamp(),
-                disputeReason: meta.disputeReason || "Unspecified",
-                technicalFaultReport: meta.technicalFaultReport || "Unspecified",
-                disputedAt: admin.firestore.FieldValue.serverTimestamp()
+              const mediationJobRef = db.collection("jobs").doc(meta.jobId);
+              const mediationFulfillmentRef = db.collection("stripe_fulfillments").doc(`mediation_stake_${session.id}`);
+              await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
+                const [jobSnap, fulfillmentSnap] = await Promise.all([
+                  tx.get(mediationJobRef), tx.get(mediationFulfillmentRef)
+                ]);
+                if (!jobSnap.exists) throw new Error("Mediation stake job does not exist.");
+                if (fulfillmentSnap.exists) return;
+                const jobData = jobSnap.data() || {};
+                const dispute = jobData.dispute || {};
+                if (dispute.stakePaymentId && dispute.stakePaymentId !== session.id) {
+                  throw new Error("Mediation stake is already bound to a different Checkout Session.");
+                }
+                if (dispute.mediationStakePaid && dispute.stakePaymentId !== session.id) {
+                  throw new Error("Mediation stake is already marked paid; manual reconciliation required.");
+                }
+                tx.update(mediationJobRef, {
+                  status: "disputed",
+                  "dispute.status": "pending_arbitration",
+                  "dispute.mediationStakePaid": true,
+                  "dispute.mediationStakeAmount": Number(session.amount_total || 0) / 100,
+                  "dispute.stakePaymentId": session.id,
+                  "dispute.paidAt": dispute.paidAt || admin.firestore.FieldValue.serverTimestamp(),
+                  disputeReason: meta.disputeReason || "Unspecified",
+                  technicalFaultReport: meta.technicalFaultReport || "Unspecified",
+                  disputedAt: jobData.disputedAt || admin.firestore.FieldValue.serverTimestamp()
+                });
+                tx.create(mediationFulfillmentRef, {
+                  eventId: event.id,
+                  sessionId: session.id,
+                  intentId: session.metadata?.intentId || null,
+                  userId,
+                  jobId: meta.jobId,
+                  amount: Number(session.amount_total || 0),
+                  currency: session.currency || "gbp",
+                  type: "mediation_stake",
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
               });
             }
             if (meta?.type === 'boost' && meta?.jobId && db) {
+              const jobRef = db.collection("jobs").doc(meta.jobId);
+              const publicCardRef = db.collection("public_job_cards").doc(meta.jobId);
+              const boostFulfillmentRef = db.collection("stripe_fulfillments").doc(`boost_${session.id}`);
+              const isIM = meta.tier === "instant_match";
+              const matchId = `im_${session.id}`;
+              const matchRef = db.collection("instant_matches").doc(matchId);
+              const instantMatchFulfillmentRef = db.collection("stripe_fulfillments").doc(`instant_match_${session.id}`);
               const boostExpiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
-              const isIM = meta.tier === 'instant_match';
-              await db.collection("jobs").doc(meta.jobId).update({
-                isBoosted: true,
-                boostTier: meta.tier || 'emergency_boost',
-                boostExpiresAt,
-                postedDate: admin.firestore.FieldValue.serverTimestamp(),
-                isInstantMatch: isIM,
-                isEmergencyBoost: meta.tier === 'emergency_boost',
-                retryCount: 0
-              });
-
-              try {
-                await db.collection("public_job_cards").doc(meta.jobId).set({
-                  isBoosted: true,
-                  boostTier: meta.tier || 'emergency_boost',
-                  isInstantMatch: isIM,
-                  updatedAt: new Date().toISOString()
-                }, { merge: true });
-              } catch (pubErr) {
-                console.warn("Could not sync public_job_cards for boost:", pubErr);
+              await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
               }
-
-              if (isIM) {
-                 const matchRef = db.collection("instant_matches").doc();
-                 await matchRef.set({
-                   id: matchRef.id,
-                   jobId: meta.jobId,
-                   customerId: userId || "",
-                   chargeAmountPence: session.amount_total || 299,
-                   chargeTier: "instant_match",
-                   feeWaived: false,
-                   status: "searching",
-                   currentAttempt: 0,
-                   createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                   searchingAt: admin.firestore.FieldValue.serverTimestamp()
-                 });
-                 await db.collection("jobs").doc(meta.jobId).set({
-                    instantMatchId: matchRef.id,
-                    matchedViaInstantMatch: true
-                 }, { merge: true });
-              }
-            } else if (meta?.type === 'milestone_funding' && meta?.jobId && meta?.quoteId && meta?.milestoneId && db) {
-              // Log successful funding of a milestone with V6 Payment Ledger & State Machine
-              const { jobId, quoteId, milestoneId } = meta;
-            const quoteRef = db.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
-            const quoteDoc = await quoteRef.get();
-            
-            if (quoteDoc.exists) {
-              const quoteData = quoteDoc.data();
-              const milestones = quoteData?.milestones || [];
-              let fundedAmount = 0;
-              const targetMilestone = milestones.find((m: any) => m.id === milestoneId);
-              const expectedPence = targetMilestone ? Math.round(Number(targetMilestone.amount || targetMilestone.verifiedAmount || 0) * 100) : 0;
-
-              if (session.amount_total && expectedPence > 0 && session.amount_total < expectedPence) {
-                console.error(`[Security Alert] Underpayment rejected in webhook: expected ${expectedPence} pence, received ${session.amount_total} pence.`);
-                return res.status(400).send("Underpayment rejected");
-              }
-
-              const paymentIntentId = session.payment_intent as string;
-              if (!paymentIntentId && !session.id.startsWith("cs_mock_") && !session.id.startsWith("mock_")) {
-                throw new Error("Stripe PaymentIntent ID is required in production webhook event");
-              }
-
-              const updatedMilestones = milestones.map((m: any) => {
-                if (m.id === milestoneId) {
-                  try {
-                    validateMilestoneTransition(m.status || 'pending', 'funded');
-                  } catch (stateErr) {
-                    console.warn(`Milestone transition warning on ${m.id}:`, stateErr);
+                const [jobSnap, boostMarkerSnap, matchSnap, imMarkerSnap] = await Promise.all([
+                  tx.get(jobRef), tx.get(boostFulfillmentRef), ...(isIM ? [tx.get(matchRef), tx.get(instantMatchFulfillmentRef)] : [])
+                ]);
+                if (!jobSnap.exists) throw new Error("Boost target job does not exist.");
+                const jobData = jobSnap.data() || {};
+                if (jobData.homeownerId && jobData.homeownerId !== userId) {
+                  throw new Error("Boost payment user does not own the target job.");
+                }
+                if (!boostMarkerSnap.exists) {
+                  tx.update(jobRef, {
+                    isBoosted: true,
+                    boostTier: meta.tier || "emergency_boost",
+                    boostExpiresAt,
+                    postedDate: admin.firestore.FieldValue.serverTimestamp(),
+                    isInstantMatch: isIM,
+                    isEmergencyBoost: meta.tier === "emergency_boost",
+                    retryCount: 0
+                  });
+                  tx.create(boostFulfillmentRef, {
+                    eventId: event.id, sessionId: session.id,
+                    intentId: session.metadata?.intentId || null,
+                    userId, jobId: meta.jobId, tier: meta.tier || "emergency_boost",
+                    type: "boost", createdAt: admin.firestore.FieldValue.serverTimestamp()
+                  });
+                }
+                if (isIM && !imMarkerSnap.exists) {
+                  if (!matchSnap.exists) {
+                    const paymentIntentId = typeof intent.paymentIntentId === "string" && /^pi_[A-Za-z0-9]+$/.test(intent.paymentIntentId)
+                      ? intent.paymentIntentId : null;
+                    tx.create(matchRef, {
+                      id: matchId, jobId: meta.jobId, customerId: userId || "",
+                      chargeAmountPence: Number(session.amount_total || 0),
+                      currency: String(session.currency || "gbp").toLowerCase(),
+                      chargeTier: "instant_match", feeWaived: false,
+                      status: paymentIntentId ? "searching" : "refund_review_required",
+                      refundStatus: paymentIntentId ? "not_started" : "manual_review",
+                      refundReviewReason: paymentIntentId ? null : "missing_or_invalid_payment_intent",
+                      stripePaymentIntentId: paymentIntentId,
+                      currentAttempt: 0,
+                      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                      searchingAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
                   }
-                  fundedAmount = Number(m.amount || m.verifiedAmount || (session.amount_total ? session.amount_total / 100 : 0));
-                  return { ...m, status: 'funded', fundedAt: new Date().toISOString(), stripePaymentIntentId: paymentIntentId };
-                }
-                return m;
-              });
-              
-              await quoteRef.update({ milestones: updatedMilestones });
-
-              // Record to immutable payment ledger
-              // Enforce robust consistency: do not swallow ledger operations errors!
-              await PaymentLedgerEngine.recordEscrowFunding(db, {
-                jobId,
-                milestoneId,
-                paymentIntentId: paymentIntentId || `pi_${event.id}`,
-                idempotencyKey: `webhook_${event.id}`,
-                customerId: session.client_reference_id || "homeowner",
-                traderId: quoteData?.tradespersonId || "trader",
-                verifiedAmount: session.amount_total || Math.round(fundedAmount * 100),
-                currency: session.currency || "gbp"
-              });
-
-              await domainEvents.dispatch("MILESTONE_FUNDED", milestoneId, session.client_reference_id || "homeowner", {
-                jobId,
-                quoteId,
-                amount: fundedAmount
-              }, `webhook_${event.id}`, db);
-              
-              // Notify trader
-              await db.collection("notifications").add({
-                userId: quoteData?.tradespersonId,
-                title: "Milestone Funded! 💰",
-                message: `Homeowner funded "${milestones.find((m: any) => m.id === milestoneId)?.title || 'Milestone'}". You can now start work!`,
-                type: "status",
-                link: `/job/${jobId}`,
-                read: false,
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
-              });
-            }
-            } else if (meta?.type === 'fee_settlement' && meta?.driverId && db) {
-              const driverId = meta.driverId;
-              const amount = session.amount_total ? session.amount_total / 100 : 0;
-              
-              if (driverId && amount > 0) {
-                const driverRef = db.collection("users").doc(driverId);
-                const driverDoc = await driverRef.get();
-                const currentPending = Number(driverDoc.data()?.pendingPlatformFees || 0);
-                const newPending = Math.max(0, Number((currentPending - amount).toFixed(2)));
-                await driverRef.update({
-                  pendingPlatformFees: newPending,
-                  lastFeeSettlementAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-                console.log(`Driver ${driverId} settled £${amount} in platform fees (remaining pending: £${newPending})`);
-              }
-            } else if (meta?.type === 'taxi_trip' && meta?.rideId && db) {
-              const rideId = meta.rideId;
-              const driverId = meta.driverId;
-            const amount = session.amount_total ? session.amount_total / 100 : 0;
-
-            const rideRef = db.collection("ride_requests").doc(rideId);
-            const rideSnap = await rideRef.get();
-            const rideData = rideSnap.data();
-
-            try {
-              validateRideTransition(rideData?.status || "in_progress", "completed");
-            } catch (rideTransErr) {
-              console.warn(`Ride transition warning on ${rideId}:`, rideTransErr);
-            }
-
-            // 1. Update ride status
-            await rideRef.update({
-              status: "completed",
-              paymentStatus: "paid",
-              payoutTransferred: true, // Handled automatically by Stripe transfer_data
-              stripePaymentIntentId: session.payment_intent as string,
-              paidAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            // 2. Record ledger entry for ride payment
-            const ledgerEntryId = `ledg_ride_${event.id}`;
-            const farePence = session.amount_total || Math.round(amount * 100);
-            const feePence = Math.round(farePence * 0.12);
-            await db.collection("payment_ledger").doc(ledgerEntryId).set({
-              entryId: ledgerEntryId,
-              transactionId: session.payment_intent as string || `pi_${event.id}`,
-              idempotencyKey: `webhook_ride_${event.id}`,
-              payerId: rideData?.passengerId || session.client_reference_id || "passenger",
-              payeeId: driverId || "driver",
-              amount: farePence,
-              platformFee: feePence,
-              netPayout: farePence - feePence,
-              currency: session.currency || "gbp",
-              type: "DIRECT_PAYOUT",
-              status: "completed",
-              createdAt: new Date().toISOString()
-            });
-
-            // 3. Update driver metrics
-            if (driverId) {
-              const today = new Date().toISOString().split('T')[0];
-              const metricsRef = db.collection("driver_metrics").doc(driverId);
-              const metricsDoc = await metricsRef.get();
-              
-              if (metricsDoc.exists) {
-                const data = metricsDoc.data();
-                if (data?.date === today) {
-                  await metricsRef.update({
-                    dailyEarnings: admin.firestore.FieldValue.increment(amount * 0.88), // 88% after commission
-                    jobsDoneToday: admin.firestore.FieldValue.increment(1),
-                    lastTripAt: admin.firestore.FieldValue.serverTimestamp()
-                  });
-                } else {
-                  // Reset for a new day
-                  await metricsRef.set({
-                    driverId,
-                    date: today,
-                    dailyEarnings: amount * 0.88,
-                    jobsDoneToday: 1,
-                    lastAssignmentAt: admin.firestore.FieldValue.serverTimestamp(),
-                    lastTripAt: admin.firestore.FieldValue.serverTimestamp()
+                  tx.set(jobRef, { instantMatchId: matchId, matchedViaInstantMatch: true }, { merge: true });
+                  tx.create(instantMatchFulfillmentRef, {
+                    eventId: event.id, sessionId: session.id,
+                    intentId: session.metadata?.intentId || null,
+                    userId, jobId: meta.jobId, type: "instant_match",
+                    createdAt: admin.firestore.FieldValue.serverTimestamp()
                   });
                 }
-              } else {
-                await metricsRef.set({
-                  driverId,
-                  date: today,
-                  dailyEarnings: amount * 0.88,
-                  jobsDoneToday: 1,
-                  lastAssignmentAt: admin.firestore.FieldValue.serverTimestamp(),
-                  lastTripAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-              }
+              });
+              // The projection is a separate transaction because it is not part of
+              // the monetary/job fulfillment commit. Still fence it with the event claim:
+              // a worker whose lease was taken over must not publish stale projection data.
+              await db.runTransaction(async (tx: any) => {
+                const claimSnap = await tx.get(eventRef);
+                const claimData = claimSnap.data() || {};
+                if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                  throw new Error('Webhook claim lost before boost projection mutation.');
+                }
+                tx.set(publicCardRef, {
+                  isBoosted: true,
+                  boostTier: meta.tier || "emergency_boost",
+                  isInstantMatch: isIM,
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+              });
             }
           }
         }
-      } else if (event.type === 'customer.subscription.updated') {
-         const subscription = event.data.object as Stripe.Subscription;
-         // Find user by subscription ID
-         if (db) {
-           const usersQuery = await db.collection("users").where("subscriptionId", "==", subscription.id).get();
-           if (!usersQuery.empty) {
-             const userId = usersQuery.docs[0].id;
-             await db.collection("users").doc(userId).update({
-               subscriptionStatus: subscription.status,
-               currentPeriodEnd: new Date(subscription.current_period_end * 1000).toISOString(),
-               cancelAtPeriodEnd: subscription.cancel_at_period_end,
-               updatedAt: admin.firestore.FieldValue.serverTimestamp()
-             });
-           }
-         }
-      } else if (event.type === 'customer.subscription.deleted') {
-         const subscription = event.data.object as Stripe.Subscription;
-         if (db) {
-           const usersQuery = await db.collection("users").where("subscriptionId", "==", subscription.id).get();
-           if (!usersQuery.empty) {
-             const userId = usersQuery.docs[0].id;
-             await db.collection("users").doc(userId).update({
-               subscriptionStatus: "canceled",
-               tier: "payg",
-               isPro: false,
-               isProInvoiceSubscriber: false,
-               updatedAt: admin.firestore.FieldValue.serverTimestamp()
-             });
-           }
-
-           const videoProQuery = await db.collection("users").where("videoProSubscriptionId", "==", subscription.id).get();
-           if (!videoProQuery.empty) {
-             const vUserId = videoProQuery.docs[0].id;
-             await db.collection("users").doc(vUserId).update({
-               hasVerifiedVideoProSubscription: false,
-               updatedAt: admin.firestore.FieldValue.serverTimestamp()
-             });
-           }
-
-           const exclusiveQuery = await db.collection("users").where("exclusiveSubscriptionId", "==", subscription.id).get();
-           if (!exclusiveQuery.empty) {
-             const eUserId = exclusiveQuery.docs[0].id;
-             await db.collection("users").doc(eUserId).update({
-               hasExclusiveAddon: false,
-               isExclusiveActive: false,
-               updatedAt: admin.firestore.FieldValue.serverTimestamp()
-             });
-           }
-         }
-      } else if (event.type === 'charge.refunded') {
-         const charge = event.data.object as Stripe.Charge;
-         if (db && charge.payment_intent) {
-           console.log(`[Webhook] Processing refund for payment_intent ${charge.payment_intent}`);
-           await db.collection("refund_events").doc(`ref_${event.id}`).set({
-             chargeId: charge.id,
-             paymentIntentId: charge.payment_intent,
-             amountRefunded: charge.amount_refunded,
-             currency: charge.currency,
-             status: "refunded",
-             createdAt: admin.firestore.FieldValue.serverTimestamp()
-           }, { merge: true });
-         }
-      } else if (event.type === 'payment_intent.payment_failed') {
-         const pi = event.data.object as Stripe.PaymentIntent;
-         if (db && pi.id) {
-           console.warn(`[Webhook] PaymentIntent ${pi.id} failed: ${pi.last_payment_error?.message || "Unknown error"}`);
-           await db.collection("failed_payments").doc(`fail_${event.id}`).set({
-             paymentIntentId: pi.id,
-             lastError: pi.last_payment_error?.message || "Failed",
-             status: "failed",
-             createdAt: admin.firestore.FieldValue.serverTimestamp()
-           }, { merge: true });
-         }
-      } else if (event.type === 'checkout.session.expired') {
-         const expiredSession = event.data.object as Stripe.Checkout.Session;
-         if (db && expiredSession.id) {
-           console.log(`[Webhook] Checkout session ${expiredSession.id} expired.`);
-           await db.collection("expired_checkout_sessions").doc(`exp_${event.id}`).set({
-             sessionId: expiredSession.id,
-             clientReferenceId: expiredSession.client_reference_id || null,
-             status: "expired",
-             createdAt: admin.firestore.FieldValue.serverTimestamp()
-           }, { merge: true });
-         }
-      } else if (event.type === 'charge.dispute.created') {
-         const dispute = event.data.object as Stripe.Dispute;
-         if (db && dispute.id) {
-           console.warn(`[Webhook Alert] Charge dispute created: ${dispute.id} for charge ${dispute.charge}`);
-           await db.collection("dispute_events").doc(`disp_${event.id}`).set({
-             disputeId: dispute.id,
-             chargeId: dispute.charge,
-             amount: dispute.amount,
-             reason: dispute.reason,
-             status: dispute.status,
-             createdAt: admin.firestore.FieldValue.serverTimestamp()
-           }, { merge: true });
-         }
+      // Reconcile each individual Stripe refund against the original completed ledger entry.
+      if (event.type === "charge.refunded" || event.type === "refund.updated") {
+        // charge.refunded can arrive while an individual refund is still pending.
+        // refund.updated refreshes the Charge; both event types then reconcile the complete Stripe refund list.
+        const refundUpdate = event.type === "refund.updated" ? event.data.object as Stripe.Refund : null;
+        const charge = refundUpdate
+          ? await stripeClient.charges.retrieve(typeof refundUpdate.charge === "string" ? refundUpdate.charge : refundUpdate.charge.id)
+          : event.data.object as Stripe.Charge;
+        const chargePaymentIntent = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id || null;
+        const refundPaymentIntent = refundUpdate
+          ? (typeof refundUpdate.payment_intent === "string" ? refundUpdate.payment_intent : refundUpdate.payment_intent?.id || null)
+          : null;
+        const paymentIntentId = chargePaymentIntent || refundPaymentIntent;
+        const eventRefundRef = db.collection("refund_events").doc(`ref_${event.id}`);
+        if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before refund reconciliation.");
+        if (!paymentIntentId) {
+          await db.collection("refund_review").doc(`charge_${charge.id}`).set({
+            chargeId: charge.id, amountRefunded: charge.amount_refunded, currency: charge.currency,
+            reason: "charge_refund_missing_payment_intent_reference", status: "requires_review", sourceEventId: event.id,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+          await eventRefundRef.set({ chargeId: charge.id, amountRefunded: charge.amount_refunded, currency: charge.currency,
+            status: "requires_review", requiresReview: true, reason: "charge_refund_missing_payment_intent_reference",
+            sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        } else {
+          // Always retrieve the complete Charge refund list; the embedded Charge expansion is only a partial page.
+          const { refunds, pagesScanned: refundPagesScanned } = await listAllChargeRefunds(stripeClient, charge.id);
+          let requiresReview = false;
+          await eventRefundRef.set({ chargeId: charge.id, paymentIntentId, amountRefunded: charge.amount_refunded,
+            currency: charge.currency, refundIds: refunds.map(refund => refund.id), status: "reconciliation_started",
+            createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          const ledger = await db.collection("payment_ledger").where("transactionId", "==", paymentIntentId).get();
+          const preferred = ledger.docs.filter((doc: any) => doc.data()?.status === "completed" && doc.data()?.type === "ESCROW_DEPOSIT");
+          const eligible = preferred.length ? preferred : ledger.docs.filter((doc: any) => doc.data()?.status === "completed" && doc.data()?.type === "PLATFORM_COMMISSION");
+          if (!refunds.length && charge.amount_refunded > 0) {
+            requiresReview = true;
+            await db.collection("refund_review").doc(`charge_${charge.id}`).set({ chargeId: charge.id, paymentIntentId,
+              amountRefunded: charge.amount_refunded, currency: charge.currency,
+              reason: "charge_refunded_event_has_no_individual_refund_objects", status: "requires_review", sourceEventId: event.id,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          }
+          for (const refund of refunds) {
+            const refundChargeId = typeof refund.charge === "string" ? refund.charge : refund.charge?.id || null;
+            const refundPi = typeof refund.payment_intent === "string" ? refund.payment_intent : refund.payment_intent?.id || null;
+            const reviewRef = db.collection("refund_review").doc(refund.id);
+            if (refundChargeId !== charge.id || refundPi !== paymentIntentId || String(refund.currency || "").toLowerCase() !== String(charge.currency || "").toLowerCase() || eligible.length !== 1) {
+              requiresReview = true;
+              await reviewRef.set({ refundId: refund.id, chargeId: charge.id, paymentIntentId,
+                amountPence: refund.amount, currency: refund.currency,
+                candidateLedgerEntryIds: eligible.map((doc: any) => doc.id),
+                reason: refundChargeId !== charge.id || refundPi !== paymentIntentId || String(refund.currency || "").toLowerCase() !== String(charge.currency || "").toLowerCase()
+                  ? "refund_charge_payment_intent_or_currency_mismatch" : eligible.length === 0
+                    ? "no_matching_completed_original_payment_ledger_entry" : "multiple_matching_original_payment_ledger_entries",
+                status: "requires_review", sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+              continue;
+            }
+            try {
+              await recordConfirmedRefund(db, { refundId: refund.id, chargeId: charge.id, paymentIntentId,
+                originalLedgerEntryId: eligible[0].id, amountPence: refund.amount, currency: refund.currency,
+                stripeRefundStatus: refund.status || "unknown", operationId: refund.metadata?.refundOperationId || undefined, reason: refund.reason || null });
+              await reviewRef.delete().catch(() => undefined);
+            } catch (refundError: any) {
+              if (![400, 404, 409].includes(Number(refundError?.statusCode))) throw refundError;
+              requiresReview = true;
+              await reviewRef.set({ refundId: refund.id, chargeId: charge.id, paymentIntentId,
+                originalLedgerEntryId: eligible[0].id, amountPence: refund.amount, currency: refund.currency,
+                reason: refundError.message || "refund_reconciliation_conflict", status: "requires_review",
+                sourceEventId: event.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            }
+          }
+          // The full Stripe list was retrieved successfully, so clear any stale pagination-only review marker.
+          await db.collection("refund_review").doc(`charge_${charge.id}_pagination`).delete().catch(() => undefined);
+          const requiresPaginationReview = false;
+          if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before refund event completion.");
+          await eventRefundRef.set({ status: getRefundEventReconciliationStatus(requiresReview, requiresPaginationReview),
+            requiresReview, reconciledRefundCount: refunds.length, refundPagesScanned, requiresPaginationReview,
+            reconciledAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        }
       }
-      
-      // Mark as completed idempotently
-      await eventRef.update({ status: 'completed' });
+      // Mediation stake payment lifecycle is server-authoritative and validates the reserved attempt.
+      if (event.type === "payment_intent.succeeded" || event.type === "payment_intent.payment_failed") {
+        const pi = event.data.object as Stripe.PaymentIntent;
+        const meta = pi.metadata || {};
+        if (meta.type === "mediation_stake") {
+          const isSuccess = event.type === "payment_intent.succeeded";
+          if (!meta.jobId || !meta.paymentAttemptId || !meta.userId || pi.currency !== "gbp" || pi.amount !== 2500) {
+            await db.runTransaction(async (tx: any) => {
+              const claim = await tx.get(eventRef);
+              if (!ownsStripeWebhookClaim(claim.data() || {}, claimToken)) throw new Error("Webhook claim lost before rejecting mediation payment.");
+              tx.update(eventRef, { status: "rejected", rejectionReason: isSuccess ? "invalid_mediation_stake_success_metadata_or_amount" : "invalid_mediation_stake_failure_metadata_or_amount", rejectedAt: admin.firestore.FieldValue.serverTimestamp() });
+            });
+            return res.status(400).send("Invalid mediation stake payment");
+          }
+          if (!ownsStripeWebhookClaim((await eventRef.get()).data() || {}, claimToken)) throw new Error("Webhook claim lost before mediation payment mutation.");
+          if (isSuccess) {
+            await confirmMediationStakePayment(db, { jobId: meta.jobId, userId: meta.userId, attemptId: meta.paymentAttemptId, paymentIntentId: pi.id, serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp() });
+          } else {
+            await recordMediationStakePaymentFailure(db, { jobId: meta.jobId, userId: meta.userId, attemptId: meta.paymentAttemptId, paymentIntentId: pi.id, paymentIntentStatus: pi.status, lastPaymentError: pi.last_payment_error?.message || "Payment attempt failed", serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp() });
+            await db.collection("failed_payments").doc(`fail_${event.id}`).set({ paymentIntentId: pi.id, lastError: pi.last_payment_error?.message || "Failed", status: "failed", createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          }
+        }
+      }
+
+      // Synchronize product entitlements from the current Stripe subscription state.
+      // Invoice events are triggers only: payment events never grant access by themselves.
+      if (isStripeSubscriptionLifecycleEventType(event.type)) {
+        const payload = event.data.object as any;
+        const isSubscriptionDeleted = event.type === "customer.subscription.deleted";
+        const subscriptionId = event.type.startsWith("customer.subscription.")
+          ? String(payload.id || "")
+          : extractInvoiceSubscriptionId(payload);
+        if (subscriptionId) {
+          // Use Stripe's live state for update/invoice events; the deleted event itself
+          // is terminal. A replaced subscription ID is never allowed to update the new one.
+          const subscription = isSubscriptionDeleted
+            ? payload as Stripe.Subscription
+            : await stripeClient.subscriptions.retrieve(subscriptionId);
+          const products = [
+            { key: "membership", idField: "subscriptionId", lastCreated: "subscriptionLastEventCreated", lastId: "subscriptionLastEventId" },
+            { key: "gold_driver", idField: "driverSubscriptionId", lastCreated: "driverSubscriptionLastEventCreated", lastId: "driverSubscriptionLastEventId" },
+            { key: "exclusive_leads", idField: "exclusiveSubscriptionId", lastCreated: "exclusiveSubscriptionLastEventCreated", lastId: "exclusiveSubscriptionLastEventId" },
+            { key: "video_pro", idField: "videoProSubscriptionId", lastCreated: "videoProSubscriptionLastEventCreated", lastId: "videoProSubscriptionLastEventId" },
+            { key: "gotham_saas", idField: "gothamSubscriptionId", lastCreated: "gothamSubscriptionLastEventCreated", lastId: "gothamSubscriptionLastEventId" }
+          ];
+          const matches = await Promise.all(products.map(async (product) => {
+            const snap = await db.collection("users").where(product.idField, "==", subscriptionId).limit(2).get();
+            if (snap.size > 1) {
+              throw new Error("Stripe subscription is linked to multiple users for " + product.key + "; manual reconciliation required.");
+            }
+            return snap.empty ? null : { product, userDoc: snap.docs[0] };
+          }));
+          const linked = matches.filter((entry: any) => entry !== null) as Array<{ product: any; userDoc: any }>;
+          const resolved = resolveSubscriptionProductMatch(linked);
+          if (resolved) {
+            const { product, userDoc } = resolved;
+            const eventCreated = Number(event.created || 0);
+            await db.runTransaction(async (tx: any) => {
+              const claimSnap = await tx.get(eventRef);
+              const claimData = claimSnap.data() || {};
+              if (!ownsStripeWebhookClaim(claimData, claimToken)) {
+                throw new Error('Webhook claim lost before checkout fulfillment mutation.');
+              }
+              const latest = await tx.get(userDoc.ref);
+              if (!latest.exists) return;
+              const current = latest.data() || {};
+              if (current[product.idField] !== subscriptionId) return;
+              // Event ordering is tracked independently for each product subscription.
+              if (Number(current[product.lastCreated] || 0) > eventCreated) return;
+              const patch: Record<string, any> = {
+                ...buildSubscriptionLifecyclePatch(product.key, subscription as any, isSubscriptionDeleted),
+                [product.lastCreated]: eventCreated,
+                [product.lastId]: event.id,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              };
+              tx.update(userDoc.ref, patch);
+            });
+          }
+        }
+      }
+
+      // Completion is fenced: an expired worker cannot complete a successor's claim.
+      await completeStripeWebhookClaim(db, eventRef, claimToken, admin.firestore.FieldValue.delete());
       res.status(200).json({ received: true });
     } catch (err: any) {
       console.error("Webhook processing error:", err.message);
@@ -2135,56 +2332,106 @@ async function startServer() {
           } catch (_) {}
         }
         if (rawEventId) {
-          await db.collection("processed_stripe_events").doc(rawEventId).set({ 
-             status: 'failed',
-             error: err.message,
-             failedAt: admin.firestore.FieldValue.serverTimestamp()
-          }, { merge: true }).catch(e => console.error("Could not update failed status", e));
+          const failedRef = db.collection("processed_stripe_events").doc(rawEventId);
+          await failStripeWebhookClaimIfOwned(
+            db, failedRef, claimToken, err.message,
+            admin.firestore.FieldValue.serverTimestamp(), admin.firestore.FieldValue.delete()
+          ).catch(e => console.error("Could not update failed status", e));
         }
       }
       res.status(500).json({ error: 'Webhook processing failed' });
     }
-  });
+  })
 
-  app.use("/api/gemini/call", express.json({ limit: "10mb" }));
-  app.use(express.json({ limit: "1mb" }));
+  // Free membership selection is server-authoritative; clients cannot write subscription entitlements.
+  app.post("/api/select-free-tier", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const userId = String((req as any).user?.uid || "");
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+      const tierName = String(req.body?.tierName || "").trim().toLowerCase();
+      const userRef = db.collection("users").doc(userId);
+      const userSnap = await userRef.get();
+      if (!userSnap.exists) throw new NotFoundError("User profile not found.");
+      const userData = userSnap.data() || {};
+      const role = String(userData.role || "").toLowerCase();
+      const { globalTiers } = await getDynamicFirestoreConfigs(db);
 
-  // API Routes
-  app.get("/api/health", (req, res) => {
-    if (!isApplicationReady) {
-      if (bootstrapError) {
-        console.warn("[/api/health] Degraded readiness notice:", bootstrapError);
+      const terminalStatuses = ["canceled", "unpaid", "incomplete_expired", "free"];
+      if (role === "homeowner" || role === "customer") {
+        if (!["standard", "standard homeowner"].includes(tierName)) {
+          throw new ForbiddenError("Homeowners may select only the Standard free tier without a paid subscription.");
+        }
+        const configuredPrice = globalTiers?.providerModels?.homeowners?.tiers?.standard?.price;
+        if (configuredPrice !== undefined && Number(configuredPrice) !== 0) {
+          throw new ForbiddenError("The Standard Homeowner tier is not currently configured as free.");
+        }
+        if (userData.subscriptionType === "landlord" && userData.subscriptionId &&
+            !terminalStatuses.includes(String(userData.homeownerSubscriptionStatus || ""))) {
+          throw new ConflictError("Cancel the active Landlord subscription before selecting the free tier.");
+        }
+        await db.runTransaction(async (tx: any) => {
+          const latest = await tx.get(userRef);
+          if (!latest.exists) throw new NotFoundError("User profile not found.");
+          const current = latest.data() || {};
+          if (current.subscriptionType === "landlord" && current.subscriptionId &&
+              !terminalStatuses.includes(String(current.homeownerSubscriptionStatus || ""))) {
+            throw new ConflictError("Cancel the active Landlord subscription before selecting the free tier.");
+          }
+          tx.update(userRef, {
+            homeownerTierId: "standard",
+            homeownerSubscriptionStatus: "free",
+            homeownerCancelAtPeriodEnd: false,
+            homeownerCurrentPeriodEnd: admin.firestore.FieldValue.delete(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        });
+        return res.json({ success: true, fields: {
+          homeownerTierId: "standard",
+          homeownerSubscriptionStatus: "free",
+          homeownerCancelAtPeriodEnd: false
+        }});
       }
-      return res.status(200).json({
-        status: "degraded",
-        ready: true,
-        bootstrapReady: false,
-        message: "TradeQuote UK API running (client SPA mode active)"
+
+      if (role !== "tradesperson" || !["payg", "free explorer", "free explorer plan"].includes(tierName)) {
+        throw new ForbiddenError("This account cannot select the requested free tier.");
+      }
+      if (userData.subscriptionType === "tier" && userData.subscriptionId &&
+          !terminalStatuses.includes(String(userData.subscriptionStatus || ""))) {
+        throw new ConflictError("Cancel the active membership subscription before selecting the free tier.");
+      }
+      await db.runTransaction(async (tx: any) => {
+        const latest = await tx.get(userRef);
+        if (!latest.exists) throw new NotFoundError("User profile not found.");
+        const current = latest.data() || {};
+        if (current.subscriptionType === "tier" && current.subscriptionId &&
+            !terminalStatuses.includes(String(current.subscriptionStatus || ""))) {
+          throw new ConflictError("Cancel the active membership subscription before selecting the free tier.");
+        }
+        tx.update(userRef, {
+          tierId: "Free Explorer",
+          tier: "payg",
+          subscriptionStatus: "free",
+          isPro: false,
+          isProInvoiceSubscriber: false,
+          cancelAtPeriodEnd: false,
+          currentPeriodEnd: admin.firestore.FieldValue.delete(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
       });
+      res.json({ success: true, fields: {
+        tierId: "Free Explorer",
+        tier: "payg",
+        subscriptionStatus: "free",
+        isPro: false,
+        isProInvoiceSubscriber: false,
+        cancelAtPeriodEnd: false
+      }});
+    } catch (error: any) {
+      console.error("Select Free Tier Error:", error);
+      sendHttpError(res, error, req);
     }
-    res.json({ status: "ok", ready: true, bootstrapReady: true, message: "TradeQuote UK API is running and ready" });
   });
-
-  // Push Notification Dispatcher (Server-Authoritative Recipient & Relationship Hardened)
-  app.post(
-    "/api/chat-push",
-    requireAuth,
-    AbuseDefenseEngine.createMiddleware("NOTIFICATION_SEND"),
-    async (req, res) => {
-      try {
-        const caller = (req as any).user;
-        const result = await sendAuthoritativeChatPush(
-          db,
-          admin.apps.length ? admin.messaging() : null,
-          caller,
-          req.body
-        );
-        res.json({ success: true, message: "Push sent successfully", ...result });
-      } catch (error: any) {
-        sendHttpError(res, error, req);
-      }
-    }
-  );
 
   // Stripe Checkout Session (Server-Authoritative Pricing & Stripe Connect Routing)
   app.post("/api/create-checkout-session", requireAuth, paymentLimiter, async (req, res) => {
@@ -2245,37 +2492,49 @@ async function startServer() {
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
           } else if (meta.subscriptionType === 'gotham_saas' || meta.type === 'gotham_saas') {
+            const mockGothamSubscriptionId = "mock_sub_gotham_" + Math.random().toString(36).substring(7);
+            const mockGothamPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
             await db.collection("users").doc(userId).set({
-              subscriptionStatus: "active",
-              subscriptionId: "mock_sub_gotham_" + Math.random().toString(36).substring(7),
               tierId: meta.gothamTierName || "Gotham Enterprise",
               tier: "gotham",
               subscriptionType: "gotham_saas",
               isGothamSubscriber: true,
+              gothamSubscriptionId: mockGothamSubscriptionId,
+              gothamSubscriptionStatus: "active",
               gothamDoorsCount: Number(meta.gothamDoorsCount) || 100,
               gothamTierName: meta.gothamTierName || "Gotham Enterprise",
               gothamBillingCycle: meta.gothamBillingCycle || "monthly",
               gothamCancelAtPeriodEnd: false,
-              cancelAtPeriodEnd: false,
-              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              gothamCurrentPeriodEnd: mockGothamPeriodEnd,
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
           } else if (meta.subscriptionType === 'driver_gold' || meta.type === 'driver_gold') {
+            const mockDriverSubscriptionId = "mock_sub_gold_driver_" + Math.random().toString(36).substring(7);
+            const mockDriverPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
             await db.collection("users").doc(userId).set({
-              subscriptionStatus: "active",
-              subscriptionId: "mock_sub_gold_driver_" + Math.random().toString(36).substring(7),
               tierId: "Gold Driver",
               tier: "gold",
               driverTier: "gold",
               subscriptionType: "driver_gold",
               isGoldDriver: true,
+              driverSubscriptionId: mockDriverSubscriptionId,
+              driverSubscriptionStatus: "active",
               commissionRate: 0.10,
               destinationFilters: 4,
               advanceBookingDays: 14,
               priorityDispatch: 50,
               driverCancelAtPeriodEnd: false,
-              cancelAtPeriodEnd: false,
-              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              driverCurrentPeriodEnd: mockDriverPeriodEnd,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } else if (authoritativeResult.mode === 'subscription' && (meta.subscriptionType === 'landlord' || meta.tier === 'landlord')) {
+            const mockLandlordSubscriptionId = "mock_sub_landlord_" + Math.random().toString(36).substring(7);
+            const mockLandlordPeriodEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+            await db.collection("users").doc(userId).set({
+              ...buildLandlordCheckoutFulfillmentPatch(
+                mockLandlordSubscriptionId,
+                { status: "active", cancel_at_period_end: false, current_period_end: Math.floor(mockLandlordPeriodEnd.getTime() / 1000) }
+              ),
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
           } else if (authoritativeResult.mode === 'subscription') {
@@ -2449,6 +2708,19 @@ async function startServer() {
       }
 
       const session = await stripe.checkout.sessions.create(sessionOptions);
+      if (!db) throw new Error("Checkout intent database binding is unavailable.");
+      const sessionPaymentIntentId = typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : typeof (session.payment_intent as any)?.id === "string"
+          ? (session.payment_intent as any).id
+          : null;
+      await db.collection("payment_intents").doc(intentId).update({
+        checkoutSessionId: session.id,
+        currency: String(session.currency || "gbp").toLowerCase(),
+        paymentIntentId: sessionPaymentIntentId,
+        status: "session_created",
+        sessionCreatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
 
       res.json({ url: session.url });
     } catch (error: any) {
@@ -2663,71 +2935,104 @@ async function startServer() {
       }
 
       const userData = userDoc.data() || {};
+      if (!["tier", "landlord", "exclusive_leads", "video_pro", "gotham_saas", "driver_gold"].includes(subscriptionType)) {
+        return res.status(400).json({ error: "Unsupported subscription type." });
+      }
       let subId: string | undefined;
       let fieldUpdates: any = {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
 
-      if (subscriptionType === "exclusive_leads") {
-        subId = userData.exclusiveSubscriptionId;
-        const currentEnd = userData.exclusiveCurrentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      if (subscriptionType === "landlord") {
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
+        fieldUpdates.homeownerCancelAtPeriodEnd = true;
+        if (userData.homeownerCurrentPeriodEnd) fieldUpdates.homeownerCurrentPeriodEnd = userData.homeownerCurrentPeriodEnd;
+      } else if (subscriptionType === "exclusive_leads") {
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
+        const currentEnd = userData.exclusiveCurrentPeriodEnd;
         fieldUpdates.exclusiveCancelAtPeriodEnd = true;
-        fieldUpdates.exclusiveCurrentPeriodEnd = currentEnd;
+        if (currentEnd) fieldUpdates.exclusiveCurrentPeriodEnd = currentEnd;
       } else if (subscriptionType === "video_pro") {
-        subId = userData.videoProSubscriptionId;
-        const currentEnd = userData.videoProCurrentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
+        const currentEnd = userData.videoProCurrentPeriodEnd;
         fieldUpdates.videoProCancelAtPeriodEnd = true;
-        fieldUpdates.videoProCurrentPeriodEnd = currentEnd;
+        if (currentEnd) fieldUpdates.videoProCurrentPeriodEnd = currentEnd;
       } else if (subscriptionType === "gotham_saas") {
-        subId = userData.gothamSubscriptionId || userData.subscriptionId;
-        const currentEnd = userData.gothamCurrentPeriodEnd || userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.gothamCancelAtPeriodEnd = true;
-        fieldUpdates.cancelAtPeriodEnd = true;
-        fieldUpdates.gothamCurrentPeriodEnd = currentEnd;
-        fieldUpdates.currentPeriodEnd = currentEnd;
+        const currentEnd = userData.gothamCurrentPeriodEnd || userData.currentPeriodEnd;
+        if (currentEnd) {
+          fieldUpdates.gothamCurrentPeriodEnd = currentEnd;
+        }
       } else if (subscriptionType === "driver_gold") {
-        subId = userData.driverSubscriptionId || userData.subscriptionId;
-        const currentEnd = userData.driverCurrentPeriodEnd || userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
+        const currentEnd = userData.driverCurrentPeriodEnd || userData.currentPeriodEnd;
         fieldUpdates.driverCancelAtPeriodEnd = true;
-        fieldUpdates.cancelAtPeriodEnd = true;
-        fieldUpdates.driverCurrentPeriodEnd = currentEnd;
-        fieldUpdates.currentPeriodEnd = currentEnd;
+        if (currentEnd) {
+          fieldUpdates.driverCurrentPeriodEnd = currentEnd;
+        }
       } else {
         // Default membership tier
-        subId = userData.subscriptionId;
-        const currentEnd = userData.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
+        const currentEnd = userData.currentPeriodEnd;
         fieldUpdates.cancelAtPeriodEnd = true;
-        fieldUpdates.currentPeriodEnd = currentEnd;
+        if (currentEnd) fieldUpdates.currentPeriodEnd = currentEnd;
+      }
+
+      if (!subId) {
+        return res.status(409).json({ error: "No Stripe subscription is linked to this account for the selected product." });
+      }
+      const hasMockSubscriptionId = isMockSubscriptionId(subId);
+      const isExplicitMockSubscription = isExplicitMockSubscriptionAllowed(
+        subId,
+        process.env.NODE_ENV,
+        process.env.ALLOW_MOCK_PAYMENTS
+      );
+      if (hasMockSubscriptionId && !isExplicitMockSubscription) {
+        return res.status(409).json({ error: "Mock subscription IDs are only valid in non-production with ALLOW_MOCK_PAYMENTS=true." });
       }
 
       let stripe;
       try {
         stripe = getStripe();
       } catch (e) {
-        // Fallback for mock/development environment
+        // Only explicitly marked mock subscriptions in a non-production mock-enabled
+        // environment may bypass Stripe. Real subscriptions never receive false success.
+        if (!isExplicitMockSubscription) {
+          return res.status(503).json({ error: "Stripe is unavailable; cancellation was not changed." });
+        }
         await db.collection("users").doc(authUid).update(fieldUpdates);
         return res.json({
           success: true,
           mock: true,
           cancelAtPeriodEnd: true,
-          currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd,
+          currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.homeownerCurrentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd || fieldUpdates.gothamCurrentPeriodEnd || fieldUpdates.driverCurrentPeriodEnd,
           message: "Subscription set to cancel at the end of the current billing cycle without renewing."
         });
       }
 
-      if (subId && !subId.startsWith("mock_")) {
+      if (!isExplicitMockSubscription) {
         // Call Stripe API to set cancel_at_period_end = true
         const updatedSub = await stripe.subscriptions.update(subId, {
           cancel_at_period_end: true
         });
 
         const periodEndIso = new Date(updatedSub.current_period_end * 1000).toISOString();
-        if (subscriptionType === "exclusive_leads") {
+        if (subscriptionType === "landlord") {
+          fieldUpdates.homeownerCancelAtPeriodEnd = true;
+          fieldUpdates.homeownerCurrentPeriodEnd = periodEndIso;
+        } else if (subscriptionType === "exclusive_leads") {
           fieldUpdates.exclusiveCancelAtPeriodEnd = true;
           fieldUpdates.exclusiveCurrentPeriodEnd = periodEndIso;
         } else if (subscriptionType === "video_pro") {
           fieldUpdates.videoProCancelAtPeriodEnd = true;
           fieldUpdates.videoProCurrentPeriodEnd = periodEndIso;
+        } else if (subscriptionType === "gotham_saas") {
+          fieldUpdates.gothamCancelAtPeriodEnd = true;
+          fieldUpdates.gothamCurrentPeriodEnd = periodEndIso;
+        } else if (subscriptionType === "driver_gold") {
+          fieldUpdates.driverCancelAtPeriodEnd = true;
+          fieldUpdates.driverCurrentPeriodEnd = periodEndIso;
         } else {
           fieldUpdates.cancelAtPeriodEnd = true;
           fieldUpdates.currentPeriodEnd = periodEndIso;
@@ -2739,7 +3044,7 @@ async function startServer() {
       res.json({
         success: true,
         cancelAtPeriodEnd: true,
-        currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd,
+        currentPeriodEnd: fieldUpdates.currentPeriodEnd || fieldUpdates.homeownerCurrentPeriodEnd || fieldUpdates.exclusiveCurrentPeriodEnd || fieldUpdates.videoProCurrentPeriodEnd || fieldUpdates.gothamCurrentPeriodEnd || fieldUpdates.driverCurrentPeriodEnd,
         message: "Subscription will cancel at the end of the current billing cycle. You will retain all benefits until your renewal date."
       });
     } catch (error: any) {
@@ -2764,35 +3069,56 @@ async function startServer() {
       }
 
       const userData = userDoc.data() || {};
+      if (!["tier", "exclusive_leads", "video_pro", "gotham_saas", "driver_gold"].includes(subscriptionType)) {
+        return res.status(400).json({ error: "Unsupported subscription type." });
+      }
       let subId: string | undefined;
       let fieldUpdates: any = {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
 
-      if (subscriptionType === "exclusive_leads") {
-        subId = userData.exclusiveSubscriptionId;
+      if (subscriptionType === "landlord") {
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
+        fieldUpdates.homeownerCancelAtPeriodEnd = false;
+      } else if (subscriptionType === "exclusive_leads") {
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.exclusiveCancelAtPeriodEnd = false;
       } else if (subscriptionType === "video_pro") {
-        subId = userData.videoProSubscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.videoProCancelAtPeriodEnd = false;
       } else if (subscriptionType === "gotham_saas") {
-        subId = userData.gothamSubscriptionId || userData.subscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.gothamCancelAtPeriodEnd = false;
-        fieldUpdates.cancelAtPeriodEnd = false;
       } else if (subscriptionType === "driver_gold") {
-        subId = userData.driverSubscriptionId || userData.subscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.driverCancelAtPeriodEnd = false;
-        fieldUpdates.cancelAtPeriodEnd = false;
       } else {
-        subId = userData.subscriptionId;
+        subId = getSubscriptionIdForProduct(userData, subscriptionType);
         fieldUpdates.cancelAtPeriodEnd = false;
+      }
+
+      if (!subId) {
+        return res.status(409).json({ error: "No Stripe subscription is linked to this account for the selected product." });
+      }
+      const hasMockSubscriptionId = isMockSubscriptionId(subId);
+      const isExplicitMockSubscription = isExplicitMockSubscriptionAllowed(
+        subId,
+        process.env.NODE_ENV,
+        process.env.ALLOW_MOCK_PAYMENTS
+      );
+      if (hasMockSubscriptionId && !isExplicitMockSubscription) {
+        return res.status(409).json({ error: "Mock subscription IDs are only valid in non-production with ALLOW_MOCK_PAYMENTS=true." });
       }
 
       let stripe;
       try {
         stripe = getStripe();
       } catch (e) {
-        // Fallback for mock/development environment
+        // Only explicitly marked mock subscriptions in a non-production mock-enabled
+        // environment may bypass Stripe. Real subscriptions never receive false success.
+        if (!isExplicitMockSubscription) {
+          return res.status(503).json({ error: "Stripe is unavailable; reactivation was not changed." });
+        }
         await db.collection("users").doc(authUid).update(fieldUpdates);
         return res.json({
           success: true,
@@ -2802,7 +3128,7 @@ async function startServer() {
         });
       }
 
-      if (subId && !subId.startsWith("mock_")) {
+      if (!isExplicitMockSubscription) {
         await stripe.subscriptions.update(subId, {
           cancel_at_period_end: false
         });
@@ -2821,102 +3147,29 @@ async function startServer() {
     }
   });
 
-  // Dispute Mediation Stake Stripe PaymentIntent (£25.00)
+  // Dispute Mediation Stake Stripe PaymentIntent (£25.00); never simulate payment success.
   app.post("/api/disputes/create-stake-intent", requireAuth, paymentLimiter, async (req, res) => {
+    const authUid = (req as any).user.uid;
+    const { jobId, disputeReason, technicalFaultReport, isPropertyDamage = false, photos = [] } = req.body || {};
+    if (!jobId || typeof jobId !== "string") return res.status(400).json({ error: "jobId is required" });
+    if (!db) return res.status(503).json({ error: "Database service unavailable" });
     try {
-      const authUid = (req as any).user.uid;
-      const { jobId, disputeReason, technicalFaultReport, isPropertyDamage = false, photos = [] } = req.body;
-
-      if (!jobId) {
-        return res.status(400).json({ error: "jobId is required" });
-      }
-
-      if (!db) {
-        return res.status(500).json({ error: "Database service unavailable" });
-      }
-
-      const jobDoc = await db.collection("jobs").doc(jobId).get();
-      if (!jobDoc.exists) {
-        return res.status(404).json({ error: "Job not found" });
-      }
-
-      const jobData = jobDoc.data() || {};
-      const stakeAmountPence = 2500; // £25.00
-
       let stripe;
-      try {
-        stripe = getStripe();
-      } catch (e) {
-        // Fallback for mock/dev environment
-        await db.collection("jobs").doc(jobId).update({
-          status: "disputed",
-          dispute: {
-            raisedBy: authUid,
-            reason: disputeReason || "Dispute raised",
-            technicalFaultReport: technicalFaultReport || "",
-            isPropertyDamage: Boolean(isPropertyDamage),
-            mediationStakePaid: true,
-            mediationStakeAmount: 25.00,
-            stakePaymentId: "mock_pi_stake_" + Math.random().toString(36).substring(7),
-            photos: Array.isArray(photos) ? photos : [],
-            status: "pending_arbitration",
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-          },
-          disputedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-
-        return res.json({
-          success: true,
-          mock: true,
-          amount: 25.00,
-          status: "succeeded",
-          message: "Mediation stake of £25.00 authorized successfully. Dispute is now pending arbitration."
-        });
+      try { stripe = getStripe(); }
+      catch (stripeError: any) {
+        console.error("Stripe unavailable for mediation stake:", stripeError?.message || stripeError);
+        return res.status(503).json({ error: "Payment service temporarily unavailable. Please try again shortly." });
       }
-
-      // Create real Stripe PaymentIntent
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: stakeAmountPence,
-        currency: "gbp",
-        metadata: {
-          type: "mediation_stake",
-          jobId,
-          disputeReason: disputeReason || "",
-          technicalFaultReport: technicalFaultReport || "",
-          isPropertyDamage: String(isPropertyDamage),
-          userId: authUid
-        },
-        description: `Mediation Dispute Stake for Job #${jobData.jobNo || jobId} (£25.00)`,
-        automatic_payment_methods: {
-          enabled: true
-        }
+      const result = await createMediationStakePaymentIntent(db, stripe, {
+        jobId, userId: authUid, candidateAttemptId: db.collection("payment_attempts").doc().id,
+        disputeReason, technicalFaultReport, isPropertyDamage, photos,
+        serverTimestamp: () => admin.firestore.FieldValue.serverTimestamp()
       });
-
-      // Save pending dispute record
-      await db.collection("jobs").doc(jobId).update({
-        dispute: {
-          raisedBy: authUid,
-          reason: disputeReason || "Dispute raised",
-          technicalFaultReport: technicalFaultReport || "",
-          isPropertyDamage: Boolean(isPropertyDamage),
-          mediationStakePaid: false,
-          mediationStakeAmount: 25.00,
-          paymentIntentId: paymentIntent.id,
-          photos: Array.isArray(photos) ? photos : [],
-          status: "awaiting_payment",
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        }
-      });
-
-      res.json({
-        success: true,
-        clientSecret: paymentIntent.client_secret,
-        paymentIntentId: paymentIntent.id,
-        amount: 25.00
-      });
+      return res.json({ success: true, clientSecret: result.paymentIntent.client_secret, paymentIntentId: result.paymentIntent.id, amount: 25.00 });
     } catch (error: any) {
       console.error("Create Dispute Stake Intent Error:", error);
-      res.status(500).json({ error: error.message || "Failed to initiate mediation stake" });
+      const status = Number(error?.httpStatus) || 500;
+      return res.status(status).json({ error: status === 500 ? "Failed to initiate mediation stake" : error.message });
     }
   });
 
@@ -3360,17 +3613,35 @@ async function startServer() {
         throw new BadRequestError("Idempotency-Key header is required for payout operations.");
       }
 
+      // Resolve the payout destination before checking/replaying the idempotency key.
+      // A driver reconnecting Stripe must not replay a payout bound to the previous account.
+      const driverDoc = await db.collection("users").doc(driverId).get();
+      if (!driverDoc.exists) throw new BadRequestError("Driver not found");
+
+      const stripeAccountId = driverDoc.data()?.stripeAccountId;
+      if (typeof stripeAccountId !== "string" || stripeAccountId.trim() === "") {
+        throw new BadRequestError("No Stripe account connected");
+      }
+
+      const hasFixedAmount = amount !== undefined && amount !== null && amount !== "";
+      const requestedAmountPence = hasFixedAmount ? Math.round(Number(amount) * 100) : null;
+      if (hasFixedAmount && (!Number.isSafeInteger(requestedAmountPence) || requestedAmountPence! <= 0)) {
+        throw new BadRequestError("Invalid payout amount. Must be a positive amount in pounds.");
+      }
+
       const { result, wasReplayed } = await PaymentLedgerEngine.executeIdempotentOperation(
         db,
         idempotencyKey,
         "DRIVER_STRIPE_PAYOUT",
+        {
+          version: 1,
+          driverId,
+          stripeAccountId,
+          currency: "gbp",
+          amountMode: hasFixedAmount ? "fixed" : "full_available_balance",
+          amountPence: requestedAmountPence,
+        },
         async () => {
-          const driverDoc = await db.collection("users").doc(driverId).get();
-          if (!driverDoc.exists) throw new BadRequestError("Driver not found");
-
-          const stripeAccountId = driverDoc.data()?.stripeAccountId;
-          if (!stripeAccountId) throw new BadRequestError("No Stripe account connected");
-
           const stripe = getStripe();
 
           // Get available balance first
@@ -3385,11 +3656,11 @@ async function startServer() {
           }
 
           // Create a payout
-          const payoutAmount = amount !== undefined && amount !== null && amount !== "" 
-            ? Math.round(Number(amount) * 100) 
+          const payoutAmount = hasFixedAmount
+            ? requestedAmountPence!
             : available; // Default to full available balance
 
-          if (isNaN(payoutAmount) || payoutAmount <= 0) {
+          if (!Number.isSafeInteger(payoutAmount) || payoutAmount <= 0) {
             throw new BadRequestError("Invalid payout amount. Must be a positive number.");
           }
 
@@ -3533,6 +3804,606 @@ async function startServer() {
       res.json({ success: true, ...result });
     } catch (error: any) {
       console.error("Sync Public Properties Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // All property creation is server-authoritative so Gotham door entitlements
+  // cannot be bypassed by writing directly to Firestore from a client.
+  app.post("/api/properties", requireAuth, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const userId = String((req as any).user?.uid || "");
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+
+      const body = req.body || {};
+      const allowedFields = [
+        "name", "address", "postcode", "city", "propertyType", "status",
+        "contactName", "contactPhone", "accessInstructions", "era", "heatingType",
+        "boilerInfo", "roofCondition", "epcRating", "gasSafetyExpiry", "eicrExpiry"
+      ];
+      const protectedFields = [
+        "id", "ownerId", "userId", "homeownerId", "landlordId", "tenantId",
+        "gothamDoorsCount", "gothamSubscriptionStatus", "subscriptionStatus",
+        "usage", "propertyCount", "createdAt", "transferClaimedByUid", "verifiedByAdmin"
+      ];
+      if (Object.keys(body).some((key) => protectedFields.includes(key))) {
+        throw new BadRequestError("Property payload contains server-managed fields.");
+      }
+      if (Object.keys(body).some((key) => !allowedFields.includes(key))) {
+        throw new BadRequestError("Property payload contains unsupported fields.");
+      }
+      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 160) {
+        throw new BadRequestError("A property name of 1–160 characters is required.");
+      }
+      if (typeof body.propertyType !== "string" || body.propertyType.length > 80) {
+        throw new BadRequestError("A valid property type is required.");
+      }
+      if (!body.address || typeof body.address !== "object" || Array.isArray(body.address)) {
+        throw new BadRequestError("A structured property address is required.");
+      }
+      const address = {
+        line1: typeof body.address.line1 === "string" ? body.address.line1.slice(0, 200) : "",
+        city: typeof body.address.city === "string" ? body.address.city.slice(0, 100) : "",
+        postcode: typeof body.address.postcode === "string" ? body.address.postcode.slice(0, 20).toUpperCase() : "",
+        country: typeof body.address.country === "string" ? body.address.country.slice(0, 80) : "UK"
+      };
+      const propertyData: Record<string, any> = {
+        name: body.name.trim(),
+        address,
+        postcode: typeof body.postcode === "string" ? body.postcode.slice(0, 20).toUpperCase() : address.postcode,
+        city: typeof body.city === "string" ? body.city.slice(0, 100) : address.city,
+        propertyType: body.propertyType.trim(),
+        status: "active",
+        ownerId: userId,
+        userId,
+        homeownerId: userId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      for (const key of ["contactName", "contactPhone", "accessInstructions", "era", "heatingType", "roofCondition", "epcRating", "gasSafetyExpiry", "eicrExpiry"]) {
+        if (typeof body[key] === "string") propertyData[key] = body[key].slice(0, key === "accessInstructions" ? 2000 : 200);
+      }
+      if (body.boilerInfo && typeof body.boilerInfo === "object" && !Array.isArray(body.boilerInfo)) {
+        propertyData.boilerInfo = {
+          brand: typeof body.boilerInfo.brand === "string" ? body.boilerInfo.brand.slice(0, 100) : "",
+          model: typeof body.boilerInfo.model === "string" ? body.boilerInfo.model.slice(0, 100) : "",
+          age: typeof body.boilerInfo.age === "string" ? body.boilerInfo.age.slice(0, 20) : "",
+          lastServiced: typeof body.boilerInfo.lastServiced === "string" ? body.boilerInfo.lastServiced.slice(0, 40) : ""
+        };
+      }
+
+      const rawKey = String(req.headers["idempotency-key"] || "");
+      const idempotencyKey = /^[A-Za-z0-9_-]{12,100}$/.test(rawKey) ? rawKey : "";
+      const propertyRef = db.collection("properties").doc();
+      const userRef = db.collection("users").doc(userId);
+      const usageRef = db.collection("gotham_property_usage").doc(userId);
+      const requestRef = idempotencyKey
+        ? db.collection("property_creation_requests").doc(userId + "_" + idempotencyKey)
+        : null;
+      if (requestRef) {
+        const previousRequest = await requestRef.get();
+        if (previousRequest.exists) {
+          const previous = previousRequest.data() || {};
+          const previousPropertyId = String(previous.propertyId || "");
+          if (!previousPropertyId) throw new Error("Property creation idempotency record is invalid.");
+          return res.status(200).json({ success: true, id: previousPropertyId, duplicate: true });
+        }
+      }
+      const entitlementSnap = await userRef.get();
+      // An authenticated ordinary homeowner may predate profile bootstrap; absence
+      // of a server-owned Gotham subscription record means no Gotham quota applies.
+      const entitlementProfile = entitlementSnap.exists ? (entitlementSnap.data() || {}) : {};
+      const isGothamAccount = entitlementProfile.subscriptionType === "gotham_saas" || entitlementProfile.isGothamSubscriber === true;
+      let verifiedGothamSubscriptionId = "";
+      let verifiedGothamStatus = "";
+      if (isGothamAccount) {
+        verifiedGothamSubscriptionId = String(entitlementProfile.gothamSubscriptionId || "");
+        if (!verifiedGothamSubscriptionId) {
+          throw new ForbiddenError("No verified Gotham subscription is linked to this account.");
+        }
+        if (verifiedGothamSubscriptionId.startsWith("mock_")) {
+          if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCK_PAYMENTS !== "true") {
+            return res.status(503).json({ error: "Gotham subscription verification is unavailable." });
+          }
+          verifiedGothamStatus = String(entitlementProfile.gothamSubscriptionStatus || "");
+        } else {
+          let stripeClient;
+          try {
+            stripeClient = getStripe();
+          } catch (_) {
+            return res.status(503).json({ error: "Stripe is unavailable; Gotham entitlement could not be verified." });
+          }
+          let liveSubscription: Stripe.Subscription;
+          try {
+            liveSubscription = await stripeClient.subscriptions.retrieve(verifiedGothamSubscriptionId);
+          } catch (_) {
+            return res.status(503).json({ error: "Gotham subscription could not be verified with Stripe." });
+          }
+          verifiedGothamStatus = String(liveSubscription.status || "");
+          const paidThrough = Number((liveSubscription as any).current_period_end || 0);
+          const paidPeriodExpired = Boolean((liveSubscription as any).cancel_at_period_end) &&
+            (!paidThrough || Date.now() >= paidThrough * 1000);
+          if (!["active", "trialing"].includes(verifiedGothamStatus) || paidPeriodExpired) {
+            throw new ForbiddenError("Gotham subscription is not currently entitled to add properties.");
+          }
+        }
+        if (!["active", "trialing"].includes(verifiedGothamStatus)) {
+          throw new ForbiddenError("Gotham subscription is not currently entitled to add properties.");
+        }
+      }
+      const result = await db.runTransaction(async (tx: any) => {
+        const [userSnap, usageSnap, requestSnap] = await Promise.all([
+          tx.get(userRef),
+          tx.get(usageRef),
+          requestRef ? tx.get(requestRef) : Promise.resolve(null)
+        ]);
+        if (requestSnap?.exists) {
+          const prior = requestSnap.data() || {};
+          return { id: String(prior.propertyId || ""), duplicate: true };
+        }
+        const profile = userSnap.exists ? (userSnap.data() || {}) : {};
+        const isGothamAccount = profile.subscriptionType === "gotham_saas" || profile.isGothamSubscriber === true;
+        const isGothamEntitled = isGothamAccount &&
+          Boolean(verifiedGothamSubscriptionId) &&
+          profile.gothamSubscriptionId === verifiedGothamSubscriptionId &&
+          ["active", "trialing"].includes(verifiedGothamStatus.toLowerCase());
+        if (isGothamAccount && !isGothamEntitled) {
+          throw new ForbiddenError("Gotham subscription is not active. Property creation is unavailable until billing is restored.");
+        }
+        const doorsAllowed = isGothamEntitled ? Number(profile.gothamDoorsCount) : 0;
+        // Once a Gotham usage document exists, keep it current even while the
+        // account is on another plan so a later Gotham renewal starts accurately.
+        if (isGothamEntitled || usageSnap.exists) {
+          let currentUsage: number;
+          if (usageSnap.exists) {
+            currentUsage = Number(usageSnap.data()?.propertyCount);
+          } else {
+            // One-time legacy backfill. The usage document then becomes the
+            // serialization point for all later creates and deletes.
+            const [ownerQuery, userQuery, landlordQuery] = await Promise.all([
+              tx.get(db.collection("properties").where("ownerId", "==", userId)),
+              tx.get(db.collection("properties").where("userId", "==", userId)),
+              tx.get(db.collection("properties").where("landlordId", "==", userId))
+            ]);
+            const existingIds = new Set<string>();
+            for (const snap of [ownerQuery, userQuery, landlordQuery]) {
+              snap.docs.forEach((doc: any) => existingIds.add(doc.id));
+            }
+            currentUsage = existingIds.size;
+          }
+          const quotaDecision = evaluateGothamPropertyQuota(currentUsage, doorsAllowed, isGothamEntitled);
+          if (!quotaDecision.allowed) {
+            if ("reason" in quotaDecision && quotaDecision.reason === "invalid_usage") {
+              throw new ForbiddenError("Gotham property usage is invalid. Please contact support.");
+            }
+            if ("reason" in quotaDecision && quotaDecision.reason === "invalid_allowance") {
+              throw new ForbiddenError("Gotham door allowance is invalid. Please contact support.");
+            }
+            throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
+          }
+          const usagePatch: Record<string, any> = {
+            userId,
+            propertyCount: quotaDecision.nextUsage,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          };
+          if (isGothamEntitled) {
+            usagePatch.allowance = doorsAllowed;
+            usagePatch.reconciledAt = admin.firestore.FieldValue.serverTimestamp();
+          }
+          tx.set(usageRef, usagePatch, { merge: true });
+        }
+        tx.create(propertyRef, propertyData);
+        if (requestRef) {
+          tx.create(requestRef, {
+            userId,
+            propertyId: propertyRef.id,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        }
+        return { id: propertyRef.id, duplicate: false };
+      });
+      if (!result.id) throw new Error("Property creation idempotency record is invalid.");
+      res.status(result.duplicate ? 200 : 201).json({ success: true, id: result.id, duplicate: result.duplicate });
+    } catch (error: any) {
+      console.error("Create Property Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Transfer initiation is server-authoritative; clients cannot mint or mutate transfer metadata.
+  app.post("/api/properties/:id/transfer", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const userId = String((req as any).user?.uid || "");
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+      const propertyId = String(req.params.id || "").trim();
+      if (!propertyId) throw new BadRequestError("Property ID is required.");
+      const buyerName = typeof req.body?.buyerName === "string" ? req.body.buyerName.trim().slice(0, 120) : "";
+      const buyerEmail = typeof req.body?.buyerEmail === "string" ? req.body.buyerEmail.trim().toLowerCase() : "";
+      const validityDays = Number(req.body?.validityDays);
+      if (![14, 30, 60].includes(validityDays)) throw new BadRequestError("Transfer validity must be 14, 30, or 60 days.");
+      if (buyerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(buyerEmail)) {
+        throw new BadRequestError("A valid buyer email address is required.");
+      }
+
+      const propertyRef = db.collection("properties").doc(propertyId);
+      const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      const code = "TRF-" + Array.from({ length: 6 }, () => alphabet[crypto.randomInt(0, alphabet.length)]).join("");
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + validityDays * 24 * 60 * 60 * 1000).toISOString();
+      await db.runTransaction(async (tx: any) => {
+        const propertySnap = await tx.get(propertyRef);
+        if (!propertySnap.exists) throw new NotFoundError("Property not found.");
+        const property = propertySnap.data() || {};
+        const currentOwnerId = String(property.ownerId || property.userId || "");
+        if (currentOwnerId !== userId) throw new ForbiddenError("Only the current property owner can initiate a transfer.");
+        const duplicateCode = await tx.get(db.collection("properties")
+          .where("transferCode", "==", code)
+          .where("transferStatus", "==", "pending")
+          .limit(1));
+        if (!duplicateCode.empty) throw new ConflictError("Could not generate a unique transfer code. Please try again.");
+        tx.update(propertyRef, {
+          transferStatus: "pending",
+          transferCode: code,
+          transferExpiresAt: expiresAt,
+          transferTargetName: buyerName || null,
+          transferTargetEmail: buyerEmail || null,
+          transferInitiatedAt: now.toISOString(),
+          transferInitiatorUid: userId,
+          updatedAt: now.toISOString()
+        });
+      });
+      res.status(201).json({ success: true, code, expiresAt });
+    } catch (error: any) {
+      console.error("Initiate Property Transfer Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Revocation is also owner-authorized and server-only.
+  app.post("/api/properties/:id/transfer/revoke", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const userId = String((req as any).user?.uid || "");
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+      const propertyId = String(req.params.id || "").trim();
+      if (!propertyId) throw new BadRequestError("Property ID is required.");
+      const propertyRef = db.collection("properties").doc(propertyId);
+      await db.runTransaction(async (tx: any) => {
+        const propertySnap = await tx.get(propertyRef);
+        if (!propertySnap.exists) throw new NotFoundError("Property not found.");
+        const property = propertySnap.data() || {};
+        const currentOwnerId = String(property.ownerId || property.userId || "");
+        if (currentOwnerId !== userId) throw new ForbiddenError("Only the current property owner can revoke a transfer.");
+        if (property.transferStatus !== "pending") throw new ConflictError("There is no pending transfer to revoke.");
+        tx.update(propertyRef, {
+          transferStatus: "none",
+          transferCode: null,
+          transferExpiresAt: null,
+          transferTargetName: null,
+          transferTargetEmail: null,
+          transferInitiatedAt: null,
+          transferInitiatorUid: null,
+          updatedAt: new Date().toISOString()
+        });
+      });
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Revoke Property Transfer Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Property deletion also flows through the server so Gotham usage counters stay exact.
+  app.delete("/api/properties/:id", requireAuth, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const authUid = String((req as any).user?.uid || "");
+      if (!authUid) throw new ForbiddenError("Authenticated user is required.");
+      const user = (req as any).user;
+      const isAdmin = await checkIsAdmin(user);
+      const propertyRef = db.collection("properties").doc(req.params.id);
+      const result = await db.runTransaction(async (tx: any) => {
+        const propertySnap = await tx.get(propertyRef);
+        if (!propertySnap.exists) throw new NotFoundError("Property not found.");
+        const property = propertySnap.data() || {};
+        const ownerIds = [property.ownerId, property.userId, property.landlordId].filter((value: any) => typeof value === "string" && value.length > 0);
+        const isOwner = ownerIds.includes(authUid);
+        if (!isOwner && !isAdmin) throw new ForbiddenError("You are not authorized to delete this property.");
+        const quotaOwnerId = isOwner ? authUid : String(ownerIds[0] || "");
+        const quotaOwnerRef = quotaOwnerId ? db.collection("users").doc(quotaOwnerId) : null;
+        const usageRef = quotaOwnerId ? db.collection("gotham_property_usage").doc(quotaOwnerId) : null;
+        const [quotaOwnerSnap, usageSnap] = quotaOwnerRef && usageRef
+          ? await Promise.all([tx.get(quotaOwnerRef), tx.get(usageRef)])
+          : [null, null];
+        if (quotaOwnerSnap?.exists || usageSnap?.exists) {
+          const ownerProfile = quotaOwnerSnap?.exists ? (quotaOwnerSnap.data() || {}) : {};
+          const isGothamAccount = ownerProfile.subscriptionType === "gotham_saas" || ownerProfile.isGothamSubscriber === true;
+          if ((isGothamAccount || usageSnap?.exists) && usageRef) {
+            let currentUsage: number;
+            if (usageSnap?.exists) {
+              const decrement = decrementGothamPropertyUsage(Number(usageSnap.data()?.propertyCount));
+              if (!decrement.allowed) {
+                if ("reason" in decrement && decrement.reason === "invalid_usage") {
+                  throw new ForbiddenError("Gotham property usage is invalid; deletion requires reconciliation.");
+                }
+                throw new ForbiddenError("Gotham property usage is inconsistent; deletion requires reconciliation.");
+              }
+              currentUsage = decrement.nextUsage;
+            } else {
+              // If no reservation counter exists yet, backfill after excluding the
+              // property being deleted so the delete and first create serialize.
+              const [ownerQuery, userQuery, landlordQuery] = await Promise.all([
+                tx.get(db.collection("properties").where("ownerId", "==", quotaOwnerId)),
+                tx.get(db.collection("properties").where("userId", "==", quotaOwnerId)),
+                tx.get(db.collection("properties").where("landlordId", "==", quotaOwnerId))
+              ]);
+              const existingIds = new Set<string>();
+              for (const snap of [ownerQuery, userQuery, landlordQuery]) {
+                snap.docs.forEach((doc: any) => {
+                  if (doc.id !== propertyRef.id) existingIds.add(doc.id);
+                });
+              }
+              currentUsage = existingIds.size;
+            }
+            tx.set(usageRef, {
+              userId: quotaOwnerId,
+              propertyCount: currentUsage,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          }
+        }
+        tx.delete(propertyRef);
+        return { id: propertyRef.id };
+      });
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error("Delete Property Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Public transfer-code verification returns only the preview fields shown to a buyer.
+  app.get("/api/properties/transfer/:code", paymentLimiter, async (req, res) => {
+    try {
+      const code = String(req.params.code || "").trim().toUpperCase();
+      if (!/^TRF-[A-HJ-NP-Z2-9]{6}$/.test(code)) {
+        return res.status(400).json({ error: "Invalid transfer code." });
+      }
+      if (!db) return res.status(503).json({ error: "Property transfer verification is unavailable." });
+      const matches = await db.collection("properties")
+        .where("transferCode", "==", code)
+        .where("transferStatus", "==", "pending")
+        .limit(2)
+        .get();
+      if (matches.size !== 1) return res.status(404).json({ error: "Invalid or expired transfer code." });
+      const propertyDoc = matches.docs[0];
+      const property = propertyDoc.data() || {};
+      if (property.transferExpiresAt) {
+        const expiry = new Date(property.transferExpiresAt).getTime();
+        if (!Number.isFinite(expiry) || expiry < Date.now()) {
+          return res.status(410).json({ error: "This transfer code has expired or is invalid." });
+        }
+      }
+      res.json({
+        success: true,
+        property: {
+          id: propertyDoc.id,
+          name: property.name || "Residential Property",
+          propertyType: property.propertyType || "Residential",
+          address: {
+            line1: property.address?.line1 || "",
+            postcode: property.address?.postcode || property.postcode || "",
+            city: property.address?.city || property.city || ""
+          },
+          epcRating: property.epcRating || "C",
+          boilerInfo: { brand: property.boilerInfo?.brand || "Standard" },
+          roofCondition: property.roofCondition || "Good"
+        }
+      });
+    } catch (error: any) {
+      console.error("Verify Property Transfer Code Error:", error);
+      sendHttpError(res, error, req);
+    }
+  });
+
+  // Ownership claim updates both owners' Gotham counters atomically with the transfer.
+  app.post("/api/properties/claim-transfer", requireAuth, paymentLimiter, async (req, res) => {
+    try {
+      if (!db) throw new BadRequestError("Database service unavailable");
+      const user = (req as any).user;
+      const userId = String(user?.uid || "");
+      const code = String(req.body?.code || "").trim().toUpperCase();
+      if (!userId) throw new ForbiddenError("Authenticated user is required.");
+      if (!/^TRF-[A-HJ-NP-Z2-9]{6}$/.test(code)) throw new BadRequestError("A valid transfer code is required.");
+
+      const claimRef = db.collection("property_transfer_claims").doc(userId + "_" + code);
+      const priorClaim = await claimRef.get();
+      if (priorClaim.exists) {
+        const prior = priorClaim.data() || {};
+        const priorPropertyId = String(prior.propertyId || "");
+        if (!priorPropertyId) throw new Error("Property transfer idempotency record is invalid.");
+        return res.json({ success: true, id: priorPropertyId, duplicate: true });
+      }
+
+      const newOwnerRef = db.collection("users").doc(userId);
+      const newOwnerSnap = await newOwnerRef.get();
+      const newOwnerProfile = newOwnerSnap.exists ? (newOwnerSnap.data() || {}) : {};
+      const newOwnerIsGotham = newOwnerProfile.subscriptionType === "gotham_saas" || newOwnerProfile.isGothamSubscriber === true;
+      let verifiedGothamSubscriptionId = "";
+      let verifiedGothamStatus = "";
+      if (newOwnerIsGotham) {
+        verifiedGothamSubscriptionId = String(newOwnerProfile.gothamSubscriptionId || "");
+        if (!verifiedGothamSubscriptionId) throw new ForbiddenError("No verified Gotham subscription is linked to this account.");
+        if (verifiedGothamSubscriptionId.startsWith("mock_")) {
+          if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCK_PAYMENTS !== "true") {
+            return res.status(503).json({ error: "Gotham subscription verification is unavailable." });
+          }
+          verifiedGothamStatus = String(newOwnerProfile.gothamSubscriptionStatus || "");
+        } else {
+          let stripeClient;
+          try { stripeClient = getStripe(); } catch (_) {
+            return res.status(503).json({ error: "Stripe is unavailable; Gotham entitlement could not be verified." });
+          }
+          let liveSubscription: Stripe.Subscription;
+          try { liveSubscription = await stripeClient.subscriptions.retrieve(verifiedGothamSubscriptionId); } catch (_) {
+            return res.status(503).json({ error: "Gotham subscription could not be verified with Stripe." });
+          }
+          verifiedGothamStatus = String(liveSubscription.status || "");
+          const paidThrough = Number((liveSubscription as any).current_period_end || 0);
+          const expiredCancellation = Boolean((liveSubscription as any).cancel_at_period_end) &&
+            (!paidThrough || Date.now() >= paidThrough * 1000);
+          if (!["active", "trialing"].includes(verifiedGothamStatus) || expiredCancellation) {
+            throw new ForbiddenError("Gotham subscription is not currently entitled to receive another property.");
+          }
+        }
+        if (!["active", "trialing"].includes(verifiedGothamStatus)) {
+          throw new ForbiddenError("Gotham subscription is not currently entitled to receive another property.");
+        }
+      }
+
+      const transferQuery = db.collection("properties")
+        .where("transferCode", "==", code)
+        .where("transferStatus", "==", "pending")
+        .limit(2);
+      const result = await db.runTransaction(async (tx: any) => {
+        const matches = await tx.get(transferQuery);
+        if (matches.size !== 1) throw new NotFoundError("Invalid, expired, or already claimed transfer code.");
+        const propertyDoc = matches.docs[0];
+        const propertyRef = propertyDoc.ref;
+        const property = propertyDoc.data() || {};
+        if (property.transferExpiresAt) {
+          const expiry = new Date(property.transferExpiresAt).getTime();
+          if (!Number.isFinite(expiry) || expiry < Date.now()) {
+            throw new ForbiddenError("This property transfer code has expired or is invalid.");
+          }
+        }
+        if (property.transferTargetEmail) {
+          const expectedEmail = String(property.transferTargetEmail).trim().toLowerCase();
+          const claimantEmail = String(user.email || "").trim().toLowerCase();
+          if (!user.email_verified || !claimantEmail || claimantEmail !== expectedEmail) {
+            throw new ForbiddenError("This transfer code is restricted to the verified buyer email specified by the owner.");
+          }
+        }
+        const previousOwnerId = String(property.ownerId || property.userId || property.landlordId || "");
+        if (!previousOwnerId) throw new ForbiddenError("Property has no verifiable previous owner.");
+        if (previousOwnerId === userId) throw new BadRequestError("This property is already owned by your account.");
+
+        const previousOwnerRef = db.collection("users").doc(previousOwnerId);
+        const previousUsageRef = db.collection("gotham_property_usage").doc(previousOwnerId);
+        const newUsageRef = db.collection("gotham_property_usage").doc(userId);
+        const [previousOwnerSnap, latestNewOwnerSnap, previousUsageSnap, newUsageSnap, claimSnap] = await Promise.all([
+          tx.get(previousOwnerRef), tx.get(newOwnerRef), tx.get(previousUsageRef), tx.get(newUsageRef), tx.get(claimRef)
+        ]);
+        if (claimSnap.exists) {
+          const prior = claimSnap.data() || {};
+          const priorPropertyId = String(prior.propertyId || "");
+          if (!priorPropertyId) throw new Error("Property transfer idempotency record is invalid.");
+          return { id: priorPropertyId, duplicate: true };
+        }
+        const previousProfile = previousOwnerSnap.exists ? (previousOwnerSnap.data() || {}) : {};
+        const currentNewProfile = latestNewOwnerSnap.exists ? (latestNewOwnerSnap.data() || {}) : {};
+        const previousIsGotham = previousProfile.subscriptionType === "gotham_saas" || previousProfile.isGothamSubscriber === true || previousUsageSnap.exists;
+        const currentNewIsGotham = currentNewProfile.subscriptionType === "gotham_saas" || currentNewProfile.isGothamSubscriber === true;
+        if (currentNewIsGotham && (
+          currentNewProfile.gothamSubscriptionId !== verifiedGothamSubscriptionId ||
+          !["active", "trialing"].includes(verifiedGothamStatus.toLowerCase())
+        )) throw new ForbiddenError("Gotham subscription changed during the property transfer. Please retry.");
+
+        let previousCount: number | null = null;
+        let newCount: number | null = null;
+        if (previousIsGotham) {
+          if (previousUsageSnap.exists) {
+            const decrement = decrementGothamPropertyUsage(Number(previousUsageSnap.data()?.propertyCount));
+            if (!decrement.allowed) {
+              if ("reason" in decrement && decrement.reason === "invalid_usage") {
+                throw new ForbiddenError("Previous owner's Gotham usage requires reconciliation.");
+              }
+              throw new ForbiddenError("Previous owner's Gotham usage is inconsistent; transfer requires reconciliation.");
+            }
+            previousCount = decrement.nextUsage;
+          } else {
+            const [ownerQ, userQ, landlordQ] = await Promise.all([
+              tx.get(db.collection("properties").where("ownerId", "==", previousOwnerId)),
+              tx.get(db.collection("properties").where("userId", "==", previousOwnerId)),
+              tx.get(db.collection("properties").where("landlordId", "==", previousOwnerId))
+            ]);
+            const ids = new Set<string>();
+            for (const snap of [ownerQ, userQ, landlordQ]) snap.docs.forEach((doc: any) => {
+              if (doc.id !== propertyRef.id) ids.add(doc.id);
+            });
+            previousCount = ids.size;
+          }
+        }
+        if (currentNewIsGotham || newUsageSnap.exists) {
+          const allowance = currentNewIsGotham ? Number(currentNewProfile.gothamDoorsCount) : 0;
+          let currentNewCount: number;
+          if (newUsageSnap.exists) {
+            currentNewCount = Number(newUsageSnap.data()?.propertyCount);
+          } else {
+            const [ownerQ, userQ, landlordQ] = await Promise.all([
+              tx.get(db.collection("properties").where("ownerId", "==", userId)),
+              tx.get(db.collection("properties").where("userId", "==", userId)),
+              tx.get(db.collection("properties").where("landlordId", "==", userId))
+            ]);
+            const ids = new Set<string>();
+            for (const snap of [ownerQ, userQ, landlordQ]) snap.docs.forEach((doc: any) => ids.add(doc.id));
+            currentNewCount = ids.size;
+          }
+          const quotaDecision = evaluateGothamPropertyQuota(currentNewCount, allowance, currentNewIsGotham);
+          if (!quotaDecision.allowed) {
+            if ("reason" in quotaDecision && quotaDecision.reason === "invalid_usage") {
+              throw new ForbiddenError("New owner's Gotham usage requires reconciliation.");
+            }
+            if ("reason" in quotaDecision && quotaDecision.reason === "invalid_allowance") {
+              throw new ForbiddenError("New owner's Gotham door allowance is invalid.");
+            }
+            throw new ForbiddenError("Your Gotham subscription has reached its purchased property limit.");
+          }
+          newCount = quotaDecision.nextUsage;
+        }
+
+        const history = Array.isArray(property.transferHistory) ? property.transferHistory : [];
+        tx.update(propertyRef, {
+          ownerId: userId,
+          userId,
+          homeownerId: userId,
+          transferStatus: "completed",
+          transferCode: null,
+          transferExpiresAt: null,
+          transferClaimedAt: new Date().toISOString(),
+          transferClaimedByUid: userId,
+          previousOwnersCount: Number(property.previousOwnersCount || 0) + 1,
+          transferHistory: [...history, {
+            transferredAt: new Date().toISOString(),
+            transferCode: code,
+            fromOwnerUid: previousOwnerId,
+            toOwnerUid: userId,
+            toOwnerEmail: user.email || null,
+            propertyName: property.name || "Property"
+          }],
+          updatedAt: new Date().toISOString()
+        });
+        if (previousCount !== null) tx.set(previousUsageRef, {
+          userId: previousOwnerId, propertyCount: previousCount,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        if (newCount !== null) tx.set(newUsageRef, {
+          userId, propertyCount: newCount,
+          ...(currentNewIsGotham ? { allowance: Number(currentNewProfile.gothamDoorsCount) } : {}),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        tx.create(claimRef, {
+          userId, propertyId: propertyRef.id,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        return { id: propertyRef.id, duplicate: false };
+      });
+      if (!result.id) throw new Error("Property transfer idempotency record is invalid.");
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error("Claim Property Transfer Error:", error);
       sendHttpError(res, error, req);
     }
   });
@@ -4030,7 +4901,7 @@ async function startServer() {
   });
 
   // Server-Authoritative Milestone Release Route & QR Handshake (V6 Hardened)
-  app.post("/api/release-milestone", requireAuth, async (req, res) => {
+  app.post("/api/release-milestone", requireAuth, handshakeLimiter, async (req, res) => {
     try {
       const { jobId, quoteId, milestoneId, isQrHandshake } = req.body;
       const handshakeCode = req.body.handshakeCode || req.body.pin || req.body.verificationPin;
@@ -4059,6 +4930,14 @@ async function startServer() {
         throw new InternalServerError("Stripe integration unavailable for escrow transfer");
       }
 
+      // Persist QR PIN failures per job/user across server instances and restarts.
+      if (isQrHandshake) {
+        await PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(firestoreDb, {
+          jobId, authUid,
+          handshakeCode: typeof handshakeCode === "string" ? handshakeCode : undefined,
+        });
+      }
+
       // Delegate to canonical authority
       const result = await PaymentLedgerEngine.releaseEscrowFunds(firestoreDb, {
         jobId,
@@ -4081,6 +4960,7 @@ async function startServer() {
           idempotencyKey,
           traderId: result.traderId,
           netPayoutPence: result.netPayoutPence,
+          ledgerEntryId: result.ledgerEntryId,
           targetMilestoneTitle: result.targetMilestoneTitle,
           jobNo: result.jobNo,
           stripePaymentIntentId: result.stripePaymentIntentId,
@@ -4089,30 +4969,64 @@ async function startServer() {
         { stripe: stripeClient }
       );
 
-      // Curing premature release marking:
-      // If Stripe transfer failed, roll back the milestone status so it does not remain marked as released!
+      // A Stripe API error can be ambiguous: the transfer may have been created even if
+      // the response was lost. Keep the milestone's original operation key and released
+      // state locked for reconciliation; a new caller key must not create a second transfer.
+      if (stripeTransferResult.transferStatus === "reconciliation_required") {
+        await firestoreDb.runTransaction(async (tx: any) => {
+          const qRef = firestoreDb.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
+          const qSnap = await tx.get(qRef);
+          if (!qSnap.exists) return;
+          const qData = qSnap.data();
+          const milestones = (qData?.milestones || []).map((m: any) => {
+            if (m.id !== (result.milestoneId || milestoneId) || m.releaseOperationId !== idempotencyKey) return m;
+            return {
+              ...m,
+              status: "funds_released",
+              releaseStatus: "reconciliation_required",
+              lastTransferError: stripeTransferResult.error,
+            };
+          });
+          tx.update(qRef, { milestones });
+        });
+
+        return res.status(502).json({
+          success: false,
+          error: "Stripe transfer outcome is ambiguous. The milestone remains locked to its original operation key pending reconciliation; do not retry with a new idempotency key.",
+          stripeTransferStatus: "reconciliation_required",
+          stripeError: stripeTransferResult.error,
+        });
+      }
+
+      // A preflight failure is known to have occurred before the Stripe transfer call.
+      // Only this definite-no-transfer case may safely restore the milestone to funded.
       if (stripeTransferResult.transferStatus === "failed") {
         await firestoreDb.runTransaction(async (tx: any) => {
           const qRef = firestoreDb.collection("jobs").doc(jobId).collection("quotes").doc(quoteId);
           const qSnap = await tx.get(qRef);
           if (qSnap.exists) {
             const qData = qSnap.data();
+            let matchedCurrentOperation = false;
             const milestones = (qData?.milestones || []).map((m: any) => {
-              if (m.id === (result.milestoneId || milestoneId)) {
-                return {
-                  ...m,
-                  status: "funded", // Revert back to funded!
-                  releaseStatus: "failed",
-                  lastTransferError: stripeTransferResult.error,
-                  releaseOperationId: null, // Clear operation ID so it can be retried safely!
-                };
+              if (m.id !== (result.milestoneId || milestoneId) || m.releaseOperationId !== idempotencyKey) {
+                return m;
               }
-              return m;
+              matchedCurrentOperation = true;
+              return {
+                ...m,
+                status: "funded",
+                releaseStatus: "failed",
+                lastTransferError: stripeTransferResult.error,
+                releaseOperationId: null,
+              };
             });
-            tx.update(qRef, { milestones });
+            if (matchedCurrentOperation) {
+              tx.update(qRef, { milestones });
+              // The job-level payment fields aggregate multiple milestones/quotes.
+              // Leave that projection to the canonical reconciler rather than marking
+              // the entire job funded because one milestone release failed.
+            }
           }
-          const jRef = firestoreDb.collection("jobs").doc(jobId);
-          tx.update(jRef, { paymentStatus: "funded", isPaid: false });
         });
 
         // Also update ledger

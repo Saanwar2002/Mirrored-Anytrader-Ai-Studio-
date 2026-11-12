@@ -29,7 +29,6 @@ import { HomeownerIdentityCard } from "./profile/HomeownerIdentityCard";
 import { SafetyEmergencyCard } from "./profile/SafetyEmergencyCard";
 import TraderNotificationPreferencesModal from "./TraderNotificationPreferencesModal";
 import { cn } from "@/src/lib/utils";
-import { normalizeTraderTier } from "@/src/services/stripeIntegrationService";
 import { 
   DndContext, 
   closestCenter,
@@ -1729,9 +1728,15 @@ export default function Profile() {
     try {
       if (showCheckoutForTier.price > 0) {
         // Redirect to Stripe checkout for paid plans
+        const token = await user.getIdToken();
+        if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
         const response = await fetch("/api/create-checkout-session", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+            "Idempotency-Key": crypto.randomUUID()
+          },
           body: JSON.stringify({
             userId: user.uid,
             tierName: showCheckoutForTier.name,
@@ -1763,35 +1768,24 @@ export default function Profile() {
           throw new Error(data.error || "Failed to initiate checkout");
         }
       } else {
-        // Auto-subscribe for free tiers
-        const nextBillingDate = new Date();
-        nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
-
-        const isHomeowner = (profile.role as string) === "homeowner" || (profile.role as string) === "customer";
-        const tierField = isHomeowner ? "homeownerTierId" : "tierId";
-        const statusField = isHomeowner ? "homeownerSubscriptionStatus" : "subscriptionStatus";
-        const periodEndField = isHomeowner ? "homeownerCurrentPeriodEnd" : "currentPeriodEnd";
-        const cancelField = isHomeowner ? "homeownerCancelAtPeriodEnd" : "cancelAtPeriodEnd";
-
-        const updatePayload: any = { 
-          [tierField]: showCheckoutForTier.name,
-          [statusField]: 'trialing',
-          [periodEndField]: nextBillingDate.toISOString(),
-          [cancelField]: false
-        };
-
-        if (!isHomeowner) {
-          const canonical = normalizeTraderTier(showCheckoutForTier.name);
-          updatePayload.tier = canonical;
-          updatePayload.isPro = canonical !== 'payg';
-          updatePayload.isProInvoiceSubscriber = canonical !== 'payg';
+        // Free-tier changes go through the server because subscription fields are server-owned.
+        const token = await user.getIdToken();
+        if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
+        const response = await fetch("/api/select-free-tier", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ tierName: showCheckoutForTier.name })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.success || !result.fields) {
+          throw new Error(result.error || "Free tier could not be selected.");
         }
-
-        await updateDoc(doc(db, "users", user.uid), updatePayload);
-        
-        setProfile((prev: any) => ({ 
-          ...prev, 
-          ...updatePayload
+        setProfile((prev: any) => ({
+          ...prev,
+          ...result.fields
         }));
         
         setShowCheckoutForTier(null);
@@ -1807,15 +1801,33 @@ export default function Profile() {
   const handleCancelSubscription = async () => {
     if (!user || !confirm("Are you sure you want to cancel your subscription? You will lose access to premium features at the end of your billing cycle.")) return;
     
-    const cancelField = (profile.role as string) === "homeowner" || (profile.role as string) === "customer" ? "homeownerCancelAtPeriodEnd" : "cancelAtPeriodEnd";
+    const isHomeowner = (profile.role as string) === "homeowner" || (profile.role as string) === "customer";
+    const subscriptionType = isHomeowner
+      ? "landlord"
+      : profile.subscriptionType === "driver_gold" ? "driver_gold" : "tier";
+    const cancelField = isHomeowner
+      ? "homeownerCancelAtPeriodEnd"
+      : subscriptionType === "driver_gold" ? "driverCancelAtPeriodEnd" : "cancelAtPeriodEnd";
 
     try {
-      await updateDoc(doc(db, "users", user.uid), { 
-        [cancelField]: true
+      const token = await user.getIdToken();
+      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
+      const response = await fetch("/api/cancel-subscription", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ subscriptionType })
       });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || "Subscription cancellation could not be scheduled.");
+      }
       setProfile((prev: any) => ({ ...prev, [cancelField]: true }));
     } catch (err) {
       console.error("Error canceling subscription:", err);
+      alert(err instanceof Error ? err.message : "Subscription cancellation could not be scheduled.");
     }
   };
 

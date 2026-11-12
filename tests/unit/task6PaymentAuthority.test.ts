@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import crypto from "crypto";
 import { PaymentLedgerEngine } from "../../src/server/paymentLedger.ts";
 import { validateMilestoneTransition } from "../../src/server/stateMachine.ts";
 import { ConflictError, BadRequestError, ForbiddenError } from "../../src/server/httpErrors.ts";
@@ -326,6 +327,36 @@ async function processWebhook(params: {
 }
 
 describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () => {
+  describe("13. DURABLE QR HANDSHAKE ATTEMPT THROTTLE", () => {
+    it("persists five failed PIN attempts and locks further guesses", async () => {
+      const db = createMockFirestore({ "jobs/job-qr": { acceptedTradespersonId: "trader-1", handshakeCode: "482915" } });
+      for (let i = 0; i < 4; i++) {
+        await expect(PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(db, {
+          jobId: "job-qr", authUid: "trader-1", handshakeCode: "000000"
+        })).rejects.toThrow(ForbiddenError);
+      }
+      await expect(PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(db, {
+        jobId: "job-qr", authUid: "trader-1", handshakeCode: "000000"
+      })).rejects.toThrow(/temporarily locked/i);
+      expect(db._store["jobs/job-qr/handshake_attempts/trader-1"].attempts).toBe(5);
+      await expect(PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(db, {
+        jobId: "job-qr", authUid: "trader-1", handshakeCode: "482915"
+      })).rejects.toThrow(/temporarily locked/i);
+    });
+
+    it("resets the persistent counter after a valid accepted-trader PIN", async () => {
+      const db = createMockFirestore({
+        "jobs/job-qr": { acceptedTraderId: "trader-1", verificationPin: "482915" },
+        "jobs/job-qr/handshake_attempts/trader-1": { attempts: 3, windowStartedAtMs: Date.now(), lockedUntilMs: 0 }
+      });
+      await expect(PaymentLedgerEngine.validateAndRecordQrHandshakeAttempt(db, {
+        jobId: "job-qr", authUid: "trader-1", handshakeCode: "482915"
+      })).resolves.toBeUndefined();
+      expect(db._store["jobs/job-qr/handshake_attempts/trader-1"]).toMatchObject({ attempts: 0, lockedUntilMs: 0 });
+    });
+  });
+
+
   let db: any;
   const jobId = "job_london_tiling_123";
   const quoteId = "quote_dave_456";
@@ -906,10 +937,11 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
       expect(result.success).toBe(true);
       expect(result.releasedAmount).toBe(500);
 
-      // Verify job marked handshake complete
+      // QR handshake authorizes this milestone only; it must not mark the
+      // entire multi-milestone job as paid.
       const jobSnap = await db.collection("jobs").doc(jobId).get();
-      expect(jobSnap.data()?.paymentStatus).toBe("handshake_complete");
-      expect(jobSnap.data()?.isPaid).toBe(true);
+      expect(jobSnap.data()?.paymentStatus).not.toBe("handshake_complete");
+      expect(jobSnap.data()?.isPaid).not.toBe(true);
     });
 
     it("allows authorized admin to release milestone", async () => {
@@ -1056,31 +1088,41 @@ describe("Task 6: Comprehensive Payment Authority & Escrow Security Suite", () =
 
       // 2. Simulate worker crash: set payment_idempotency to in_progress with stale timestamp (> 5 mins old)
       const idempRef = db.collection("payment_idempotency").doc(crashOpKey);
+      const binding = {
+        version: 1,
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid,
+        authorizationMode: "owner",
+      };
+      const canonicalize = (value: any): any => Array.isArray(value)
+        ? value.map(canonicalize)
+        : value && typeof value === "object"
+          ? Object.keys(value).sort().reduce((acc: any, key) => { acc[key] = canonicalize(value[key]); return acc; }, {})
+          : value;
+      const bindingHash = crypto.createHash("sha256").update(JSON.stringify(canonicalize(binding))).digest("hex");
       await idempRef.set({
         operationName: "RELEASE_MILESTONE",
+        bindingHash,
         status: "in_progress",
         startedAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
       });
 
-      // 3. Retry after recovery with the same idempotency key
-      const res2 = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+      // 3. Retry must fail closed until the ambiguous external effect is reconciled.
+      await expect(PaymentLedgerEngine.releaseEscrowFunds(db, {
         jobId,
         quoteId,
         milestoneId,
         authUid,
         idempotencyKey: crashOpKey,
-      });
+      })).rejects.toThrow("requires reconciliation");
 
-      expect(res2.success).toBe(true);
-      expect(res2.releasedAmount).toBe(500);
-
-      // VERIFY: Still exactly 1 ledger record, no duplicate financial effect created!
+      // VERIFY: Still exactly 1 ledger record; retry created no duplicate effect.
       const ledgerSnap2 = await db.collection("payment_ledger").get();
       expect(ledgerSnap2.docs.length).toBe(1);
-
-      // Verify idempotency record is marked completed
       const idempSnap = await idempRef.get();
-      expect(idempSnap.data()?.status).toBe("completed");
+      expect(idempSnap.data()?.status).toBe("reconciliation_required");
     });
   });
 });

@@ -356,38 +356,40 @@ describe("Stripe Connect Fail-Closed Security & Mock Payment Gating", () => {
             return await updateFn(tx);
           },
           collection: (col: string) => ({
-            where: (f1: string, op1: string, v1: any) => ({
-              where: (f2: string, op2: string, v2: any) => ({
-                where: (f3: string, op3: string, v3: any) => ({
-                  get: async () => ({
-                    empty: false,
-                    docs: [{
-                      id: "ride_real_driver",
-                      data: () => mockStore["ride_requests/ride_real_driver"],
-                      ref: {
-                        update: async (fields: any) => {
-                          Object.assign(mockStore["ride_requests/ride_real_driver"], fields);
-                        }
-                      }
-                    }]
-                  })
-                })
-              }),
-              limit: () => ({
-                get: async () => ({
-                  empty: false,
-                  docs: [{
-                    data: () => ({ status: "completed", captured: true, amount: 5000 })
-                  }]
-                })
-              })
-            }),
+            where: (_field: string, _op: string, _value: any) => {
+              const query: any = {
+                where: (_f: string, _o: string, _v: any) => query,
+                limit: (_count: number) => query,
+                get: async () => col === "ride_requests"
+                  ? ({
+                      empty: false,
+                      docs: [{
+                        id: "ride_real_driver",
+                        data: () => mockStore["ride_requests/ride_real_driver"],
+                        ref: {
+                          update: async (fields: any) => Object.assign(mockStore["ride_requests/ride_real_driver"], fields),
+                        },
+                      }],
+                    })
+                  : ({
+                      empty: false,
+                      docs: [{
+                        data: () => ({ type: "RIDE_PAYMENT", status: "completed", captured: true, currency: "gbp", amount: 5000 }),
+                      }],
+                    }),
+              };
+              return query;
+            },
             doc: (id: string) => ({
               get: async () => ({
                 exists: !!mockStore[`${col}/${id}`],
                 data: () => mockStore[`${col}/${id}`],
-              })
-            })
+              }),
+              set: async (data: any, options?: any) => {
+                const path = `${col}/${id}`;
+                mockStore[path] = options?.merge ? { ...(mockStore[path] || {}), ...data } : { ...data };
+              },
+            }),
           }),
         };
 

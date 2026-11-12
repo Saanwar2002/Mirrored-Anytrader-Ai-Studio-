@@ -45,10 +45,15 @@ export interface InvoiceData {
 export function isProInvoiceUser(tradespersonProfile: any): boolean {
   if (!tradespersonProfile) return false;
   const normalized = normalizeTraderTier(tradespersonProfile.tierId || tradespersonProfile.tier);
+  const terminalMembershipStatus = ["canceled", "unpaid", "incomplete_expired"].includes(
+    String(tradespersonProfile.subscriptionStatus || "").toLowerCase()
+  );
+  // The stored tier label can outlive its Stripe subscription. For an explicitly
+  // Stripe-managed membership, a terminal webhook status must override that stale label.
+  const tierGrantsInvoicePro = !(tradespersonProfile.subscriptionType === "tier" && terminalMembershipStatus) &&
+    (normalized === "pro" || normalized === "premium" || normalized === "platinum");
   return Boolean(
-    normalized === "pro" ||
-    normalized === "premium" ||
-    normalized === "platinum" ||
+    tierGrantsInvoicePro ||
     tradespersonProfile.hasVerifiedVideoProSubscription ||
     tradespersonProfile.isProInvoiceSubscriber ||
     tradespersonProfile.isPro

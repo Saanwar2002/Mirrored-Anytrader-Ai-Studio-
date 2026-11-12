@@ -1276,9 +1276,15 @@ const libraries: any[] = ['places', 'geometry'];
     setIsProcessing(true);
     try {
       const milestoneAmount = Math.max(1, Math.round(Number(milestone.amount) || 0));
+      const token = await user.getIdToken();
+      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
       const response = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "Idempotency-Key": crypto.randomUUID()
+        },
         body: JSON.stringify({
           userId: user.uid,
           price_data: {
@@ -1454,9 +1460,15 @@ const libraries: any[] = ['places', 'geometry'];
       });
 
       // 2. Redirect to Stripe
+      const token = await user.getIdToken();
+      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
       const res = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "Idempotency-Key": crypto.randomUUID()
+        },
         body: JSON.stringify({
           price_data: {
             currency: 'gbp',
@@ -1572,8 +1584,6 @@ const libraries: any[] = ['places', 'geometry'];
 
       setShowQrModal(false);
       setQrCodeData(null);
-      // Refresh local job state
-      setJob((prev: any) => ({ ...prev, paymentStatus: "handshake_complete", isPaid: true, updatedAt: new Date() }));
     } catch (err) {
       console.error("QR Handshake failed:", err);
     } finally {
@@ -3329,9 +3339,16 @@ const libraries: any[] = ['places', 'geometry'];
                     if (!confirmBoost) return;
 
                     try {
+                      if (!user) throw new Error("Please sign in to purchase a job boost.");
+                      const token = await user.getIdToken();
+                      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
                       const response = await fetch("/api/create-checkout-session", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: {
+                          "Content-Type": "application/json",
+                          Authorization: `Bearer ${token}`,
+                          "Idempotency-Key": crypto.randomUUID()
+                        },
                         body: JSON.stringify({
                           userId: user?.uid,
                           price_data: {
@@ -5449,13 +5466,21 @@ const libraries: any[] = ['places', 'geometry'];
                     );
                   })()}
                 </div>
-                {(job.paymentStatus === "pending" || job.paymentStatus === "unpaid") ? (
-                  <div className="bg-amber-100 text-amber-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
-                    <AlertCircle className="w-3.5 h-3.5" /> Payment Pending
+                {(job.isPaid === true || job.paymentStatus === "handshake_complete") ? (
+                  <div className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Fully Paid
+                  </div>
+                ) : job.paymentStatus === "funded" ? (
+                  <div className="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5" /> Escrow Funded · Awaiting Release
+                  </div>
+                ) : ["failed", "reconciliation_required", "refunded"].includes(String(job.paymentStatus || "").toLowerCase()) ? (
+                  <div className="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5" /> Payment Under Review
                   </div>
                 ) : (
-                  <div className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> {(job.paymentStatus === "handshake_complete" || job.isPaid) ? "Fully Paid" : "Paid"}
+                  <div className="bg-amber-100 text-amber-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5" /> Payment Pending
                   </div>
                 )}
               </div>
@@ -5474,7 +5499,7 @@ const libraries: any[] = ['places', 'geometry'];
                 </div>
                 <div className="h-px bg-slate-100 w-full my-1 border-b-2 border-dashed border-black"></div>
                 <div className="flex justify-between items-center pt-1">
-                   <span className="text-black font-black text-[18px]">Total {job.paymentStatus === "pending" ? "Due" : "Paid"}:</span>
+                   <span className="text-black font-black text-[18px]">Total {(job.isPaid === true || job.paymentStatus === "handshake_complete") ? "Paid" : "Due"}:</span>
                    <span className="text-black font-black text-[18px]">£{((quotes.find(q => q.status === "accepted")?.amount || 0) * 1.20).toFixed(2)}</span>
                 </div>
               </div>
@@ -5524,7 +5549,7 @@ const libraries: any[] = ['places', 'geometry'];
                   </div>
                   <div>
                     <h3 className="font-bold text-amber-900">Payment Pending</h3>
-                    <p className="text-amber-700 text-xs text-balance mt-0.5">Wait for the homeowner to pay, or mark as paid if you received the funds via cash/transfer.</p>
+                    <p className="text-amber-700 text-xs text-balance mt-0.5">Payment confirmation must be recorded through the verified payment process. If you received payment outside the platform, contact support so it can be reconciled safely.</p>
                   </div>
                 </div>
                 
@@ -5577,42 +5602,6 @@ const libraries: any[] = ['places', 'geometry'];
                   </button>
                 )}
 
-                <button 
-                  onClick={async () => {
-                    if (!id) return;
-                    try {
-                      const updatePromises = [
-                         updateDoc(doc(db, "jobs", id), {
-                           paymentStatus: "handshake_complete",
-                           isPaid: true
-                         })
-                      ];
-                      
-                      // Upward path for fairness score
-                      if (job.homeownerId) {
-                         updatePromises.push(updateDoc(doc(db, "users", job.homeownerId), {
-                            fairnessScore: increment(2)
-                         }));
-                      }
-                      if (job.acceptedTradespersonId) {
-                         updatePromises.push(updateDoc(doc(db, "users", job.acceptedTradespersonId), {
-                            fairnessScore: increment(2)
-                         }));
-                      }
-                      
-                      await Promise.all(updatePromises);
-                      setJob((prev: any) => ({ ...prev, paymentStatus: "handshake_complete", isPaid: true }));
-                      toast.success("Job marked as Paid!");
-                    } catch (e) {
-                      console.error("Error marking as paid", e);
-                      toast.error("Failed to update payment status");
-                    }
-                  }}
-                  className="w-full bg-amber-600 text-white p-4 rounded-2xl font-bold hover:bg-amber-700 transition-all flex items-center justify-center gap-2"
-                >
-                  <CheckCircle2 className="w-5 h-5" />
-                  Mark as Paid Manually
-                </button>
               </div>
             )}
 

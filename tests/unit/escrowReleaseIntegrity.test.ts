@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { PaymentLedgerEngine } from "../../src/server/paymentLedger.ts";
-import { ForbiddenError, BadRequestError } from "../../src/server/httpErrors.ts";
+import { ForbiddenError, BadRequestError, ConflictError } from "../../src/server/httpErrors.ts";
 
 describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", () => {
   let db: any;
@@ -346,11 +346,24 @@ describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", (
   describe("Stripe Transfer Execution & Idempotency Key Stability", () => {
     it("Test 12: Executes transfer with deterministic idempotency key and records completed ledger", async () => {
       const capturedOpts: any[] = [];
+      const capturedParams: any[] = [];
       const mockStripe = {
         transfers: {
-          create: vi.fn().mockImplementation(async (_params: any, opts: any) => {
+          create: vi.fn().mockImplementation(async (params: any, opts: any) => {
+            capturedParams.push(params);
             capturedOpts.push(opts);
-            return { id: "tr_verified_success_888" };
+            return {
+              id: "tr_verified_success_888",
+              amount: 44000,
+              currency: "gbp",
+              destination: "acct_prod_trader_12345",
+              metadata: {
+                jobId, quoteId, milestoneId, traderId,
+                releaseOperationId: "rel_idem_test_key_1",
+                stripeIdempotencyKey: `release:${jobId}:${quoteId}:${milestoneId}:rel_idem_test_key_1`,
+                operationType: "ANYTRADER_ESCROW_RELEASE",
+              },
+            };
           }),
         },
       };
@@ -380,10 +393,138 @@ describe("AnyTrader V8.3 — Escrow Release Integrity & Anti-Forgery Defense", (
       expect(transferResult.transferStatus).toBe("completed");
       expect(transferResult.stripeTransferId).toBe("tr_verified_success_888");
       expect(capturedOpts[0].idempotencyKey).toBe(`release:${jobId}:${quoteId}:${milestoneId}:rel_idem_test_key_1`);
+      expect(capturedParams[0].metadata).toMatchObject({
+        jobId,
+        quoteId,
+        milestoneId,
+        traderId: releaseResult.traderId,
+        releaseOperationId: "rel_idem_test_key_1",
+        stripeIdempotencyKey: capturedOpts[0].idempotencyKey,
+        operationType: "ANYTRADER_ESCROW_RELEASE",
+      });
 
       const ledger = store[`payment_ledger/${releaseResult.ledgerEntryId}`];
       expect(ledger.stripeTransferId).toBe("tr_verified_success_888");
       expect(ledger.transferStatus).toBe("completed");
+    });
+
+    it("Test 13: Treats a Stripe transfer exception as ambiguous and preserves the stable operation for reconciliation", async () => {
+      const releaseResult = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: homeownerId,
+        idempotencyKey: "rel_ambiguous_transfer_13",
+      });
+      const mockStripe = {
+        transfers: {
+          create: vi.fn().mockRejectedValue(new Error("socket hang up after request")),
+        },
+      };
+
+      const transferResult = await PaymentLedgerEngine.executeStripeEscrowTransfer(
+        db,
+        {
+          jobId,
+          quoteId,
+          milestoneId,
+          idempotencyKey: "rel_ambiguous_transfer_13",
+          traderId: releaseResult.traderId,
+          netPayoutPence: releaseResult.netPayoutPence,
+        },
+        { stripe: mockStripe }
+      );
+
+      expect(transferResult.transferStatus).toBe("reconciliation_required");
+      expect(transferResult.stripeIdempotencyKey).toBe(
+        `release:${jobId}:${quoteId}:${milestoneId}:rel_ambiguous_transfer_13`
+      );
+      const quote = store[`jobs/${jobId}/quotes/${quoteId}`];
+      expect(quote.milestones[0].releaseOperationId).toBe("rel_ambiguous_transfer_13");
+      expect(quote.milestones[0].status).toBe("funds_released");
+      const ledger = store[`payment_ledger/${releaseResult.ledgerEntryId}`];
+      expect(ledger.transferStatus).toBe("reconciliation_required");
+      await expect(PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: homeownerId,
+        idempotencyKey: "rel_ambiguous_transfer_new_key",
+      })).rejects.toThrow(ConflictError);
+    });
+
+    it.each([
+      ["amount", { amount: 1 }],
+      ["currency", { currency: "usd" }],
+      ["destination", { destination: "acct_other" }],
+      ["operation metadata", { metadata: { jobId: "other-job" } }],
+    ])("requires Stripe response %s to match the requested transfer", async (_field, override) => {
+      const releaseResult = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId, quoteId, milestoneId, authUid: homeownerId,
+        idempotencyKey: `rel_response_mismatch_${String(_field).replace(/\s/g, "_")}`,
+      });
+      const operationKey = `rel_response_mismatch_${String(_field).replace(/\s/g, "_")}`;
+      const expectedMetadata = {
+        jobId, quoteId, milestoneId, traderId: releaseResult.traderId,
+        releaseOperationId: operationKey,
+        stripeIdempotencyKey: `release:${jobId}:${quoteId}:${milestoneId}:${operationKey}`,
+        operationType: "ANYTRADER_ESCROW_RELEASE",
+      };
+      const mockStripe = {
+        transfers: {
+          create: vi.fn().mockResolvedValue({
+            id: "tr_mismatched_response",
+            amount: releaseResult.netPayoutPence,
+            currency: "gbp",
+            destination: "acct_prod_trader_12345",
+            metadata: expectedMetadata,
+            ...override,
+          }),
+        },
+      };
+      const result = await PaymentLedgerEngine.executeStripeEscrowTransfer(db, {
+        jobId, quoteId, milestoneId, idempotencyKey: operationKey,
+        traderId: releaseResult.traderId, netPayoutPence: releaseResult.netPayoutPence,
+      }, { stripe: mockStripe });
+      expect(result.transferStatus).toBe("reconciliation_required");
+      expect(result.error).toContain("does not match");
+      const ledger = store[`payment_ledger/${releaseResult.ledgerEntryId}`];
+      expect(ledger.transferStatus).toBe("reconciliation_required");
+      expect(ledger.stripeTransferId).toBeUndefined();
+    });
+
+    it("does not report a transfer as completed when Stripe omits its transfer ID", async () => {
+      const releaseResult = await PaymentLedgerEngine.releaseEscrowFunds(db, {
+        jobId,
+        quoteId,
+        milestoneId,
+        authUid: homeownerId,
+        idempotencyKey: "rel_missing_transfer_id",
+      });
+      const mockStripe = {
+        transfers: {
+          create: vi.fn().mockResolvedValue({}),
+        },
+      };
+
+      const result = await PaymentLedgerEngine.executeStripeEscrowTransfer(
+        db,
+        {
+          jobId,
+          quoteId,
+          milestoneId,
+          idempotencyKey: "rel_missing_transfer_id",
+          traderId: releaseResult.traderId,
+          netPayoutPence: releaseResult.netPayoutPence,
+        },
+        { stripe: mockStripe }
+      );
+
+      expect(result.transferStatus).toBe("reconciliation_required");
+      expect(result.error).toContain("without a valid transfer ID");
+      const ledger = store[`payment_ledger/${releaseResult.ledgerEntryId}`];
+      expect(ledger.transferStatus).toBe("reconciliation_required");
+      expect(ledger.stripeTransferId).toBeUndefined();
     });
   });
 });

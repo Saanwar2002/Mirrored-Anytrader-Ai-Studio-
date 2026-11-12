@@ -159,7 +159,7 @@ export default function GothamHousingPortal() {
   const [isProcessing, setIsProcessing] = useState(false);
 
   const isGothamActive = Boolean(profile?.isGothamSubscriber || profile?.subscriptionType === "gotham_saas");
-  const isGothamCanceling = Boolean(profile?.gothamCancelAtPeriodEnd || profile?.cancelAtPeriodEnd);
+  const isGothamCanceling = Boolean(profile?.gothamCancelAtPeriodEnd);
 
   const handleSyncStripeB2BInvoice = async () => {
     if (!user) {
@@ -174,7 +174,8 @@ export default function GothamHousingPortal() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+          "Idempotency-Key": crypto.randomUUID()
         },
         body: JSON.stringify({
           userId: user.uid,
@@ -208,8 +209,7 @@ export default function GothamHousingPortal() {
       } else if (data.error) {
         toast.error(data.error);
       } else {
-        toast.success(`⚡ Gotham SaaS Subscription Active (${plan.tierName})!`);
-        setIsSaaSCalculatorOpen(false);
+        toast.error("Checkout did not return a payment URL. Gotham SaaS has not been activated.");
       }
     } catch (e) {
       console.error(e);

@@ -1,5 +1,22 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+
+## 🏘️ Gotham Subscription Lifecycle & Server-Authoritative Property Creation (November 10, 2026)
+
+- **Stripe lifecycle reconciliation:** `server.ts` now refreshes Gotham subscription status from Stripe for `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`, `invoice.payment_succeeded`, and `invoice.paid`. Invoice events trigger a live subscription retrieval; invoice payment alone does not grant access. The handler maps by the stored `gothamSubscriptionId`, rejects ambiguous user mappings, guards against older event timestamps, and synchronizes entitlement/cancellation/period-end fields.
+- **Gotham cancellation/reactivation:** `/api/cancel-subscription` and `/api/reactivate-subscription` now require the explicit `gothamSubscriptionId`; they no longer fall back to a generic membership subscription ID. Missing Stripe configuration cannot silently record a successful live Gotham cancellation/reactivation. The fabricated 30-day period-end fallback was removed for Gotham.
+- **Purchased door allowance:** Gotham pricing uses a single aggregate Stripe subscription item with quantity 1; the purchased door allowance is stored separately in `users/{uid}.gothamDoorsCount`. Lifecycle refresh must not replace this value with Stripe's item quantity.
+- **Property create command:** authenticated `POST /api/properties` in `server.ts` derives owner identity from the verified Firebase token, validates a strict property-business-field allowlist, rejects client ownership/billing/usage/verification fields, and creates the record with server-owned owner/user IDs.
+- **Property ownership transfer:** transfer-code verification now uses a rate-limited server preview endpoint; the claim operation is server-authoritative and transactionally updates ownership, transfer history, and both prior/new Gotham usage counters. The previous client-side ownership-change exception in Firestore rules has been removed. Existing owner transfer initiation/cancellation updates remain permitted.
+- **Quota counter lifecycle:** the per-user `gotham_property_usage/{uid}` document is initialized from legacy property records on first reservation. Subsequent creates use the counter as the transaction serialization point. Property deletion uses authenticated `DELETE /api/properties/:id`; owner/admin authorization, property deletion, and counter decrement (or initial backfill when needed) commit atomically. The two existing UI delete call sites were migrated. Direct client deletes are denied so they cannot leave the counter stale.
+- **Gotham quota transaction:** the command identifies Gotham accounts from server-owned profile fields and permits creation only while `isGothamSubscriber` is true, the stored lifecycle status is `active` or `trialing`, a Gotham subscription ID exists, and the purchased door allowance is valid. It counts existing records across `ownerId`, `userId`, and `landlordId`, then serializes reservation on `gotham_property_usage/{uid}` while creating the property. Non-Gotham users do not enter the Gotham quota path.
+- **Idempotency:** clients send an `Idempotency-Key`; the server stores a user-scoped request marker in `property_creation_requests` and returns the original property ID for a replay.
+- **Client migration:** `src/services/propertyCommandService.ts` is used by `PropertyManager.tsx`, `Portfolio.tsx`, and `HomeHealthWidget.tsx`. Existing-property updates remain on their prior authorized update paths.
+- **Firestore rules:** direct client `create` on `/properties/{propertyId}` is denied. Existing property read/update/delete/transfer rules are retained; trusted server Admin SDK writes bypass client rules as designed.
+- **Regression coverage:** added a Firestore emulator rules test proving an authenticated homeowner cannot directly create a property document.
+
+****Verification status:** CI run [42796203967](https://github.com/Saanwar2002/AnyTrader/actions/runs/42796203967) passed on code commit `111aad93e15b948ba6393d0ee24df14bf68dafea`: 592 Firestore emulator/security/concurrency tests, 1,071 unit/penetration tests, TypeScript/lint, production build, and release audit (0 critical failures, 7 environment/connectivity warnings). This is not release sign-off. API-level entitlement/quota boundary, cancellation-at-period-end, forged-payload, idempotency replay, and create/delete/transfer concurrency tests remain to be added. Live AI Studio/Firebase parity, named-database deployed rules/indexes, and deployment configuration remain unverified. Keep the integration branch isolated; do not merge or deploy until all gates pass.
+
 ## 🛠️ Notification API, Demand Zones & Live Tracking Permission Remediation (November 6, 2026)
 - **1. Neutralized Error 0 (`Error sending notification via server API: SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON`)**:
   - **Root Cause**: `src/firebase.ts` invoked `fetch("/api/notifications")` without resolving via `getApiUrl` or specifying an `Accept: application/json` header, and parsed `res.json()` directly without inspecting `content-type`. When gateway timeouts, proxy pages, or static fallbacks returned HTML (`<!doctype ...`), `res.json()` threw an unhandled `SyntaxError`.
@@ -5928,3 +5945,33 @@ The prefix is determined by the user's primary registration role:
   - **Verification**: 1043/1043 tests passing across 62 test files in Vitest suite (`npm test`), `npm run lint` (`tsc --noEmit`) 100% clean, and `compile_applet` succeeded cleanly.
 
 
+
+
+## 🛡️ AnyTrader — November 8, 2026 Security Remediation & CI Status (Draft PRs)
+
+**Scope:** AnyTrader only. These changes are on draft pull-request branches and have not been merged or deployed. AnyRoller-specific screens, workflows and configuration were not changed.
+
+### Payment authority and checkout authorization — PR #2
+- **Membership metadata authority (\`src/server/pricingCatalog.ts\`):** membership entitlement metadata is now built from server catalog values and the authenticated UID; client-supplied metadata cannot overwrite tier name, canonical tier, subscription type, user ID or entitlement flags.
+- **Product-selection precedence:** explicit server catalog membership selection takes priority over conflicting client metadata claiming wallet top-up, milestone funding, mediation stake, boost or other product types.
+- **Job checkout authorization:** boost checkout requires the authenticated job owner and an active job state; mediation-stake checkout requires a job participant and a disputed job. Recognised participant fields include the canonical homeowner/accepted-trader fields and existing legacy aliases. A mediation stake already recorded as paid is rejected.
+- **Webhook dependency failure:** when Stripe or Firestore dependencies are unavailable, the webhook returns HTTP 503 rather than acknowledging an event that could not be processed; this permits Stripe retry behavior.
+- **Test isolation:** the Task 25 real-emulator test setup now clears the singleton intelligence task queue's in-memory cache after clearing emulator Firestore, preventing test vectors from inheriting stale cache state between cases.
+- **Validation:** CI run #279 passed all gates on the draft PR branch: Firebase security/concurrency 589/589; unit/penetration 1,074/1,074; TypeScript/typecheck and lint; production build; release audit. The audit reported six non-critical CI environment warnings (Stripe, Gemini, JWT, APP_URL and ALLOWED_ORIGINS configuration not present in CI). This is not evidence that live production secrets are missing or configured.
+- **PR:** https://github.com/Saanwar2002/AnyTrader/pull/2
+
+### Invitation recipient authorization — PR #1 (CI validated; draft/unmerged)
+- **Read/query authorization (\`firestore.rules\`):** recipient direct reads require a verified email matching the invitation; recipient list queries use exact email equality so Firestore can prove query constraints. Direct document reads retain case-insensitive matching for existing mixed-case records. Inviter/admin access is retained.
+- **Acceptance authorization:** recipient updates are limited to pending → accepted, with \`acceptedAt == request.time\` and only \`status\`/\`acceptedAt\` changed. The latest revision combines recipient, inviter and admin authorization in one update grant, evaluating the recipient transition first.
+- **Regression coverage:** PL-08 tests exercise unverified direct read/query/update denial, verified direct reads and list query, mixed-case direct read, unrelated user denial, inviter/admin management, intended acceptance and protected-field tampering.
+- **Validation:** earlier CI runs #255, #266, #273, #278 and #280 failed PL-08. Run #281 still failed with a Firestore rule evaluation error. Run #283 then failed PL-08 (588/589 security/concurrency tests), with evaluation errors reported at the separate recipient, inviter and admin update grants. The dedicated exact-email acceptance predicate did not resolve PL-08: CI #285 again failed (588/589 tests passed). Consolidating recipient, inviter and admin authorization into one update grant also did not resolve the issue: CI #288 failed PL-08 with an evaluation error at \`firestore.rules:637:24\` (588/589 tests passed). The exact failing sub-expression has not yet been isolated; do not weaken the regression test or mark PL-08 complete. The docs-only PR #3 passed all gates in runs #284, #287, #289 and #290. After updating the evidence to include the latest invitation failure, the current docs head \`0d170d66149bda4dcd5bac3fb3088cdae9b8e06f\` also passed the complete workflow in run \`42482212646\`. This validates documentation only and does not validate either remediation PR.
+- **PR:** https://github.com/Saanwar2002/AnyTrader/pull/1
+
+### Follow-up found during invitation-flow review
+\`BusinessTeamManagement.tsx\` creates \`type: "business_team"\` invitations with \`role: "member"\`, \`businessId\` and limited permissions. \`Onboarding.tsx\` currently treats any invitation matching the user's email as an admin-role selection; later it rejects the onboarding attempt unless Firebase custom admin claims are present. This appears to prevent ordinary business-team invitees from completing onboarding. The intended team-member role, permission application and businessId attachment need a product/architecture decision. This was not changed as part of PL-08.
+
+### Environment and release limitations
+- The repository's static Firebase configuration points to project \`anytradercombined\` and named Firestore database \`ai-studio-anytrader-44dab8b3-bbc9-4352-b725-2cbe7a1dfd2a\`; this is repository evidence only.
+- Live Google AI Studio workspace parity, deployed named/default Firestore rules and indexes, Auth/Storage/App Check, service-account IAM, secrets, Cloud Run revision and staging/production configuration have not been independently verified.
+- Neither draft PR has been merged; no Firebase rules/index deployment, production deployment, secret change or live-data mutation was performed.
+- The Firebase connector is available but not yet connected. Complete the AI Studio/Firebase pre-change checklist before merge or deployment.

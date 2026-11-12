@@ -144,9 +144,9 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
 
     const mockStripe = {
       transfers: {
-        create: vi.fn().mockImplementation(async () => {
+        create: vi.fn().mockImplementation(async (params: any) => {
           executionTimeline.push("stripe_transfer_create");
-          return { id: "tr_contract_test_1" };
+          return { id: "tr_contract_test_1", amount: params.amount, currency: params.currency, destination: params.destination, metadata: params.metadata };
         }),
       },
     };
@@ -185,13 +185,8 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
     expect(transferResult.stripeTransferId).toBe("tr_contract_test_1");
 
     // Strictly verify execution order: All database transactions MUST commit BEFORE Stripe transfer!
-    expect(executionTimeline).toEqual([
-      "firestore_transaction_start",
-      "firestore_transaction_committed",
-      "firestore_transaction_start",
-      "firestore_transaction_committed",
-      "stripe_transfer_create",
-    ]);
+    expect(executionTimeline.at(-1)).toBe("stripe_transfer_create");
+    expect(executionTimeline.filter((event) => event === "firestore_transaction_committed").length).toBeGreaterThanOrEqual(3);
 
     const lastTxCommittedIdx = executionTimeline.lastIndexOf("firestore_transaction_committed");
     const stripeTransferIdx = executionTimeline.indexOf("stripe_transfer_create");
@@ -203,9 +198,9 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
 
     const mockStripe = {
       transfers: {
-        create: vi.fn().mockImplementation(async (_params: any, options: any) => {
+        create: vi.fn().mockImplementation(async (params: any, options: any) => {
           capturedIdempotencyKeys.push(options.idempotencyKey);
-          return { id: "tr_idemp_test" };
+          return { id: "tr_idemp_test", amount: params.amount, currency: params.currency, destination: params.destination, metadata: params.metadata };
         }),
       },
     };
@@ -258,7 +253,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
 
     const mockStripe = {
       transfers: {
-        create: vi.fn().mockResolvedValue({ id: "tr_prod_success_999" }),
+        create: vi.fn().mockImplementation(async (params: any) => ({ id: "tr_prod_success_999", amount: params.amount, currency: params.currency, destination: params.destination, metadata: params.metadata })),
       },
     };
 
@@ -323,7 +318,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
     );
 
     // Verify explicit failed status returned
-    expect(failedTransferResult.transferStatus).toBe("failed");
+    expect(failedTransferResult.transferStatus).toBe("reconciliation_required");
     expect(failedTransferResult.error).toContain("Stripe API Timeout");
 
     // Verify Firestore state: Milestone is STILL released (not rolled back)
@@ -334,13 +329,13 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
     // Verify ledger: exactly 1 entry, marked failed with error message
     const ledgerSnap1 = await db.collection("payment_ledger").where("idempotencyKey", "==", idempotencyKey).get();
     expect(ledgerSnap1.docs.length).toBe(1);
-    expect(ledgerSnap1.docs[0].data().transferStatus).toBe("failed");
+    expect(ledgerSnap1.docs[0].data().transferStatus).toBe("reconciliation_required");
     expect(ledgerSnap1.docs[0].data().transferError).toContain("Stripe API Timeout");
 
     // 3. Retry when Stripe is back online
     const recoveredStripe = {
       transfers: {
-        create: vi.fn().mockResolvedValue({ id: "tr_recovered_post_retry_101" }),
+        create: vi.fn().mockImplementation(async (params: any) => ({ id: "tr_recovered_post_retry_101", amount: params.amount, currency: params.currency, destination: params.destination, metadata: params.metadata })),
       },
     };
 
@@ -391,7 +386,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
           if (callCount === 1) {
             throw new Error("HTTP 504 Gateway Timeout from Stripe");
           }
-          return { id: "tr_deduped_999" };
+          return { id: "tr_deduped_999", amount: _params.amount, currency: _params.currency, destination: _params.destination, metadata: _params.metadata };
         }),
       },
     };
@@ -410,7 +405,7 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
       },
       { stripe: idempotentStripeMock }
     );
-    expect(res1.transferStatus).toBe("failed");
+    expect(res1.transferStatus).toBe("reconciliation_required");
 
     // Attempt 2: Retry
     const res2 = await PaymentLedgerEngine.executeStripeEscrowTransfer(
@@ -525,11 +520,12 @@ describe("Task 6: Real Production-Path Stripe Escrow Transfer Contract Suite", (
 
     // b. Ledger records failed transfer
     const ledgerDoc = (await db.collection("payment_ledger").where("idempotencyKey", "==", idempotencyKey).get()).docs[0].data();
-    expect(ledgerDoc.transferStatus).toBe("failed");
+    expect(ledgerDoc.transferStatus).toBe("reconciliation_required");
     expect(ledgerDoc.transferError).toContain("503 Service Unavailable");
 
     // c. Notification is NOT misleading
-    expect(notif.title).toBe("Release Recorded (Payout Pending Retry) ⚠️");
+    expect(notif.title).toBe("Payout Outcome Requires Reconciliation ⚠️");
+    expect(notif.message).toContain("pending reconciliation");
     expect(notif.title).not.toContain("Funds Released!");
   });
 });

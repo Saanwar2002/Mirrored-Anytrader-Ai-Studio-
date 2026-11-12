@@ -1033,13 +1033,13 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
     const queue = new IntelligenceTaskQueue(2, 60000, 'worker_retry_test');
     queue.setFirestoreDb(adminDb);
 
-    const idempotencyKey = buildIdempotencyKey('job_emu_25_003', 'JOB_EXTRACTION', 'v1');
+    const idempotencyKey = buildIdempotencyKey('job_emu_25_006_retry_policy', 'JOB_EXTRACTION', 'v1');
     const task = await queue.enqueueTaskAsync(
       'job_extraction',
       'job',
-      'job_emu_25_003',
+      'job_emu_25_006_retry_policy',
       idempotencyKey,
-      { job: { jobId: 'job_emu_25_003' } }
+      { job: { jobId: 'job_emu_25_006_retry_policy' } }
     );
 
     // Register a handler that fails with transient 503 error
@@ -1175,9 +1175,15 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
   it('Production Emulator Vector 10: Partial failure & resume — Failed items halt batch without advancing cursor and are retried on resume', async () => {
     const runId = 'bf_run_emu_partial_failure';
 
-    // Register a handler that fails specifically on job_emu_25_003
+    // Seed an isolated tenant dataset so unrelated emulator jobs cannot alter cursor assertions.
+    for (let i = 1; i <= 7; i++) {
+      const jobId = `job_vec10_${String(i).padStart(3, '0')}`;
+      await adminDb.collection('jobs').doc(jobId).set({ id: jobId, title: `Vector 10 job ${i}`, estateId: 'estate_vector10_isolated' });
+    }
+
+    // Register a handler that fails specifically on job_vec10_003
     intelligenceTaskQueue.registerHandler('job_extraction', async (task) => {
-      if (task.aggregateId === 'job_emu_25_003') {
+      if (task.aggregateId === 'job_vec10_003') {
         throw new Error('Simulation: extraction failed on unit 3');
       }
       return { processed: true, jobId: task.aggregateId };
@@ -1189,23 +1195,24 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
       batchSize: 5,
       dryRun: false,
       rateLimitDelayMs: 0,
+      tenantId: 'estate_vector10_isolated',
     });
 
     // Exactly 2 succeeded, 1 failed, 0 skipped past the failure
     expect(run1.processedCount).toBe(2);
     expect(run1.errorCount).toBe(1);
-    expect(run1.nextCursor).toBe('job_emu_25_002'); // Invariant: cursor strictly stops at last success (before failure)
+    expect(run1.nextCursor).toBe('job_vec10_002'); // Invariant: cursor strictly stops at last success (before failure)
     expect(run1.isComplete).toBe(false);
     expect(run1.terminationReason).toBe('item_failed');
 
     const runDoc1 = (await adminDb.collection('intelligence_backfill_runs').doc(runId).get()).data();
     expect(runDoc1?.status).toBe('failed');
-    expect(runDoc1?.cursor).toBe('job_emu_25_002');
+    expect(runDoc1?.cursor).toBe('job_vec10_002');
     expect(runDoc1?.processed).toBe(2);
     expect(runDoc1?.errors).toBe(1);
 
     // Inspect the failed job_003 task document and verify authoritative retry state and nextAttemptAt
-    const job3TaskId = taskDocumentId(buildIdempotencyKey('job_emu_25_003', 'JOB_EXTRACTION', 'v1'));
+    const job3TaskId = taskDocumentId(buildIdempotencyKey('job_vec10_003', 'JOB_EXTRACTION', 'v1'));
     const job3TaskSnap = await adminDb.collection('intelligence_tasks').doc(job3TaskId).get();
     expect(job3TaskSnap.exists).toBe(true);
     const job3TaskData = job3TaskSnap.data() as IntelligenceTask;
@@ -1213,32 +1220,34 @@ describe('Task 25 — Scale / Backfill / Resilience Production Firebase Emulator
     expect(job3TaskData.attempts).toBe(1);
     expect(job3TaskData.nextAttemptAt).toBeDefined();
 
-    // Respect real queue retry backoff: wait until nextAttemptAt is due
-    const nextAttemptTime = new Date(job3TaskData.nextAttemptAt!).getTime();
-    const waitMs = Math.max(0, nextAttemptTime - Date.now() + 50);
-    if (waitMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-    }
+    // Verify the durable retry deadline was recorded, then make the retry due
+    // deterministically. The retry policy's timing is covered separately; this
+    // resume test must not depend on emulator scheduling or wall-clock jitter.
+    expect(Number.isFinite(new Date(job3TaskData.nextAttemptAt!).getTime())).toBe(true);
+    await adminDb.collection('intelligence_tasks').doc(job3TaskId).update({
+      nextAttemptAt: new Date(Date.now() - 10000).toISOString(),
+    });
 
     // Fix the handler so job 3 now succeeds
     intelligenceTaskQueue.registerHandler('job_extraction', async (task) => {
       return { processed: true, jobId: task.aggregateId, recovered: true };
     });
 
-    // Run 2: Resume with the same runId from saved cursor (job_emu_25_002) -> retries job 3 and processes through 7
+    // Run 2: Resume with the same runId from saved cursor (job_vec10_002) -> retries job 3 and processes through 7
     const run2 = await controlledBackfillEngine.executeFirestoreBackfill(adminDb, {
       runId,
       batchSize: 5,
       dryRun: false,
       rateLimitDelayMs: 0,
+      tenantId: 'estate_vector10_isolated',
     });
 
     expect(run2.processedCount).toBe(7); // 2 previous + 5 new
-    expect(run2.nextCursor).toBe('job_emu_25_007');
+    expect(run2.nextCursor).toBe('job_vec10_007');
     expect(run2.errorCount).toBe(1);
 
     const runDoc2 = (await adminDb.collection('intelligence_backfill_runs').doc(runId).get()).data();
-    expect(runDoc2?.cursor).toBe('job_emu_25_007');
+    expect(runDoc2?.cursor).toBe('job_vec10_007');
     expect(runDoc2?.processed).toBe(7);
     expect(runDoc2?.errors).toBe(1);
 

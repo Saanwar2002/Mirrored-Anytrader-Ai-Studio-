@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { db, doc, getDoc, updateDoc, collection, query, where, getDocs, handleFirestoreError, OperationType } from "@/src/firebase";
 import { useAuth } from "../AuthProvider";
+import { verifyPropertyTransferCode, claimPropertyTransfer } from "../../services/propertyCommandService";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { X, ArrowRight, ShieldCheck, CheckCircle2, Home, AlertCircle, KeyRound, Building2, Wrench, Sparkles, FileText, Check, Lock, LogIn } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -44,37 +44,11 @@ export function ClaimPropertyPassportModal({ initialCode = "", onClose, onSucces
     setVerifiedProperty(null);
 
     try {
-      const q = query(
-        collection(db, "properties"),
-        where("transferCode", "==", code),
-        where("transferStatus", "==", "pending")
-      );
-
-      const snapshot = await getDocs(q);
-
-      if (snapshot.empty) {
-        setError("Invalid or expired transfer code. Please check with the seller or solicitor.");
-        setVerifying(false);
-        return;
-      }
-
-      const propDoc = snapshot.docs[0];
-      const data: any = { id: propDoc.id, ...propDoc.data() };
-
-      // Check expiry
-      if (data.transferExpiresAt) {
-        const expiry = new Date(data.transferExpiresAt);
-        if (expiry.getTime() < Date.now()) {
-          setError("This transfer code has expired. Please ask the seller to generate a new code.");
-          setVerifying(false);
-          return;
-        }
-      }
-
-      setVerifiedProperty(data);
+      const property = await verifyPropertyTransferCode(code);
+      setVerifiedProperty(property);
     } catch (err) {
       console.error("Error verifying transfer code:", err);
-      setError("Failed to verify code. Please check your internet connection.");
+      setError(err instanceof Error ? err.message : "Failed to verify code. Please check your internet connection.");
     } finally {
       setVerifying(false);
     }
@@ -89,49 +63,15 @@ export function ClaimPropertyPassportModal({ initialCode = "", onClose, onSucces
 
     if (!verifiedProperty?.id) return;
 
-    if (verifiedProperty.ownerId === user.uid) {
-      toast.info("You already own this property passport in your account.");
-      if (onClose) onClose();
-      return;
-    }
-
     setClaiming(true);
     try {
-      const propRef = doc(db, "properties", verifiedProperty.id);
-      
-      const newHistoryItem = {
-        transferredAt: new Date().toISOString(),
-        transferCode: verifiedProperty.transferCode,
-        fromOwnerUid: verifiedProperty.ownerId || "previous_owner",
-        toOwnerUid: user.uid,
-        toOwnerEmail: user.email || null,
-        propertyName: verifiedProperty.name || "Property"
-      };
-
-      const existingHistory = Array.isArray(verifiedProperty.transferHistory) 
-        ? verifiedProperty.transferHistory 
-        : [];
-
-      await updateDoc(propRef, {
-        ownerId: user.uid,
-        userId: user.uid,
-        transferStatus: "completed",
-        transferCode: null,
-        transferExpiresAt: null,
-        transferClaimedAt: new Date().toISOString(),
-        transferClaimedByUid: user.uid,
-        previousOwnersCount: (verifiedProperty.previousOwnersCount || 0) + 1,
-        transferHistory: [...existingHistory, newHistoryItem],
-        updatedAt: new Date().toISOString()
-      });
-
+      const result = await claimPropertyTransfer(user, transferCode);
       setClaimSuccess(true);
       toast.success("🎉 Property Passport Claimed! Digital twin transferred to your account.");
-      if (onSuccess) onSuccess(verifiedProperty.id);
+      if (onSuccess) onSuccess(result.id);
     } catch (err) {
       console.error("Error claiming property:", err);
-      handleFirestoreError(err, OperationType.UPDATE, `properties/${verifiedProperty.id}`);
-      toast.error("Failed to claim property passport.");
+      toast.error(err instanceof Error ? err.message : "Failed to claim property passport.");
     } finally {
       setClaiming(false);
     }

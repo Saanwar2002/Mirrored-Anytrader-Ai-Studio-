@@ -581,23 +581,73 @@ service cloud.firestore {
     }
 
     match /invitations/{invitationId} {
-      allow get, list: if isSignedIn() && (
-        isAdmin() || 
-        ('email' in request.auth.token && 'email_verified' in request.auth.token && request.auth.token.email_verified == true && (resource == null || resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower())) ||
-        (resource != null && (resource.data.invitedBy == request.auth.uid || resource.data.get('invitedBy', '') == request.auth.uid)) ||
-        resource == null
+      function isVerifiedInvitationRecipient() {
+        return isSignedIn() &&
+          ('email' in request.auth.token) &&
+          (request.auth.token.email is string) &&
+          ('email_verified' in request.auth.token) &&
+          request.auth.token.email_verified == true &&
+          (resource.data.get('email', '') is string) &&
+          resource.data.get('email', '').lower() == request.auth.token.email.lower();
+      }
+
+      function isVerifiedInvitationRecipientForAcceptance() {
+        return isSignedIn() &&
+          ('email' in request.auth.token) &&
+          (request.auth.token.email is string) &&
+          ('email_verified' in request.auth.token) &&
+          request.auth.token.email_verified == true &&
+          resource.data.get('email', '') == request.auth.token.email;
+      }
+
+      // List queries must use exact equality so Firestore can prove the query is
+      // constrained to the authenticated recipient.
+      function isVerifiedInvitationRecipientForList() {
+        return isSignedIn() &&
+          ('email' in request.auth.token) &&
+          (request.auth.token.email is string) &&
+          ('email_verified' in request.auth.token) &&
+          request.auth.token.email_verified == true &&
+          resource.data.get('email', '') == request.auth.token.email;
+      }
+
+      allow get: if isSignedIn() && (
+        isAdmin() ||
+        (resource != null && (
+          isVerifiedInvitationRecipient() ||
+          resource.data.get('invitedBy', '') == request.auth.uid
+        ))
+      );
+      allow list: if isSignedIn() && (
+        isAdmin() ||
+        (resource != null && (
+          isVerifiedInvitationRecipientForList() ||
+          resource.data.get('invitedBy', '') == request.auth.uid
+        ))
       );
       allow create: if isRegistered() && (
-        isAdmin() || 
+        isAdmin() ||
         request.resource.data.get('invitedBy', '') == request.auth.uid
       );
-      allow update: if isRegistered() && (
-        isAdmin() || 
-        resource.data.get('invitedBy', '') == request.auth.uid ||
-        ('email' in request.auth.token && 'email_verified' in request.auth.token && request.auth.token.email_verified == true && (resource.data.email == request.auth.token.email || resource.data.email == request.auth.token.email.lower() || resource.data.get('email', '') == request.auth.token.email.lower()))
-      );
+      // A verified recipient may perform only the pending -> accepted transition.
+      // Keep the authorization checks inline so each evaluated field is explicit.
+      allow update: if (
+        isSignedIn() &&
+        ('email' in request.auth.token) &&
+        request.auth.token.email is string &&
+        ('email_verified' in request.auth.token) &&
+        request.auth.token.email_verified == true &&
+        resource.data.email == request.auth.token.email &&
+        resource.data.get('status', '') == 'pending' &&
+        request.resource.data.get('status', '') == 'accepted' &&
+        request.resource.data.acceptedAt == request.time &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt'])
+      ) || (
+        isSignedIn() &&
+        resource.data.get('invitedBy', '') == request.auth.uid
+      ) || isAdmin();
       allow delete: if isRegistered() && (
-        isAdmin() || 
+        isAdmin() ||
         resource.data.get('invitedBy', '') == request.auth.uid
       );
     }
@@ -704,32 +754,24 @@ service cloud.firestore {
         resource.data.get('landlordId', '') == request.auth.uid ||
         isAdmin()
       );
-      allow create: if isSignedIn() && (
-        isAdmin() ||
-        ((request.resource.data.get('ownerId', '') == request.auth.uid || request.resource.data.get('userId', '') == request.auth.uid) &&
-         !request.resource.data.keys().hasAny(['transferClaimedByUid', 'verifiedByAdmin']))
-      );
+      // Property creation is server-only; the authenticated API command enforces Gotham door limits.
+      allow create: if false;
       allow update: if isSignedIn() && (
         isAdmin() ||
         (
           (resource.data.get('ownerId', '') == request.auth.uid || resource.data.get('userId', '') == request.auth.uid) &&
           !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'ownerId', 'userId', 'landlordId', 'transferClaimedByUid', 'verifiedByAdmin'
-          ])
-        ) ||
-        (
-          resource.data.get('transferStatus', '') == 'pending' &&
-          resource.data.get('pendingTransferToUid', '') == request.auth.uid &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'ownerId', 'userId', 'transferStatus', 'transferClaimedAt', 'transferClaimedByUid'
+            'ownerId', 'userId', 'landlordId', 'homeownerId',
+            'pendingTransferToUid', 'transferStatus', 'transferCode',
+            'transferExpiresAt', 'transferTargetEmail', 'transferHistory',
+            'transferClaimedAt', 'transferClaimedByUid', 'previousOwnersCount',
+            'transferTargetName', 'transferInitiatedAt', 'transferInitiatorUid',
+            'verifiedByAdmin'
           ])
         )
       );
-      allow delete: if isSignedIn() && (
-        resource.data.get('ownerId', '') == request.auth.uid || 
-        resource.data.get('userId', '') == request.auth.uid || 
-        isAdmin()
-      );
+      // Property deletion is server-only so the Gotham usage counter is decremented atomically.
+      allow delete: if false;
     }
 
     // --- Public Properties: Sanitized projection for Anonymous & Public Property Discovery / Verification ---

@@ -354,20 +354,20 @@ export class ControlledBackfillEngine {
       if (typeof query.orderBy === 'function') {
         query = query.orderBy('__name__');
       }
-      query = query.limit(batchSize);
-
       if (effectiveCursor) {
-        const cursorDoc = await firestoreDb.collection(targetCollection).doc(effectiveCursor).get();
-        if (cursorDoc && cursorDoc.exists) {
-          query = query.startAfter(cursorDoc);
-        } else if (typeof query.startAfter === 'function') {
-          try {
-            query = query.startAfter(effectiveCursor);
-          } catch {
-            // startAfter with string id fallback if supported
-          }
+        if (tenantId) {
+          // Tenant equality + document-name range is reliable in the emulator
+          // and prevents cursor values being interpreted as ordinary fields.
+          query = query.where('__name__', '>', firestoreDb.collection(targetCollection).doc(effectiveCursor));
+        } else {
+          // Legacy/unscoped queries and the in-memory adapter use the standard
+          // ordered document cursor.
+          query = query.startAfter(firestoreDb.collection(targetCollection).doc(effectiveCursor));
         }
       }
+
+      // Bound the resumed page after applying its cursor checkpoint.
+      query = query.limit(batchSize);
 
       const snapshot = await query.get();
 

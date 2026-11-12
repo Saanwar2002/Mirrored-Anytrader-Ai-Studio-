@@ -4,6 +4,7 @@ import {
   executeDriverPayoutOrchestrationCommand,
   DRIVER_BASE_SHARE_RATE,
   PLATFORM_COMMISSION_RATE,
+  GOLD_DRIVER_COMMISSION_RATE,
   PAYOUT_LEASE_DURATION_MS,
 } from "../../src/server/driverPayoutOrchestration.ts";
 
@@ -13,14 +14,17 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
   let mockStripe: any;
   let createdTransfers: any[];
   let transactionMutex: Promise<any>;
+  let onOperationRead: (() => void) | undefined;
 
-  const applyFieldValue = (v: any) => {
+  const applyFieldValue = (v: any, fieldName?: string) => {
     if (v && typeof v === "object") {
+      // Resolve delete sentinels before field-specific timestamp handling: dry-run
+      // lease release deletes payoutLockedAt, while lease acquisition writes a timestamp.
+      const methodName = typeof v._methodName === "string" ? v._methodName.toLowerCase() : "";
+      if (methodName.includes("delete")) return undefined;
+      if (typeof v.isEqual === "function" && v.isEqual(admin.firestore.FieldValue.delete())) return undefined;
       if ("operand" in v) return v.operand;
-      if ("_methodName" in v && v._methodName === "serverTimestamp") return Date.now();
-      if ("_methodName" in v && v._methodName === "delete") return undefined;
-      // Handle admin.firestore.FieldValue sentinels
-      if (typeof v.isEqual === "function") return Date.now();
+      if (methodName.includes("servertimestamp") || fieldName === "payoutLockedAt") return Date.now();
     }
     return v;
   };
@@ -29,6 +33,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     mockStore = {};
     createdTransfers = [];
     transactionMutex = Promise.resolve();
+    onOperationRead = undefined;
 
     // Helper to simulate Firestore document snapshots, queries, and atomic transactions
     mockDb = {
@@ -61,7 +66,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
                         update: async (fields: any) => {
                           if (!mockStore[path]) mockStore[path] = {};
                           for (const [k, v] of Object.entries(fields)) {
-                            const resolved = applyFieldValue(v);
+                            const resolved = applyFieldValue(v, k);
                             if (resolved === undefined) {
                               delete mockStore[path][k];
                             } else if (v && typeof v === "object" && "operand" in v) {
@@ -89,14 +94,17 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
           const path = `${colName}/${id}`;
           return {
             id,
-            get: async () => ({
-              exists: !!mockStore[path],
-              data: () => (mockStore[path] ? { ...mockStore[path] } : undefined),
-            }),
+            get: async () => {
+              if (colName === "driver_payout_operations") onOperationRead?.();
+              return {
+                exists: !!mockStore[path],
+                data: () => (mockStore[path] ? { ...mockStore[path] } : undefined),
+              };
+            },
             update: async (fields: any) => {
               if (!mockStore[path]) mockStore[path] = {};
               for (const [k, v] of Object.entries(fields)) {
-                const resolved = applyFieldValue(v);
+                const resolved = applyFieldValue(v, k);
                 if (resolved === undefined) {
                   delete mockStore[path][k];
                 } else if (v && typeof v === "object" && "operand" in v) {
@@ -132,7 +140,7 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
               const path = Object.keys(mockStore).find((p) => p.endsWith(`/${ref.id}`));
               if (path) {
                 for (const [k, v] of Object.entries(fields)) {
-                  const resolved = applyFieldValue(v);
+                  const resolved = applyFieldValue(v, k);
                   if (resolved === undefined) {
                     delete mockStore[path][k];
                   } else if (v && typeof v === "object" && "operand" in v) {
@@ -159,6 +167,8 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
             id: `tr_test_${Date.now()}_${createdTransfers.length}`,
             amount: payload.amount,
             destination: payload.destination,
+            currency: payload.currency,
+            metadata: payload.metadata,
           };
         }),
       },
@@ -346,6 +356,67 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(mockStore["ride_requests/ride_ledger_fail"].payoutStatus).toBe("rejected_unverified_payment");
   });
 
+  it("4a. Security Regression: Refund ledger entries cannot authorize a driver payout", async () => {
+    mockStore["payment_ledger/refund_for_ride"] = {
+      transactionId: "pi_refund_for_ride",
+      type: "REFUND",
+      status: "completed",
+      captured: true,
+      currency: "gbp",
+      amount: 5500,
+    };
+    mockStore["ride_requests/ride_refund_ledger"] = {
+      status: "completed",
+      paymentStatus: "paid",
+      payoutTransferred: false,
+      finalFare: 50.0,
+      tipAmount: 5.0,
+      assignedDriverId: "driver_legit",
+      driverId: "driver_legit",
+      stripePaymentIntentId: "pi_refund_for_ride",
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({
+      db: mockDb,
+      stripeClient: mockStripe,
+    });
+
+    expect(result.processedCount).toBe(0);
+    expect(createdTransfers.length).toBe(0);
+    expect(mockStore["ride_requests/ride_refund_ledger"].payoutTransferred).toBe(false);
+    expect(mockStore["ride_requests/ride_refund_ledger"].payoutStatus).toBe("rejected_unverified_payment");
+  });
+
+  it("4b. Ledger fallback accepts only an explicitly typed completed RIDE_PAYMENT receipt", async () => {
+    mockStore["payment_ledger/ride_receipt"] = {
+      transactionId: "pi_ride_ledger_fallback",
+      type: "RIDE_PAYMENT",
+      status: "completed",
+      currency: "gbp",
+      amount: 5500,
+    };
+    mockStore["ride_requests/ride_ledger_fallback_valid"] = {
+      status: "completed",
+      paymentStatus: "paid",
+      payoutTransferred: false,
+      finalFare: 50.0,
+      tipAmount: 5.0,
+      assignedDriverId: "driver_legit",
+      driverId: "driver_legit",
+      stripePaymentIntentId: "pi_ride_ledger_fallback",
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({
+      db: mockDb,
+      stripeClient: mockStripe,
+    });
+
+    expect(result.processedCount).toBe(1);
+    expect(createdTransfers.length).toBe(1);
+    expect(createdTransfers[0].payload.amount).toBe(4900);
+    expect(mockStore["ride_requests/ride_ledger_fallback_valid"].payoutTransferred).toBe(true);
+  });
+
   it("5. Finding 35G-4: Client-mutated fareEstimate or fare cannot increase payout beyond authoritative finalFare", async () => {
     mockStore["ride_requests/ride_tampered_estimate"] = {
       status: "completed",
@@ -438,12 +509,16 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
       }),
     ]);
 
-    // Exactly one worker must succeed in transferring, the other must skip due to active lease
+    // Exactly one worker may transfer. Depending on scheduling, the competing
+    // worker either observes the active lease and skips, or its initial query
+    // runs after payoutTransferred is committed and finds no eligible ride.
     const totalProcessed = resultWorker1.processedCount + resultWorker2.processedCount;
     const totalSkipped = resultWorker1.skippedCount + resultWorker2.skippedCount;
+    const totalFailed = resultWorker1.failedCount + resultWorker2.failedCount;
 
     expect(totalProcessed).toBe(1);
-    expect(totalSkipped).toBe(1);
+    expect(totalFailed).toBe(0);
+    expect(totalSkipped).toBeLessThanOrEqual(1);
     expect(createdTransfers.length).toBe(1);
 
     const rideInStore = mockStore["ride_requests/ride_concurrent_race"];
@@ -470,6 +545,8 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
         id: "tr_interrupted_123",
         amount: payload.amount,
         destination: payload.destination,
+        currency: payload.currency,
+        metadata: payload.metadata,
       };
     });
 
@@ -559,19 +636,17 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(mockStore["ride_requests/ride_retry_key"].payoutStatus).toBe("failed");
     expect(mockStore["ride_requests/ride_retry_key"].payoutRetryCount).toBe(1);
 
-    // Second attempt succeeds
+    // A failed/ambiguous external request is now fenced for reconciliation; do not replay automatically
     const result2 = await executeDriverPayoutOrchestrationCommand({
       db: mockDb,
       stripeClient: mockStripe,
     });
 
-    expect(result2.processedCount).toBe(1);
-    expect(createdTransfers.length).toBe(1);
-    expect(createdTransfers[0].requestOptions.idempotencyKey).toBe(
-      "payout:ride:ride_retry_key:driver_legit:4400"
-    );
-    expect(mockStore["ride_requests/ride_retry_key"].payoutTransferred).toBe(true);
-    expect(mockStore["ride_requests/ride_retry_key"].payoutStatus).toBe("transferred");
+    expect(result2.processedCount).toBe(0);
+    expect(result2.details.some((d) => d.status === "reconciliation_required")).toBe(true);
+    expect(createdTransfers).toHaveLength(0); // Stripe was called once and rejected; no successful transfer receipt exists
+    expect(mockStore["ride_requests/ride_retry_key"].payoutTransferred).toBe(false);
+    expect(mockStore["ride_requests/ride_retry_key"].payoutStatus).toBe("reconciliation_required");
   });
 
   // =========================================================================
@@ -663,4 +738,196 @@ describe("AnyTrader V8.3 Task 35-G — Driver Payout Orchestration & Security Su
     expect(mockStore["ride_requests/ride_no_stripe_dest"].payoutTransferred).toBe(false);
     expect(mockStore["ride_requests/ride_no_stripe_dest"].payoutStatus).toBe("pending_stripe_onboarding");
   });
+  it("16. Gold Driver entitlement applies 10% commission to base fare, keeps full tip, and persists tier audit fields", async () => {
+    mockStore["users/driver_gold"] = {
+      uid: "driver_gold",
+      role: "driver",
+      isDriver: true,
+      stripeAccountId: "acct_driver_gold_123",
+      isGoldDriver: true,
+      driverTier: "gold",
+      driverSubscriptionId: "sub_gold_active",
+      driverSubscriptionStatus: "active",
+      commissionRate: 0.10,
+    };
+    mockStore["ride_requests/ride_gold_commission"] = {
+      status: "completed",
+      paymentStatus: "paid",
+      payoutTransferred: false,
+      finalFare: 50.0,
+      tipAmount: 5.0,
+      assignedDriverId: "driver_gold",
+      driverId: "driver_gold",
+      stripePaymentIntentId: "pi_verified_123",
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+
+    expect(result.processedCount).toBe(1);
+    expect(createdTransfers).toHaveLength(1);
+    expect(createdTransfers[0].payload.amount).toBe(5000); // £45 base share + £5 tip
+    expect(createdTransfers[0].payload.metadata.commissionRate).toBe(String(GOLD_DRIVER_COMMISSION_RATE));
+    expect(createdTransfers[0].payload.metadata.driverTier).toBe("gold");
+    const completedRide = mockStore["ride_requests/ride_gold_commission"];
+    expect(completedRide.appliedCommissionRate).toBe(GOLD_DRIVER_COMMISSION_RATE);
+    expect(completedRide.appliedDriverTier).toBe("gold");
+    expect(completedRide.platformFee).toBe(5);
+    expect(completedRide.driverEarnings).toBe(50);
+  });
+
+  it("17. Gold flags without a live subscription ID/status cannot lower the standard commission", async () => {
+    mockStore["users/driver_gold_stale"] = {
+      uid: "driver_gold_stale",
+      role: "driver",
+      isDriver: true,
+      stripeAccountId: "acct_driver_gold_stale",
+      isGoldDriver: true,
+      commissionRate: 0.10,
+      driverSubscriptionStatus: "canceled",
+    };
+    mockStore["ride_requests/ride_gold_stale"] = {
+      status: "completed",
+      paymentStatus: "paid",
+      payoutTransferred: false,
+      finalFare: 50.0,
+      assignedDriverId: "driver_gold_stale",
+      driverId: "driver_gold_stale",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+
+    await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+
+    expect(createdTransfers[0].payload.amount).toBe(4400);
+    expect(createdTransfers[0].payload.metadata.commissionRate).toBe(String(PLATFORM_COMMISSION_RATE));
+    expect(mockStore["ride_requests/ride_gold_stale"].appliedDriverTier).toBe("standard");
+  });
+
+  it("18. Dry run releases its own lease and does not leave the ride processing", async () => {
+    mockStore["ride_requests/ride_dry_run"] = {
+      status: "completed", paymentStatus: "paid", payoutTransferred: false,
+      finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({
+      db: mockDb, stripeClient: mockStripe, dryRun: true,
+    });
+
+    const ride = mockStore["ride_requests/ride_dry_run"];
+    expect(result.processedCount).toBe(1);
+    expect(createdTransfers).toHaveLength(0);
+    expect(ride.payoutStatus).toBe("pending");
+    expect(ride.payoutClaimToken).toBeUndefined();
+    expect(ride.payoutLockedAt).toBeUndefined();
+  });
+
+  it("19. Stale payout worker cannot overwrite successor claim on Stripe failure", async () => {
+    mockStore["ride_requests/ride_stale_failure"] = {
+      status: "completed", paymentStatus: "paid", payoutTransferred: false,
+      finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+    mockStripe.transfers.create.mockImplementationOnce(async () => {
+      mockStore["ride_requests/ride_stale_failure"].payoutClaimToken = "successor_claim";
+      mockStore["ride_requests/ride_stale_failure"].payoutStatus = "processing";
+      throw new Error("STRIPE_RATE_LIMIT");
+    });
+
+    const result = await executeDriverPayoutOrchestrationCommand({
+      db: mockDb, stripeClient: mockStripe,
+    });
+
+    const ride = mockStore["ride_requests/ride_stale_failure"];
+    expect(result.failedCount).toBe(1);
+    expect(ride.payoutClaimToken).toBe("successor_claim");
+    expect(ride.payoutStatus).toBe("processing");
+    expect(ride.payoutLastError).toBeUndefined();
+    expect(ride.payoutTransferred).toBe(false);
+  });
+
+  it("20. Successful Stripe transfer with lost lease reports transfer ID for reconciliation and preserves successor state", async () => {
+    mockStore["ride_requests/ride_success_lost_claim"] = { status: "completed", paymentStatus: "paid", payoutTransferred: false, finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit", stripePaymentIntentId: "pi_verified_5000" };
+    mockStripe.transfers.create.mockImplementationOnce(async (payload: any) => {
+      mockStore["ride_requests/ride_success_lost_claim"].payoutClaimToken = "successor_claim";
+      mockStore["ride_requests/ride_success_lost_claim"].payoutStatus = "processing";
+      return { id: "tr_ambiguous_456", amount: payload.amount, currency: payload.currency, destination: payload.destination, metadata: payload.metadata };
+    });
+    const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+    const ride = mockStore["ride_requests/ride_success_lost_claim"];
+    expect(result.processedCount).toBe(0);
+    expect(result.failedCount).toBe(1);
+    expect(result.details[0].status).toBe("reconciliation_required");
+    expect(result.details[0].transferId).toBe("tr_ambiguous_456");
+    expect(result.details[0].reason).toContain("Reconcile this transfer");
+    expect(ride.payoutClaimToken).toBe("successor_claim");
+    expect(ride.payoutStatus).toBe("processing");
+    expect(ride.payoutTransferred).toBe(false);
+    expect(ride.stripeTransferId).toBeUndefined();
+    const operation = Object.values(mockStore).find((entry: any) => entry?.rideId === "ride_success_lost_claim" && entry?.operationId);
+    expect(operation).toBeDefined();
+    expect(operation.status).toBe("stripe_succeeded");
+    expect(operation.stripeTransferId).toBe("tr_ambiguous_456");
+    // Simulate the successor lease expiring and the ride returning to the eligible queue.
+    // The next worker must encounter the durable operation barrier before Stripe.
+    ride.payoutStatus = "completed";
+    ride.payoutLockedAt = Date.now() - PAYOUT_LEASE_DURATION_MS - 1000;
+    const retry = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+    expect(retry.details.some((detail) => detail.status === "reconciliation_required")).toBe(true);
+    expect(mockStripe.transfers.create).toHaveBeenCalledTimes(1); // one successful external effect; replay was fenced
+    expect(createdTransfers).toHaveLength(0); // custom mockImplementation bypasses the default receipt recorder
+  });
+
+
+  it("existing payout operation does not let a stale worker overwrite successor ride state", async () => {
+    const rideId = "ride_existing_operation_stale_worker";
+    const operationId = "660f36fcfeb323f6d0d480741cdf45c05d24d9fb8078cee904685507df3a642c";
+    mockStore[`ride_requests/${rideId}`] = {
+      status: "completed", paymentStatus: "paid", payoutTransferred: false,
+      finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+    mockStore[`driver_payout_operations/${operationId}`] = {
+      operationId, rideId, driverId: "driver_legit", amountPence: 4400,
+      currency: "gbp", status: "prepared", idempotencyKey: "existing-operation",
+    };
+    onOperationRead = () => {
+      const ride = mockStore[`ride_requests/${rideId}`];
+      ride.payoutClaimToken = "successor_claim";
+      ride.payoutStatus = "processing";
+      ride.payoutLastError = "successor-owned diagnostic";
+    };
+
+    const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+    const ride = mockStore[`ride_requests/${rideId}`];
+
+    expect(result.failedCount).toBe(1);
+    expect(result.details.some((detail) => detail.status === "reconciliation_required")).toBe(true);
+    expect(ride.payoutClaimToken).toBe("successor_claim");
+    expect(ride.payoutStatus).toBe("processing");
+    expect(ride.payoutLastError).toBe("successor-owned diagnostic");
+    expect(ride.payoutTransferred).toBe(false);
+    expect(mockStripe.transfers.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Stripe transfer receipt that does not match requested amount and fences replay", async () => {
+    mockStore["ride_requests/ride_bad_transfer_receipt"] = {
+      status: "completed", paymentStatus: "paid", payoutTransferred: false,
+      finalFare: 50, assignedDriverId: "driver_legit", driverId: "driver_legit",
+      stripePaymentIntentId: "pi_verified_5000",
+    };
+    mockStripe.transfers.create.mockImplementationOnce(async (payload: any) => ({
+      id: "tr_mismatched_receipt", amount: payload.amount - 1,
+      currency: payload.currency, destination: payload.destination, metadata: payload.metadata,
+    }));
+    const result = await executeDriverPayoutOrchestrationCommand({ db: mockDb, stripeClient: mockStripe });
+    const ride = mockStore["ride_requests/ride_bad_transfer_receipt"];
+    const operationId = Object.keys(mockStore).find((key) => key.startsWith("driver_payout_operations/"));
+    expect(result.processedCount).toBe(0);
+    expect(result.failedCount).toBe(1);
+    expect(ride.payoutTransferred).toBe(false);
+    expect(ride.payoutStatus).toBe("failed");
+    expect(mockStore[operationId!].status).toBe("reconciliation_required");
+    expect(mockStripe.transfers.create).toHaveBeenCalledTimes(1);
+  });
+
 });

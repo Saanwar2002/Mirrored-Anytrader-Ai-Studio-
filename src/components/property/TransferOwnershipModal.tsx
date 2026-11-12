@@ -1,11 +1,10 @@
 import React, { useState } from "react";
-import { db, doc, updateDoc, handleFirestoreError, OperationType } from "@/src/firebase";
+import { initiatePropertyTransfer, revokePropertyTransfer } from "@/src/services/propertyCommandService";
 import { useAuth } from "../AuthProvider";
 import { QRCodeSVG } from "qrcode.react";
-import { X, ArrowRight, ShieldCheck, Copy, Check, Share2, AlertTriangle, Clock, RefreshCw, KeyRound, UserCheck, Trash2, Mail, ExternalLink, Printer } from "lucide-react";
+import { X, ArrowRight, ShieldCheck, Copy, Check, Share2, AlertTriangle, Clock, KeyRound, UserCheck, Trash2, Mail, ExternalLink, Printer } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
-import { generateTransferCode } from "./propertyUtils";
 
 interface TransferOwnershipModalProps {
   property: any;
@@ -18,7 +17,7 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
   const [buyerName, setBuyerName] = useState(property.transferTargetName || "");
   const [buyerEmail, setBuyerEmail] = useState(property.transferTargetEmail || "");
   const [validityDays, setValidityDays] = useState<number>(30);
-  const [generatedCode, setGeneratedCode] = useState<string>(property.transferCode || generateTransferCode());
+  const [generatedCode, setGeneratedCode] = useState<string>(property.transferCode || "");
   const [submitting, setSubmitting] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -39,47 +38,31 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
 
     setSubmitting(true);
     try {
-      const expiresAt = new Date(Date.now() + validityDays * 24 * 60 * 60 * 1000).toISOString();
-      const code = generatedCode || generateTransferCode();
-
-      await updateDoc(doc(db, "properties", property.id), {
-        transferStatus: "pending",
-        transferCode: code,
-        transferExpiresAt: expiresAt,
-        transferTargetName: buyerName.trim() || null,
-        transferTargetEmail: buyerEmail.trim() || null,
-        transferInitiatedAt: new Date().toISOString(),
-        transferInitiatorUid: user.uid,
-        updatedAt: new Date().toISOString()
+      const result = await initiatePropertyTransfer(user, property.id, {
+        buyerName,
+        buyerEmail,
+        validityDays
       });
+      setGeneratedCode(result.code);
 
       toast.success("🔑 Ownership Transfer Code active! Share it with the buyer or solicitor.");
       if (onUpdated) onUpdated();
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `properties/${property.id}`);
-      toast.error("Failed to generate transfer code.");
+      toast.error(err instanceof Error ? err.message : "Failed to generate transfer code.");
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleCancelTransfer = async () => {
-    if (!property?.id) return;
+    if (!user || !property?.id) return;
     setSubmitting(true);
     try {
-      await updateDoc(doc(db, "properties", property.id), {
-        transferStatus: "none",
-        transferCode: null,
-        transferExpiresAt: null,
-        transferTargetName: null,
-        transferTargetEmail: null,
-        updatedAt: new Date().toISOString()
-      });
+      await revokePropertyTransfer(user, property.id);
       toast.success("Transfer code revoked. Property remains securely in your account.");
       if (onUpdated) onUpdated();
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `properties/${property.id}`);
-      toast.error("Failed to cancel transfer.");
+      toast.error(err instanceof Error ? err.message : "Failed to cancel transfer.");
     } finally {
       setSubmitting(false);
     }
@@ -296,24 +279,15 @@ export function TransferOwnershipModal({ property, onClose, onUpdated }: Transfe
 
                     <div>
                       <label className="text-xs font-black text-slate-900 block mb-1">
-                        Generated Transfer Code
+                        Transfer Code
                       </label>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="text"
-                          readOnly
-                          value={generatedCode}
-                          className="w-full p-3 rounded-xl border border-black text-xs font-black bg-slate-100 text-slate-900 tracking-wider font-mono"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setGeneratedCode(generateTransferCode())}
-                          className="p-3 bg-slate-100 hover:bg-slate-200 border border-black rounded-xl text-slate-700 transition"
-                          title="Generate new code"
-                        >
-                          <RefreshCw className="w-4 h-4" />
-                        </button>
-                      </div>
+                      <input
+                        type="text"
+                        readOnly
+                        value={generatedCode}
+                        placeholder="Generated securely after activation"
+                        className="w-full p-3 rounded-xl border border-black text-xs font-black bg-slate-100 text-slate-900 tracking-wider font-mono"
+                      />
                     </div>
                   </div>
                 </div>

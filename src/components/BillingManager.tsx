@@ -96,7 +96,8 @@ export default function BillingManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+          "Idempotency-Key": crypto.randomUUID()
         },
         body: JSON.stringify({
           userId: user.uid,
@@ -408,7 +409,8 @@ export default function BillingManager() {
                           method: "POST",
                           headers: {
                             "Content-Type": "application/json",
-                            ...(token ? { "Authorization": `Bearer ${token}` } : {})
+                            ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+          "Idempotency-Key": crypto.randomUUID()
                           },
                           body: JSON.stringify({
                             userId: user.uid,
@@ -543,7 +545,8 @@ export default function BillingManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+          "Idempotency-Key": crypto.randomUUID()
         },
         body: JSON.stringify({
           userId: user.uid,
@@ -606,7 +609,8 @@ export default function BillingManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+          "Idempotency-Key": crypto.randomUUID()
         },
         body: JSON.stringify({
           userId: user.uid,
@@ -650,7 +654,7 @@ export default function BillingManager() {
   const handleToggleGoldDriver = async () => {
     if (!user || !profile) return;
     const isCurrentlyActive = Boolean(profile?.isGoldDriver || profile?.driverTier === "gold");
-    const isCanceling = Boolean(profile?.driverCancelAtPeriodEnd || profile?.cancelAtPeriodEnd);
+    const isCanceling = Boolean(profile?.driverCancelAtPeriodEnd);
 
     if (isCurrentlyActive && isCanceling) {
       await handleReactivateSubscription('driver_gold');
@@ -669,7 +673,8 @@ export default function BillingManager() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+          "Idempotency-Key": crypto.randomUUID()
         },
         body: JSON.stringify({
           userId: user.uid,
@@ -700,7 +705,7 @@ export default function BillingManager() {
       } else if (data.error) {
         toast.error(data.error);
       } else {
-        toast.success("⚡ Gold Driver Subscription Active! (£49.99/mo)");
+        toast.error("Checkout did not return a payment URL. Gold Driver has not been activated.");
       }
     } catch (e) {
       console.error(e);
@@ -1262,12 +1267,12 @@ export default function BillingManager() {
                       {profile?.driverCancelAtPeriodEnd ? (
                         <p className="text-[11px] text-amber-700 font-bold flex items-center gap-1">
                           <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
-                          Cancels on {formatPeriodDate(profile?.driverCurrentPeriodEnd || profile?.currentPeriodEnd)} (Gold benefits active until then)
+                          Cancels on {formatPeriodDate(profile?.driverCurrentPeriodEnd)} (Gold benefits active until then)
                         </p>
-                      ) : (profile?.driverCurrentPeriodEnd || profile?.currentPeriodEnd) ? (
+                      ) : (profile?.driverCurrentPeriodEnd) ? (
                         <p className="text-[11px] text-slate-500 font-medium flex items-center gap-1">
                           <Calendar className="w-3 h-3 text-slate-400 shrink-0" />
-                          Renews on {formatPeriodDate(profile?.driverCurrentPeriodEnd || profile?.currentPeriodEnd)}
+                          Renews on {formatPeriodDate(profile?.driverCurrentPeriodEnd)}
                         </p>
                       ) : null}
                     </div>

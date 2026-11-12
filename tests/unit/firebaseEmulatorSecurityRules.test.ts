@@ -21,6 +21,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  serverTimestamp,
   collection,
   query,
   where,
@@ -382,6 +383,61 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         });
       });
     };
+
+    it("15A. Authenticated homeowners cannot bypass the server-only property creation command", async () => {
+      const ownerDb = testEnv.authenticatedContext("user_property_creator", { role: "customer" }).firestore();
+      await assertFails(setDoc(doc(ownerDb, "properties", "client_created_property"), {
+        ownerId: "user_property_creator",
+        userId: "user_property_creator",
+        name: "Client-side bypass attempt",
+        address: { line1: "1 Test Street", city: "London", postcode: "N1 1AA" },
+        propertyType: "residential",
+        status: "active",
+      }));
+    });
+
+    it("15B. Property owners cannot bypass quota accounting by deleting directly", async () => {
+      await seedPrivateProperty("prop_delete_via_command", "user_property_creator");
+      const ownerDb = testEnv.authenticatedContext("user_property_creator", { role: "customer" }).firestore();
+      await assertFails(deleteDoc(doc(ownerDb, "properties", "prop_delete_via_command")));
+    });
+
+    it("15C. A transfer recipient cannot change property ownership directly", async () => {
+      await seedPrivateProperty("prop_transfer_via_command", "user_previous_owner");
+      await testEnv.withSecurityRulesDisabled(async (context) => {
+        await updateDoc(doc(context.firestore(), "properties", "prop_transfer_via_command"), {
+          transferStatus: "pending",
+          pendingTransferToUid: "user_transfer_recipient",
+        });
+      });
+      const recipientDb = testEnv.authenticatedContext("user_transfer_recipient").firestore();
+      await assertFails(updateDoc(doc(recipientDb, "properties", "prop_transfer_via_command"), {
+        ownerId: "user_transfer_recipient",
+        userId: "user_transfer_recipient",
+        transferStatus: "completed",
+        transferClaimedByUid: "user_transfer_recipient",
+      }));
+    });
+
+    it("15D. Property owners cannot forge or modify server-managed transfer metadata", async () => {
+      await seedPrivateProperty("prop_transfer_metadata_guard", "user_transfer_owner");
+      const ownerDb = testEnv.authenticatedContext("user_transfer_owner").firestore();
+      const propertyRef = doc(ownerDb, "properties", "prop_transfer_metadata_guard");
+
+      await assertFails(updateDoc(propertyRef, { transferStatus: "pending" }));
+      await assertFails(updateDoc(propertyRef, { transferCode: "TRF-ABC234" }));
+      await assertFails(updateDoc(propertyRef, { pendingTransferToUid: "attacker_uid" }));
+      await assertFails(updateDoc(propertyRef, { transferExpiresAt: new Date(Date.now() + 86400000).toISOString() }));
+      await assertFails(updateDoc(propertyRef, { transferTargetEmail: "attacker@example.com" }));
+      await assertFails(updateDoc(propertyRef, { transferHistory: [{ fromOwnerUid: "user_transfer_owner", toOwnerUid: "attacker_uid" }] }));
+      await assertFails(updateDoc(propertyRef, { homeownerId: "attacker_uid" }));
+      await assertFails(updateDoc(propertyRef, { previousOwnersCount: 999 }));
+      await assertFails(updateDoc(propertyRef, { transferTargetName: "Forged recipient" }));
+      await assertFails(updateDoc(propertyRef, { transferInitiatedAt: new Date().toISOString() }));
+      await assertFails(updateDoc(propertyRef, { transferInitiatorUid: "attacker_uid" }));
+
+      await assertSucceeds(updateDoc(propertyRef, { name: "Owner-editable property name" }));
+    });
 
     it("16. Property private access works only for authorized users", async () => {
       await seedPrivateProperty("prop_auth_1", "user_alice");
@@ -964,8 +1020,9 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         verifiedByAdmin: true,
       }));
 
-      // Buyer can claim transfer updating only allowed ownership fields
-      await assertSucceeds(updateDoc(doc(buyerDb, "properties/prop_transfer_esc"), {
+      // Ownership claims must use the authenticated server command so Gotham
+      // quota counters move atomically with the property ownership.
+      await assertFails(updateDoc(doc(buyerDb, "properties/prop_transfer_esc"), {
         ownerId: "user_claim_buyer",
         userId: "user_claim_buyer",
         transferStatus: "claimed",
@@ -2644,11 +2701,31 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
       );
     });
 
-    it("94. PL-08: Invitations - unverified email cannot read invitation addressed to that email", async () => {
+    it("94. PL-08: Invitations - verified recipients can only accept their own pending invitation", async () => {
       await testEnv.withSecurityRulesDisabled(async (context) => {
         const adminDb = context.firestore();
         await setDoc(doc(adminDb, "invitations", "inv_email_test"), {
           email: "victim@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_email_tamper"), {
+          email: "victim@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_email_lowercase"), {
+          email: "Victim@Example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_inviter_access"), {
+          email: "other-recipient@example.com",
+          invitedBy: "manager_uid",
+          status: "pending",
+        });
+        await setDoc(doc(adminDb, "invitations", "inv_admin_access"), {
+          email: "admin-managed@example.com",
           invitedBy: "manager_uid",
           status: "pending",
         });
@@ -2658,20 +2735,113 @@ describe("Comprehensive Firebase Security Rules Regression Suite (Firestore & St
         .authenticatedContext("attacker_fake_email", {
           email: "victim@example.com",
           email_verified: false,
+          firebase: { sign_in_provider: "password" },
         })
         .firestore();
       await assertFails(getDoc(doc(unverifiedDb, "invitations", "inv_email_test")));
       await assertFails(
-        updateDoc(doc(unverifiedDb, "invitations", "inv_email_test"), { status: "accepted" })
+        getDocs(
+          query(
+            collection(unverifiedDb, "invitations"),
+            where("email", "==", "victim@example.com"),
+            where("status", "==", "pending")
+          )
+        )
+      );
+      await assertFails(
+        updateDoc(doc(unverifiedDb, "invitations", "inv_email_test"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+        })
       );
 
       const verifiedDb = testEnv
         .authenticatedContext("legit_recipient", {
           email: "victim@example.com",
           email_verified: true,
+          firebase: { sign_in_provider: "password" },
         })
         .firestore();
       await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_test")));
+      await assertSucceeds(getDoc(doc(verifiedDb, "invitations", "inv_email_lowercase")));
+      const matchingInvitations = await assertSucceeds(
+        getDocs(
+          query(
+            collection(verifiedDb, "invitations"),
+            where("email", "==", "victim@example.com"),
+            where("status", "==", "pending")
+          )
+        )
+      );
+      expect(matchingInvitations.docs.some((invitation) => invitation.id === "inv_email_test")).toBe(true);
+      await assertFails(getDoc(doc(verifiedDb, "invitations", "missing_invitation")));
+
+      const unrelatedDb = testEnv
+        .authenticatedContext("unrelated_user", {
+          email: "unrelated@example.com",
+          email_verified: true,
+        })
+        .firestore();
+      await assertFails(getDoc(doc(unrelatedDb, "invitations", "inv_email_test")));
+
+      // The inviter retains the existing read and management permissions.
+      const inviterDb = testEnv
+        .authenticatedContext("manager_uid", { firebase: { sign_in_provider: "password" } })
+        .firestore();
+      await assertSucceeds(getDoc(doc(inviterDb, "invitations", "inv_inviter_access")));
+      await assertSucceeds(
+        updateDoc(doc(inviterDb, "invitations", "inv_inviter_access"), {
+          status: "cancelled",
+        })
+      );
+
+      // Admin custom claims retain the existing management permissions.
+      const adminClaimsDb = testEnv
+        .authenticatedContext("platform_admin", {
+          admin: true,
+          firebase: { sign_in_provider: "password" },
+        })
+        .firestore();
+      await assertSucceeds(getDoc(doc(adminClaimsDb, "invitations", "inv_admin_access")));
+      await assertSucceeds(
+        updateDoc(doc(adminClaimsDb, "invitations", "inv_admin_access"), {
+          status: "admin-reviewed",
+        })
+      );
+
+      // The intended onboarding action is permitted: pending -> accepted with a server timestamp.
+      await assertSucceeds(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_test"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+        })
+      );
+
+      // A verified recipient cannot change invitation ownership or other protected fields.
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          email: "attacker@example.com",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          invitedBy: "attacker_fake_email",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+          email: "attacker@example.com",
+        })
+      );
+      await assertFails(
+        updateDoc(doc(verifiedDb, "invitations", "inv_email_tamper"), {
+          status: "accepted",
+          acceptedAt: serverTimestamp(),
+          notes: "unauthorized extra field",
+        })
+      );
     });
 
     it("95. PL-14: Conversations - participant tampering is blocked", async () => {

@@ -5,6 +5,13 @@ export type ReviewType = "tradesperson_review" | "homeowner_review";
 const ids = (...v: unknown[]): string[] =>
   v.filter((x): x is string => typeof x === "string" && x.length > 0);
 
+export function getJobParticipantIds(job: Record<string, any>): { ownerIds: string[]; traderIds: string[] } {
+  return {
+    ownerIds: ids(job.homeownerId, job.userId, job.ownerId, job.customerId, job.posterId),
+    traderIds: ids(job.acceptedTradespersonId, job.acceptedTraderId, job.assignedTraderId, job.tradespersonId, job.traderId),
+  };
+}
+
 /**
  * Server-authoritative review authorization guard.
  * Strictly verifies that:

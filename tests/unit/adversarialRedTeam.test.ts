@@ -534,6 +534,7 @@ describe("Adversarial Red-Team & Exploit Verification Suite", () => {
         mockDb,
         idempotencyKey,
         "RELEASE_FUNDS",
+        { version: 1, jobId: "job-1", milestoneId: "milestone-1", amountPence: 50000 },
         async () => {
           sideEffectCounter += 1;
           return { amountReleased: 500 };
@@ -549,6 +550,7 @@ describe("Adversarial Red-Team & Exploit Verification Suite", () => {
         mockDb,
         idempotencyKey,
         "RELEASE_FUNDS",
+        { version: 1, jobId: "job-1", milestoneId: "milestone-1", amountPence: 50000 },
         async () => {
           sideEffectCounter += 1;
           return { amountReleased: 500 };

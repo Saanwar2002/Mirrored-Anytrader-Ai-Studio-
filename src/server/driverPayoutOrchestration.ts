@@ -20,6 +20,7 @@
  */
 
 import Stripe from "stripe";
+import { createHash } from "node:crypto";
 import admin from "firebase-admin";
 
 export interface DriverPayoutOrchestrationOptions {
@@ -38,7 +39,7 @@ export interface PayoutDetail {
   driverId: string;
   stripeAccountId: string;
   amount: number;
-  status: "transferred" | "failed" | "skipped" | "unverified";
+  status: "transferred" | "failed" | "skipped" | "unverified" | "reconciliation_required";
   transferId?: string;
   reason?: string;
 }
@@ -54,7 +55,8 @@ export interface DriverPayoutOrchestrationResult {
 }
 
 export const PLATFORM_COMMISSION_RATE = 0.12;
-export const DRIVER_BASE_SHARE_RATE = 0.88;
+export const GOLD_DRIVER_COMMISSION_RATE = 0.10;
+export const DRIVER_BASE_SHARE_RATE = 1 - PLATFORM_COMMISSION_RATE;
 export const MAX_ALLOWED_RIDE_PAYOUT_GBP = 1000.00;
 export const PAYOUT_LEASE_DURATION_MS = 300000; // 5 minutes
 
@@ -287,13 +289,24 @@ export async function executeDriverPayoutOrchestrationCommand(
         continue;
       }
 
+      // Gold pricing is activated only by server-written Stripe entitlement fields.
+      // Firestore rules prohibit clients from modifying isGoldDriver/subscription IDs/status.
+      const isActiveGoldDriver = driverData?.isGoldDriver === true &&
+        typeof driverData?.driverSubscriptionId === "string" &&
+        driverData.driverSubscriptionId.trim().length > 0 &&
+        driverData.driverSubscriptionStatus === "active";
+      const effectiveCommissionRate = isActiveGoldDriver
+        ? GOLD_DRIVER_COMMISSION_RATE
+        : PLATFORM_COMMISSION_RATE;
+      const effectiveDriverShareRate = 1 - effectiveCommissionRate;
+
       // Minor units (pence) integer calculations to eliminate rounding drift
       const expectedBaseFarePence = Math.round(rawFinalFare * 100);
       const expectedTipPence = Math.round(rawTip * 100);
       const expectedTotalCollectedPence = expectedBaseFarePence + expectedTipPence;
 
-      // 88% driver share of base fare in integer pence + 100% of tip in integer pence
-      const driverBaseEarningsPence = Math.round(expectedBaseFarePence * DRIVER_BASE_SHARE_RATE);
+      // Driver receives tier-specific share of base fare plus 100% of tip.
+      const driverBaseEarningsPence = Math.round(expectedBaseFarePence * effectiveDriverShareRate);
       const transferAmountPence = driverBaseEarningsPence + expectedTipPence;
       const platformCommissionPence = expectedBaseFarePence - driverBaseEarningsPence;
 
@@ -368,6 +381,9 @@ export async function executeDriverPayoutOrchestrationCommand(
           const ledgerSnap = await db
             .collection("payment_ledger")
             .where("transactionId", "==", paymentIntentId || `ride_${rideId}`)
+            // Only an explicitly typed ride receipt can prove a ride collection.
+            // Refunds, escrow events, and legacy untyped rows must fail closed.
+            .where("type", "==", "RIDE_PAYMENT")
             .limit(1)
             .get();
 
@@ -375,10 +391,12 @@ export async function executeDriverPayoutOrchestrationCommand(
             const entry = ledgerSnap.docs[0].data();
             const entryStatus = entry?.status;
             const isCaptured = entryStatus === "completed" || entry?.captured === true;
-            const entryCurrency = (entry?.currency || "gbp").toLowerCase();
+            const entryCurrency = typeof entry?.currency === "string" ? entry.currency.toLowerCase() : "";
             const entryAmountPence = typeof entry?.amount === "number" ? entry.amount : null;
 
-            if (!isCaptured) {
+            if (entry?.type !== "RIDE_PAYMENT") {
+              reconciliationFailureReason = "Ledger entry is not an eligible RIDE_PAYMENT receipt";
+            } else if (!isCaptured) {
               reconciliationFailureReason = `Ledger entry status '${entryStatus}' is not completed/captured`;
             } else if (entryCurrency !== "gbp") {
               reconciliationFailureReason = `Ledger entry currency '${entryCurrency}' is not 'gbp'`;
@@ -471,6 +489,19 @@ export async function executeDriverPayoutOrchestrationCommand(
 
       // 8. Dry Run Evaluation
       if (dryRun) {
+        // Release only our own lease; never clear a competing worker's claim.
+        await db.runTransaction(async (t: any) => {
+          const freshSnap = await t.get(rideDoc.ref);
+          const freshData = freshSnap.data() || {};
+          if (freshData.payoutClaimToken !== claimToken) {
+            throw new Error("LEASE_TOKEN_LOST_DURING_DRY_RUN");
+          }
+          t.update(rideDoc.ref, {
+            payoutStatus: "pending",
+            payoutLockedAt: admin.firestore.FieldValue.delete(),
+            payoutClaimToken: admin.firestore.FieldValue.delete(),
+          });
+        });
         logger.log(`[Payout Orchestrator] [Dry Run] Would disburse £${driverEarningsGbp.toFixed(2)} to driver ${assignedDriverId} for ride ${rideId}.`);
         processedCount++;
         totalDisbursed += driverEarningsGbp;
@@ -484,6 +515,48 @@ export async function executeDriverPayoutOrchestrationCommand(
         });
         continue;
       }
+
+      // 9. Durable payout operation evidence. A prepared record is a replay barrier:
+      // after a crash/ambiguous Stripe response, never issue a fresh transfer blindly.
+      const operationId = createHash("sha256")
+        .update(`driver-payout:${rideId}:${assignedDriverId}:${transferAmountPence}`).digest("hex");
+      const operationRef = db.collection("driver_payout_operations").doc(operationId);
+      const priorOperation = await operationRef.get();
+      if (priorOperation.exists) {
+        const prior = priorOperation.data() || {};
+        logger.error(`[Payout Orchestrator] Durable operation ${operationId} already exists (${prior.status}); manual reconciliation required before replay.`);
+        // The replay barrier is durable, but ride state remains owned by the
+        // current lease holder. A worker whose lease was superseded must not
+        // overwrite the successor's state while surfacing this barrier.
+        let reconciliationStateWritten = false;
+        await db.runTransaction(async (t: any) => {
+          const freshSnap = await t.get(rideDoc.ref);
+          const freshData = freshSnap.data() || {};
+          if (freshData.payoutClaimToken !== claimToken) {
+            return;
+          }
+          t.update(rideDoc.ref, {
+            payoutStatus: "reconciliation_required",
+            payoutLastError: "Durable payout operation exists; reconcile Stripe evidence before retry",
+          });
+          reconciliationStateWritten = true;
+        });
+        if (!reconciliationStateWritten) {
+          logger.warn(`[Payout Orchestrator] Claim lost for ride ${rideId}; preserving successor state while reporting existing durable operation.`);
+        }
+        failedCount++;
+        details.push({ rideId, driverId: assignedDriverId, stripeAccountId, amount: driverEarningsGbp,
+          status: "reconciliation_required", ...(prior.stripeTransferId ? { transferId: prior.stripeTransferId } : {}),
+          reason: "Existing durable payout operation blocks automatic replay" });
+        continue;
+      }
+      await operationRef.set({
+        operationId, rideId, driverId: assignedDriverId, stripeAccountId,
+        amountPence: transferAmountPence, currency: "gbp",
+        idempotencyKey: `payout:ride:${rideId}:${assignedDriverId}:${transferAmountPence}`,
+        status: "prepared", preparedAt: admin.firestore.FieldValue.serverTimestamp(),
+        claimToken,
+      });
 
       // 9. Deterministic Stripe Transfer Execution with Idempotency Key
       const idempotencyKey = `payout:ride:${rideId}:${assignedDriverId}:${transferAmountPence}`;
@@ -519,6 +592,8 @@ export async function executeDriverPayoutOrchestrationCommand(
                 rideId,
                 driverId: assignedDriverId,
                 platformCommission: platformCommissionGbp.toString(),
+                commissionRate: effectiveCommissionRate.toString(),
+                driverTier: isActiveGoldDriver ? "gold" : "standard",
                 type: "orchestrated_driver_payout",
               },
             },
@@ -526,7 +601,29 @@ export async function executeDriverPayoutOrchestrationCommand(
               idempotencyKey,
             }
           );
+          // Validate the returned receipt against the immutable request before treating it as
+          // confirmed payout evidence. A malformed/mismatched response is ambiguous: keep the
+          // prepared operation as a replay barrier and require reconciliation.
+          if (
+            !transfer || typeof transfer.id !== "string" || !transfer.id.startsWith("tr_") ||
+            transfer.amount !== transferAmountPence || transfer.currency !== "gbp" ||
+            transfer.destination !== stripeAccountId || !transfer.metadata ||
+            transfer.metadata.rideId !== rideId ||
+            transfer.metadata.driverId !== assignedDriverId ||
+            transfer.metadata.type !== "orchestrated_driver_payout"
+          ) {
+            throw new Error("STRIPE_TRANSFER_RECEIPT_MISMATCH");
+          }
           stripeTransferId = transfer.id;
+          // Persist the external-effect receipt before attempting ride finalization.
+          await operationRef.set({
+            status: "stripe_succeeded", stripeTransferId: transfer.id,
+            stripeAmountPence: transfer.amount, stripeCurrency: "gbp",
+            stripeDestination: transfer.destination,
+            stripeConfirmedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        } else {
+          await operationRef.set({ status: "mock_succeeded", stripeTransferId, stripeConfirmedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         }
 
         // 10. Post-Commit State Transition with Token Ownership Verification (Finding 35G-2)
@@ -554,6 +651,8 @@ export async function executeDriverPayoutOrchestrationCommand(
             calculatedDriverEarnings: driverEarningsGbp,
             platformFee: platformCommissionGbp,
             calculatedPlatformFee: platformCommissionGbp,
+            appliedCommissionRate: effectiveCommissionRate,
+            appliedDriverTier: isActiveGoldDriver ? "gold" : "standard",
             payoutError: admin.firestore.FieldValue.delete(),
             payoutLastError: admin.firestore.FieldValue.delete(),
           });
@@ -571,14 +670,51 @@ export async function executeDriverPayoutOrchestrationCommand(
           transferId: stripeTransferId,
         });
       } catch (transferErr: any) {
-        logger.error(`[Payout Orchestrator] Stripe Transfer failed for ride ${rideId}:`, transferErr.message);
-        await rideDoc.ref.update({
-          payoutTransferred: false, // Explicitly false!
-          payoutStatus: "failed",
-          payoutLastError: transferErr.message,
-          payoutFailedAt: admin.firestore.FieldValue.serverTimestamp(),
-          payoutRetryCount: admin.firestore.FieldValue.increment(1),
+        logger.error(`[Payout Orchestrator] Stripe Transfer/finalization failed for ride ${rideId}:`, transferErr.message);
+        // Preserve uncertainty across worker/lease recovery. Even an error may follow
+        // a successful Stripe effect; the operation record is an immutable replay barrier.
+        try {
+          await operationRef.set({
+            status: stripeTransferId && !stripeTransferId.startsWith("mock_transfer_") ? "stripe_succeeded" : "reconciliation_required",
+            reconciliationRequired: true, lastError: String(transferErr.message || transferErr),
+            reconciliationRequiredAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        } catch (e: any) {
+          logger.error("[Payout Orchestrator] Could not persist payout reconciliation marker:", e.message);
+        }
+        // Failure state is also lease-owned. A stale worker must not overwrite a
+        // successor's state; a lost lease after Stripe success remains reconciliation-required.
+        let failureStateWritten = false;
+        await db.runTransaction(async (t: any) => {
+          const freshSnap = await t.get(rideDoc.ref);
+          const freshData = freshSnap.data() || {};
+          if (freshData.payoutClaimToken !== claimToken) {
+            logger.warn(`[Payout Orchestrator] Claim lost for ride ${rideId}; refusing stale failure-state write.`);
+            return;
+          }
+          t.update(rideDoc.ref, {
+            payoutTransferred: false,
+            payoutStatus: transferErr.message === "LEASE_TOKEN_LOST" ? "reconciliation_required" : "failed",
+            payoutLastError: transferErr.message,
+            payoutFailedAt: admin.firestore.FieldValue.serverTimestamp(),
+            payoutRetryCount: admin.firestore.FieldValue.increment(1),
+          });
+          failureStateWritten = true;
         });
+        if (!failureStateWritten) {
+          const transferWasCreated = transferErr.message === "LEASE_TOKEN_LOST";
+          details.push({
+            rideId, driverId: assignedDriverId, stripeAccountId,
+            amount: driverEarningsGbp,
+            status: transferWasCreated ? "reconciliation_required" : "unverified",
+            ...(transferWasCreated ? { transferId: stripeTransferId } : {}),
+            reason: transferWasCreated
+              ? "Stripe transfer " + stripeTransferId + " succeeded but this worker lost its lease; successor state was preserved. Reconcile this transfer before retrying."
+              : "Claim lost; payout state left untouched pending reconciliation",
+          });
+          failedCount++;
+          continue;
+        }
         failedCount++;
         details.push({
           rideId,

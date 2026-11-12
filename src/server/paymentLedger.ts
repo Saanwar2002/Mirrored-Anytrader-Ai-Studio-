@@ -15,6 +15,9 @@ export interface LedgerEntry {
   entryId: string;
   transactionId: string;
   idempotencyKey: string;
+  jobId?: string;
+  quoteId?: string;
+  milestoneId?: string;
   payerId: string;
   payeeId: string;
   amount: number; // in minor units (pence / cents)
@@ -36,11 +39,39 @@ export class PaymentLedgerEngine {
     db: any,
     idempotencyKey: string,
     operationName: string,
+    semanticBinding: Record<string, unknown>,
     executor: () => Promise<T>
   ): Promise<{ result: T; wasReplayed: boolean }> {
-    if (!idempotencyKey || typeof idempotencyKey !== "string") {
+    if (!idempotencyKey || typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) {
       throw new BadRequestError("A valid, non-empty idempotencyKey is required for financial operations.");
     }
+    // Idempotency keys may originate in request headers or bodies. Keep them
+    // as single Firestore document IDs; never let a slash create a nested path.
+    if (idempotencyKey.includes("/") || idempotencyKey.length > 200) {
+      throw new BadRequestError("Idempotency key must be at most 200 characters and cannot contain '/'.");
+    }
+    if (!semanticBinding || typeof semanticBinding !== "object" || Array.isArray(semanticBinding)) {
+      throw new BadRequestError("A semantic binding is required for financial idempotency.");
+    }
+    const canonicalize = (value: any): any => {
+      if (Array.isArray(value)) return value.map(canonicalize);
+      if (value && typeof value === "object") {
+        return Object.keys(value).sort().reduce((result: any, key) => {
+          result[key] = canonicalize(value[key]);
+          return result;
+        }, {});
+      }
+      if (typeof value === "number" && !Number.isFinite(value)) {
+        throw new BadRequestError("Semantic binding contains a non-finite number.");
+      }
+      if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+        throw new BadRequestError("Semantic binding contains an unsupported value.");
+      }
+      return value;
+    };
+    const bindingJson = JSON.stringify(canonicalize(semanticBinding));
+    if (!bindingJson) throw new BadRequestError("Semantic binding could not be serialized.");
+    const bindingHash = crypto.createHash("sha256").update(bindingJson).digest("hex");
 
     if (!db) {
       // In development fallback without db, run executor directly
@@ -50,69 +81,84 @@ export class PaymentLedgerEngine {
 
     const idempotencyRef = db.collection("payment_idempotency").doc(idempotencyKey);
     
-    // 1. Attempt transaction to claim the lock
+    // A unique generation fences stale executors after lease takeover.
+    const claimToken = crypto.randomUUID();
     const claimResult = await db.runTransaction(async (transaction: any) => {
       const doc = await transaction.get(idempotencyRef);
       if (doc.exists) {
         const data = doc.data();
+        if (data.operationName !== operationName) {
+          throw new ConflictError("Idempotency key is already bound to a different financial operation.");
+        }
+        if (typeof data.bindingHash !== "string" || data.bindingHash !== bindingHash) {
+          throw new ConflictError("Idempotency key is already bound to different transaction details or requires reconciliation.");
+        }
         if (data.status === "completed") {
-          console.log(`[Idempotency Hit] Operation '${operationName}' already executed for key: ${idempotencyKey}`);
           return { shouldExecute: false, result: data.response as T, wasReplayed: true };
         }
+        // Reconciliation-required is a durable stop state. Never let a later
+        // retry silently replace it with a fresh claim and repeat a possible
+        // external financial effect.
+        if (data.status === "reconciliation_required") {
+          throw new ConflictError("Financial operation requires reconciliation; automatic replay remains blocked.");
+        }
+        if (data.status !== "in_progress") {
+          throw new ConflictError("Existing financial operation has an unknown state and requires reconciliation.");
+        }
         if (data.status === "in_progress") {
-          // Check if it's a stale processing claim (e.g., > 5 minutes old) to allow recovery after worker crash
           const startedAt = data.startedAt ? new Date(data.startedAt).getTime() : Date.now();
           const ageMs = Date.now() - startedAt;
           if (ageMs < 5 * 60 * 1000) {
             throw new ConflictError("A concurrent request with the same idempotency key is already processing.");
           }
-          console.warn(`[Idempotency Recovery] Overriding stale processing lock for key: ${idempotencyKey} (age: ${Math.round(ageMs/1000)}s)`);
+          // Timeout is not proof an external financial effect did not happen.
+          // Persist reconciliation state and never replace the claim automatically.
+          transaction.update(idempotencyRef, {
+            status: "reconciliation_required",
+            reconciliationRequiredAt: new Date().toISOString(),
+            reconciliationReason: "Expired in-progress claim may have completed an external effect",
+          });
+          return { shouldExecute: false, reconciliationRequired: true };
         }
       }
-
-      // Mark in progress
       transaction.set(idempotencyRef, {
-        operationName,
-        status: "in_progress",
-        startedAt: new Date().toISOString(),
+        operationName, bindingHash, status: "in_progress", startedAt: new Date().toISOString(), claimToken,
       });
       return { shouldExecute: true };
     });
 
+    if (claimResult.reconciliationRequired) {
+      throw new ConflictError("Expired financial operation requires reconciliation; automatic replay is blocked.");
+    }
     if (!claimResult.shouldExecute) {
       return { result: claimResult.result as T, wasReplayed: true };
     }
 
-    // 2. Execute side effect outside transaction
     try {
       const result = await executor();
-      
-      // 3. Record completed result
       const sanitizedResponse = result !== undefined ? JSON.parse(JSON.stringify(result)) : null;
-      if (typeof idempotencyRef.update === "function") {
-        await idempotencyRef.update({
-          status: "completed",
-          completedAt: new Date().toISOString(),
-          response: sanitizedResponse,
+      // Completion is fenced: an expired executor cannot complete a successor's claim.
+      await db.runTransaction(async (transaction: any) => {
+        const fresh = await transaction.get(idempotencyRef);
+        if (!fresh.exists || fresh.data()?.claimToken !== claimToken || fresh.data()?.operationName !== operationName) {
+          throw new ConflictError("Idempotency claim was superseded; executor result requires reconciliation.");
+        }
+        transaction.update(idempotencyRef, {
+          status: "completed", completedAt: new Date().toISOString(), response: sanitizedResponse,
         });
-      } else if (typeof idempotencyRef.set === "function") {
-        await idempotencyRef.set({
-          operationName,
-          status: "completed",
-          completedAt: new Date().toISOString(),
-          response: sanitizedResponse,
-        }, { merge: true });
-      }
-
+      });
       return { result, wasReplayed: false };
     } catch (err) {
-      // Release lock on failure
-      if (typeof idempotencyRef.delete === "function") {
-        await idempotencyRef.delete().catch((e: any) => console.error("Failed to release idempotency lock:", e));
-      } else if (typeof idempotencyRef.update === "function") {
-        await idempotencyRef.update({ status: "failed" }).catch(() => {});
-      } else if (typeof idempotencyRef.set === "function") {
-        await idempotencyRef.set({ status: "failed" }, { merge: true }).catch(() => {});
+      // Only the current generation may release/fail its own lock.
+      try {
+        await db.runTransaction(async (transaction: any) => {
+          const fresh = await transaction.get(idempotencyRef);
+          if (fresh.exists && fresh.data()?.claimToken === claimToken) {
+            transaction.delete(idempotencyRef);
+          }
+        });
+      } catch (cleanupErr: any) {
+        console.error("Failed to conditionally release idempotency claim:", cleanupErr);
       }
       throw err;
     }
@@ -142,7 +188,10 @@ export class PaymentLedgerEngine {
       throw new BadRequestError("Verified amount must be a strictly positive finite number in minor units (pence).");
     }
 
-    const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "FUND_MILESTONE_ESCROW", async () => {
+    const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "FUND_MILESTONE_ESCROW", {
+      version: 1, jobId, milestoneId, customerId, traderId,
+      verifiedAmount, currency: currency.toLowerCase(), paymentIntentId,
+    }, async () => {
       const platformFee = Math.round(verifiedAmount * 0.12); // Standard 12% platform fee
       const netPayout = verifiedAmount - platformFee;
 
@@ -199,6 +248,52 @@ export class PaymentLedgerEngine {
    * Single canonical authority for milestone fund release.
    * Transactionally protects Job, Quote, and Milestone state.
    */
+  /**
+   * Durable per-job/per-user QR PIN throttle. Failed attempts commit in their
+   * own transaction before rejection, so the counter survives thrown errors.
+   */
+  public static async validateAndRecordQrHandshakeAttempt(
+    db: any,
+    params: { jobId: string; authUid: string; handshakeCode?: string }
+  ): Promise<void> {
+    const { jobId, authUid, handshakeCode } = params;
+    if (!db || !jobId || !authUid) throw new BadRequestError("Job and authenticated user are required");
+    const jobRef = db.collection("jobs").doc(jobId);
+    const attemptRef = jobRef.collection("handshake_attempts").doc(authUid);
+    const now = Date.now();
+    const outcome = await db.runTransaction(async (tx: any) => {
+      const [jobSnap, attemptSnap] = await Promise.all([tx.get(jobRef), tx.get(attemptRef)]);
+      if (!jobSnap.exists) return "invalid";
+      const job = jobSnap.data() || {};
+      const attempt = attemptSnap.exists ? attemptSnap.data() || {} : {};
+      if (Number(attempt.lockedUntilMs || 0) > now) return "locked";
+      const acceptedTrader = [job.acceptedTradespersonId, job.acceptedTraderId, job.tradespersonId]
+        .some((id) => typeof id === "string" && id === authUid);
+      const expected = String(job.handshakeCode || job.verificationPin || "").trim();
+      const supplied = String(handshakeCode || "").trim();
+      if (acceptedTrader && expected !== "" && supplied !== "" && expected === supplied) {
+        tx.set(attemptRef, { attempts: 0, windowStartedAtMs: now, lockedUntilMs: 0, lastSuccessAtMs: now });
+        return "valid";
+      }
+      const windowStarted = Number(attempt.windowStartedAtMs || 0);
+      const activeWindow = windowStarted > 0 && now - windowStarted < 15 * 60 * 1000;
+      const attempts = (activeWindow ? Number(attempt.attempts || 0) : 0) + 1;
+      const locked = attempts >= 5;
+      tx.set(attemptRef, {
+        attempts,
+        windowStartedAtMs: activeWindow ? windowStarted : now,
+        lockedUntilMs: locked ? now + 15 * 60 * 1000 : 0,
+        lastFailedAtMs: now,
+      });
+      return locked ? "locked" : "invalid";
+    });
+    if (outcome !== "valid") {
+      throw new ForbiddenError(outcome === "locked"
+        ? "QR verification is temporarily locked. Please wait 15 minutes or contact support."
+        : "Invalid QR handshake code.");
+    }
+  }
+
   public static async releaseEscrowFunds(
     db: any,
     params: {
@@ -221,8 +316,40 @@ export class PaymentLedgerEngine {
     if (!jobId || typeof jobId !== "string" || !quoteId || typeof quoteId !== "string") {
       throw new BadRequestError("jobId and quoteId must be valid strings");
     }
+    if (!db) {
+      throw new InternalServerError("Database is required for financial escrow release.");
+    }
 
-    const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "RELEASE_MILESTONE", async () => {
+    // Revalidate current authorization before idempotency replay can return a cached
+    // result. The transaction below repeats these checks against its own snapshot
+    // before any new release transition is committed.
+    const authorizationJobSnap = await db.collection("jobs").doc(jobId).get();
+    if (!authorizationJobSnap.exists) throw new BadRequestError("Job not found");
+    const authorizationJob = authorizationJobSnap.data();
+    const currentlyOwner = Boolean(
+      (authorizationJob?.homeownerId && authorizationJob.homeownerId === authUid) ||
+      (authorizationJob?.userId && authorizationJob.userId === authUid) ||
+      (authorizationJob?.customerId && authorizationJob.customerId === authUid)
+    );
+    const currentlyAcceptedTrader = Boolean(
+      (authorizationJob?.acceptedTradespersonId && authorizationJob.acceptedTradespersonId === authUid) ||
+      (authorizationJob?.acceptedTraderId && authorizationJob.acceptedTraderId === authUid) ||
+      (authorizationJob?.tradespersonId && authorizationJob.tradespersonId === authUid)
+    );
+    const expectedHandshakeCode = (authorizationJob?.handshakeCode || authorizationJob?.verificationPin || "").toString().trim();
+    const suppliedHandshakeCode = (handshakeCode || "").toString().trim();
+    const currentlyValidHandshake = Boolean(
+      currentlyAcceptedTrader && isQrHandshake && expectedHandshakeCode !== "" &&
+      suppliedHandshakeCode !== "" && expectedHandshakeCode === suppliedHandshakeCode
+    );
+    if (!currentlyOwner && !isAdmin && !currentlyValidHandshake) {
+      throw new ForbiddenError("Unauthorized: current caller is not permitted to release milestone funds");
+    }
+
+    const { result } = await this.executeIdempotentOperation(db, idempotencyKey, "RELEASE_MILESTONE", {
+      version: 1, jobId, quoteId, milestoneId: milestoneId || null, authUid,
+      authorizationMode: isAdmin ? "admin" : isQrHandshake ? "qr_handshake" : "owner",
+    }, async () => {
       if (!db) {
         throw new InternalServerError("Database is required for financial escrow release.");
       }
@@ -381,15 +508,12 @@ export class PaymentLedgerEngine {
         };
 
         if (isQrHandshake) {
-          const guaranteeExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); 
+          // QR handshake is an authorization method for this milestone only. It is not
+          // proof that every milestone (or the whole job) has been paid. Keep the
+          // guarantee metadata on the quote, but leave job/quote aggregate payment
+          // projections to the canonical settlement reconciler.
+          const guaranteeExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
           quoteUpdatePayload.guaranteeExpiresAt = guaranteeExpiry.toISOString();
-          quoteUpdatePayload.paymentStatus = "handshake_complete";
-          
-          transaction.update(jobRef, {
-            paymentStatus: "handshake_complete",
-            isPaid: true,
-            updatedAt: new Date().toISOString()
-          });
         }
 
         transaction.update(quoteRef, quoteUpdatePayload);
@@ -398,6 +522,9 @@ export class PaymentLedgerEngine {
           entryId: ledgerEntryId,
           transactionId: targetMilestone.stripePaymentIntentId || targetMilestone.escrowEntryId || `rel_${jobId}_${quoteId}`,
           idempotencyKey,
+          jobId,
+          quoteId,
+          milestoneId: targetMilestone.id,
           payerId: jobData?.homeownerId || authUid,
           payeeId: quoteData?.tradespersonId || "trader",
           amount: Math.round(releasedAmount * 100),
@@ -488,12 +615,13 @@ export class PaymentLedgerEngine {
       jobNo?: string;
       stripePaymentIntentId?: string;
       isDestinationCharge?: boolean;
+      ledgerEntryId?: string;
     },
     options?: {
       stripe?: any;
     }
   ): Promise<{
-    transferStatus: "completed" | "failed" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
+    transferStatus: "completed" | "failed" | "reconciliation_required" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
     stripeTransferId?: string;
     stripeIdempotencyKey: string;
     error?: string;
@@ -508,6 +636,7 @@ export class PaymentLedgerEngine {
       targetMilestoneTitle = "Work Stage",
       jobNo,
       isDestinationCharge,
+      ledgerEntryId,
     } = params;
 
     const stripeIdempotencyKey = `release:${jobId}:${quoteId}:${milestoneId || "0"}:${idempotencyKey}`;
@@ -583,6 +712,10 @@ export class PaymentLedgerEngine {
             quoteId,
             milestoneId: milestoneId || "m0",
             traderId,
+            // Durable lookup identity for read-only Stripe reconciliation after an ambiguous response.
+            releaseOperationId: idempotencyKey,
+            stripeIdempotencyKey,
+            operationType: "ANYTRADER_ESCROW_RELEASE",
           },
         },
         {
@@ -591,16 +724,46 @@ export class PaymentLedgerEngine {
       );
 
       const stripeTransferId = transfer?.id;
+      if (typeof stripeTransferId !== "string" || stripeTransferId.trim().length === 0) {
+        // Stripe may have created the transfer even if its response is malformed or
+        // incomplete. Never report completion without a durable external transfer ID.
+        throw new Error("Stripe returned a transfer response without a valid transfer ID; reconciliation is required.");
+      }
+      // A syntactically valid ID is not sufficient: verify the returned Stripe object
+      // is the exact transfer requested before marking the ledger as paid out.
+      const returnedMetadata = transfer?.metadata || {};
+      const responseMatchesRequest =
+        transfer?.amount === netPayoutPence &&
+        String(transfer?.currency || "").toLowerCase() === "gbp" &&
+        transfer?.destination === traderStripeAccountId &&
+        returnedMetadata.jobId === jobId &&
+        returnedMetadata.quoteId === quoteId &&
+        returnedMetadata.milestoneId === (milestoneId || "m0") &&
+        returnedMetadata.traderId === traderId &&
+        returnedMetadata.releaseOperationId === idempotencyKey &&
+        returnedMetadata.stripeIdempotencyKey === stripeIdempotencyKey &&
+        returnedMetadata.operationType === "ANYTRADER_ESCROW_RELEASE";
+      if (!responseMatchesRequest) {
+        throw new Error("Stripe transfer response does not match the requested amount, currency, destination, or operation metadata; reconciliation is required.");
+      }
 
       if (db) {
-        const ledgerSnap = await db
-          .collection("payment_ledger")
-          .where("idempotencyKey", "==", idempotencyKey)
-          .get();
-        if (!ledgerSnap.empty) {
-          await ledgerSnap.docs[0].ref.update({
+        if (ledgerEntryId) {
+          await db.collection("payment_ledger").doc(ledgerEntryId).update({
             stripeTransferId,
             transferStatus: "completed",
+            transferCompletedAt: new Date().toISOString(),
+          });
+        } else {
+          const ledgerSnap = await db.collection("payment_ledger")
+            .where("idempotencyKey", "==", idempotencyKey).get();
+          const matchingEntry = ledgerSnap.docs.find((doc: any) => {
+            const entry = doc.data();
+            return entry?.type === "ESCROW_RELEASE" && entry.jobId === jobId &&
+              entry.quoteId === quoteId && entry.milestoneId === (milestoneId || "m0");
+          });
+          if (matchingEntry) await matchingEntry.ref.update({
+            stripeTransferId, transferStatus: "completed",
             transferCompletedAt: new Date().toISOString(),
           });
         }
@@ -620,13 +783,22 @@ export class PaymentLedgerEngine {
 
       if (db) {
         try {
-          const ledgerSnap = await db
-            .collection("payment_ledger")
-            .where("idempotencyKey", "==", idempotencyKey)
-            .get();
-          if (!ledgerSnap.empty) {
-            await ledgerSnap.docs[0].ref.update({
-              transferStatus: "failed",
+          if (ledgerEntryId) {
+            await db.collection("payment_ledger").doc(ledgerEntryId).update({
+              transferStatus: "reconciliation_required",
+              transferError: errorMessage,
+              lastTransferAttemptAt: new Date().toISOString(),
+            });
+          } else {
+            const ledgerSnap = await db.collection("payment_ledger")
+              .where("idempotencyKey", "==", idempotencyKey).get();
+            const matchingEntry = ledgerSnap.docs.find((doc: any) => {
+              const entry = doc.data();
+              return entry?.type === "ESCROW_RELEASE" && entry.jobId === jobId &&
+                entry.quoteId === quoteId && entry.milestoneId === (milestoneId || "m0");
+            });
+            if (matchingEntry) await matchingEntry.ref.update({
+              transferStatus: "reconciliation_required",
               transferError: errorMessage,
               lastTransferAttemptAt: new Date().toISOString(),
             });
@@ -637,7 +809,7 @@ export class PaymentLedgerEngine {
       }
 
       return {
-        transferStatus: "failed",
+        transferStatus: "reconciliation_required",
         error: errorMessage,
         stripeIdempotencyKey,
       };
@@ -649,7 +821,7 @@ export class PaymentLedgerEngine {
    * Tailors title and messaging strictly to the external Stripe transfer status.
    */
   public static formatReleaseNotification(params: {
-    transferStatus: "completed" | "failed" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
+    transferStatus: "completed" | "failed" | "reconciliation_required" | "skipped_destination_charge" | "skipped_mock_account" | "skipped_no_trader" | "skipped_no_stripe";
     isQrHandshake?: boolean;
     jobNo?: string;
     targetMilestoneTitle?: string;
@@ -667,6 +839,13 @@ export class PaymentLedgerEngine {
         message: isQrHandshake
           ? `QR Handshake complete for "${jobNo}". Funds released to your account.`
           : `The homeowner has released funds for milestone: "${targetMilestoneTitle}". Funds transferred to your Stripe account.`,
+      };
+    }
+
+    if (transferStatus === "reconciliation_required") {
+      return {
+        title: "Payout Outcome Requires Reconciliation ⚠️",
+        message: `Stripe did not confirm the outcome for milestone "${targetMilestoneTitle}". The release is locked to its original operation key pending reconciliation; do not start a new release.`,
       };
     }
 

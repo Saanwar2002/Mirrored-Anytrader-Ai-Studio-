@@ -267,9 +267,15 @@ export default function TradesDashboard({ isSubView }: { isSubView?: boolean }) 
     setExclusiveCheckoutError(null);
     try {
       const activePrice = getExclusivePrice();
+      const token = await user.getIdToken();
+      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
       const response = await fetch("/api/create-checkout-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "Idempotency-Key": crypto.randomUUID()
+        },
         body: JSON.stringify({
           userId: user.uid,
           tierName: "Exclusive Leads Add-on",
@@ -294,31 +300,13 @@ export default function TradesDashboard({ isSubView }: { isSubView?: boolean }) 
       if (data.url) {
         window.location.href = data.url;
       } else {
-        // Fallback direct activation if backend endpoint did not return checkout redirect URL
-        await updateDoc(doc(db, "users", user.uid), {
-          hasExclusiveAddon: true,
-          isExclusiveActive: true,
-          updatedAt: new Date().toISOString()
-        });
-        toast.success("⚡ Priority Offers Activated!");
-        setShowExclusiveModal(false);
+        setExclusiveCheckoutError(data.error || "Checkout could not be started. Your subscription has not been activated.");
         setIsProcessingExclusive(false);
       }
     } catch (err: any) {
-      console.error("Exclusive Checkout Error, using resilient fallback:", err);
-      try {
-        await updateDoc(doc(db, "users", user.uid), {
-          hasExclusiveAddon: true,
-          isExclusiveActive: true,
-          updatedAt: new Date().toISOString()
-        });
-        toast.success("⚡ Priority Offers Activated!");
-        setShowExclusiveModal(false);
-      } catch (fallbackErr: any) {
-        setExclusiveCheckoutError(err.message || "Failed to initiate checkout");
-      } finally {
-        setIsProcessingExclusive(false);
-      }
+      console.error("Exclusive Checkout Error:", err);
+      setExclusiveCheckoutError(err.message || "Failed to initiate checkout. Your subscription has not been activated.");
+      setIsProcessingExclusive(false);
     }
   };
 
@@ -330,12 +318,7 @@ export default function TradesDashboard({ isSubView }: { isSubView?: boolean }) 
       setShowExclusiveModal(false);
       // Clean up URL parameter cleanly
       window.history.replaceState({}, document.title, window.location.pathname);
-      if (user) {
-        updateDoc(doc(db, "users", user.uid), {
-          hasExclusiveAddon: true,
-          isExclusiveActive: true
-        }).catch(err => console.error("Error activating priority addon state:", err));
-      }
+      // Entitlement is granted only by the verified Stripe webhook; this URL flag is not proof of payment.
     }
   }, [user]);
 

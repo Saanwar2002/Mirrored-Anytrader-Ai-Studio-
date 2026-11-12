@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useAuth } from "./AuthProvider";
-import { db, handleFirestoreError, OperationType, collection, query, where, onSnapshot, addDoc, doc, deleteDoc, updateDoc, serverTimestamp } from "@/src/firebase";
+import { db, handleFirestoreError, OperationType, collection, query, where, onSnapshot, doc, deleteDoc, updateDoc, serverTimestamp } from "@/src/firebase";
 import { Plus, Building2, Wrench, Home, Briefcase, MapPin, Search, Edit, Trash2, Clock, Camera, ArrowLeft, CheckCircle2, Store, Users, FileText, Zap, ShieldAlert, ShieldCheck, KeyRound, QrCode } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { cn, generateJobNumber, getOutwardPostcode, formatJobLocation } from "@/src/lib/utils";
@@ -11,6 +11,7 @@ import { ClaimPropertyPassportModal } from "./property/ClaimPropertyPassportModa
 import { EstateAgentQRGeneratorModal } from "./property/EstateAgentQRGeneratorModal";
 import { createJobViaCommand } from "../services/jobCommandService";
 import { toast } from "sonner";
+import { createPropertyViaCommand, deletePropertyViaCommand } from "../services/propertyCommandService";
 
 export default function Portfolio() {
   const { user, profile } = useAuth();
@@ -266,24 +267,15 @@ export default function Portfolio() {
             updatedAt: new Date().toISOString()
           });
         } else {
-          await addDoc(collection(db, "properties"), {
-            ownerId: user.uid,
+          await createPropertyViaCommand(user, {
             name: propertyName,
-            address: {
-              line1: addressLine1,
-              city: finalCity,
-              postcode: finalPostcode,
-              country: "UK"
-            },
+            address: { line1: addressLine1, city: finalCity, postcode: finalPostcode, country: "UK" },
             postcode: finalPostcode,
             city: finalCity,
-            propertyType: propertyType,
+            propertyType,
             contactName,
             contactPhone,
-            accessInstructions,
-            status: "active",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            accessInstructions
           });
         }
         setIsAdding(false);
@@ -333,7 +325,8 @@ export default function Portfolio() {
 
   const handleDeleteProperty = async (propertyId: string) => {
     try {
-      await deleteDoc(doc(db, "properties", propertyId));
+      if (!user) throw new Error("You must be signed in to delete a property.");
+      await deletePropertyViaCommand(user, propertyId);
       setDeletingId(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `properties/${propertyId}`);
@@ -508,9 +501,15 @@ export default function Portfolio() {
                   onClick={async () => {
                     if (!user) return;
                     try {
+                      const token = await user.getIdToken();
+                      if (!token) throw new Error("Your sign-in session has expired. Please sign in again.");
                       const response = await fetch("/api/create-checkout-session", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: {
+                          "Content-Type": "application/json",
+                          Authorization: `Bearer ${token}`,
+                          "Idempotency-Key": crypto.randomUUID()
+                        },
                         body: JSON.stringify({
                           userId: user.uid,
                           tierName: "Premium Landlord",

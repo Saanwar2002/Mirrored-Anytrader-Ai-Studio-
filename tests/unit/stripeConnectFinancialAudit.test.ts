@@ -2,21 +2,31 @@ import { describe, it, expect } from "vitest";
 import { resolveAuthoritativeLineItem, SERVER_PRICING_CATALOG, calculateGothamSaaSPlanServer } from "../../src/server/pricingCatalog";
 
 describe("Stripe Connect & Financial Flow Invariants", () => {
+  const checkoutDb = (ownerId: string, status = "open") => ({
+    collection: (col: string) => ({
+      doc: (id: string) => ({
+        get: async () => col === "jobs" ? ({
+          exists: true,
+          data: () => ({ homeownerId: ownerId, acceptedTradespersonId: "trader_999", status }),
+        }) : ({ exists: false, data: () => ({}) }),
+      }),
+    }),
+  });
   it("enforces that all platform catalog products route 100% of fees to platform account", async () => {
     const catalogEntries = [
-      { body: { metadata: { type: "boost", tier: "emergency_boost" } }, expectedAmount: 499 },
-      { body: { metadata: { type: "boost", tier: "instant_match" } }, expectedAmount: 299 },
+      { body: { metadata: { type: "boost", tier: "emergency_boost", jobId: "job_test" } }, expectedAmount: 499 },
+      { body: { metadata: { type: "boost", tier: "instant_match", jobId: "job_test" } }, expectedAmount: 299 },
       { body: { priceId: "price_landlord" }, expectedAmount: 1900 },
       { body: { priceId: "price_pro" }, expectedAmount: 2900 },
       { body: { priceId: "price_premium" }, expectedAmount: 4900 },
       { body: { priceId: "price_driver_gold" }, expectedAmount: 4999 },
-      { body: { metadata: { type: "mediation_stake" } }, expectedAmount: 2500 },
+      { body: { metadata: { type: "mediation_stake", jobId: "job_test" } }, expectedAmount: 2500 },
       { body: { priceId: "price_video_pro" }, expectedAmount: 1000 },
       { body: { priceId: "price_exclusive_leads" }, expectedAmount: 1500 },
     ];
 
     for (const item of catalogEntries) {
-      const lineItem = await resolveAuthoritativeLineItem(item.body, "user_test_123", undefined);
+      const lineItem = await resolveAuthoritativeLineItem(item.body, "user_test_123", checkoutDb("user_test_123", item.body.metadata?.type === "mediation_stake" ? "disputed" : "open"));
       expect(lineItem.authoritativeAmountPence).toBe(item.expectedAmount);
       expect(lineItem.lineItem.price_data.currency).toBe("gbp");
       // Platform owns these products: NEVER client money
@@ -105,6 +115,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       metadata: {
         type: "boost",
         tier: "emergency_boost",
+        jobId: "job_test",
       },
       price_data: {
         unit_amount: 100, // Attacker tries £1.00
@@ -113,7 +124,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       customAmount: 1
     };
 
-    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", undefined);
+    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "owner_uid", checkoutDb("owner_uid"));
     // Server must strictly return the catalog price (£4.99 = 499p)
     expect(authoritative.authoritativeAmountPence).toBe(499);
   });
@@ -123,6 +134,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
     const tamperedPayload = {
       metadata: {
         type: "mediation_stake",
+        jobId: "job_test",
       },
       price_data: {
         unit_amount: 1
@@ -130,7 +142,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
       amount: 0.01,
     };
 
-    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "attacker_uid", undefined);
+    const authoritative = await resolveAuthoritativeLineItem(tamperedPayload, "user_test_123", checkoutDb("user_test_123", "disputed"));
     // Server must strictly return £25.00 (2500p)
     expect(authoritative.authoritativeAmountPence).toBe(2500);
   });
@@ -168,7 +180,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
             if (col === "jobs" && docId === "job_override_1") {
               return {
                 exists: true,
-                data: () => ({ homeownerId: "cust_override", jobNo: "9001" })
+                data: () => ({ homeownerId: "homeowner_user", acceptedTradespersonId: "trader_pro_override", jobNo: "9001", status: "open" })
               };
             }
             if (col === "users" && docId === "trader_pro_override") {
@@ -204,7 +216,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
 
     // 2. Emergency boost dynamically honors admin's £7.50 override
     const boostResult = await resolveAuthoritativeLineItem({
-      metadata: { type: "boost", tier: "emergency_boost" },
+      metadata: { type: "boost", tier: "emergency_boost", jobId: "job_override_1" },
       price_data: { unit_amount: 100 } // Attacker attempts to tamper, ignored!
     }, "homeowner_user", mockDbWithAdminOverrides);
     expect(boostResult.authoritativeAmountPence).toBe(750); // £7.50
@@ -217,7 +229,7 @@ describe("Stripe Connect & Financial Flow Invariants", () => {
         quoteId: "quote_override_1",
         milestoneId: "m_custom"
       }
-    }, "cust_override", mockDbWithAdminOverrides);
+    }, "homeowner_user", mockDbWithAdminOverrides);
     expect(milestoneResult.authoritativeAmountPence).toBe(100000); // £1,000.00
     // 2% of £1,000 = £20.00 (2000p)
     expect(milestoneResult.paymentIntentData?.application_fee_amount).toBe(2000);
