@@ -34,7 +34,11 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
       driver_payout_operations: [
         { id: "payout_1", value: { operationId: "payout_1", rideId: "ride_1", driverId: "driver_1", stripeAccountId: "acct_driver", amountPence: 500, currency: "gbp", status: "stripe_succeeded", stripeTransferId: "tr_payout" } },
       ],
-      payment_intents: [{ id: "intent_1", value: { paymentIntentId: "pi_123" } }],
+      payment_intents: [
+        { id: "intent_1", value: { paymentIntentId: "pi_123", metadata: { type: "milestone_funding" } } },
+        { id: "subscription_intent", value: { paymentIntentId: "pi_subscription", metadata: { type: "gotham_saas" } } },
+      ],
+      refund_records: [],
       payment_refund_totals: [{ id: "pi_123", value: { paymentIntentId: "pi_123", refundedAmountPence: 200 } }],
       refund_operations: [],
       jobs: [{ id: "job_1", value: {} }],
@@ -46,7 +50,8 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
       refunds: { list: vi.fn().mockResolvedValue({ data: [{ id: "re_123", payment_intent: "pi_123", amount: 200, currency: "gbp", status: "succeeded" }], has_more: false }) },
       transfers: { list: vi.fn()
         .mockResolvedValueOnce({ data: [{ id: "tr_escrow", amount: 8800, currency: "gbp", destination: "acct_trader", metadata: { jobId: "job_1", quoteId: "quote_1", milestoneId: "mile_1", releaseOperationId: "release_1", operationType: "ANYTRADER_ESCROW_RELEASE" } }], has_more: true })
-        .mockResolvedValueOnce({ data: [{ id: "tr_payout", amount: 500, currency: "gbp", destination: "acct_driver", metadata: { rideId: "ride_1", driverId: "driver_1", type: "orchestrated_driver_payout" } }], has_more: false }) },
+        .mockResolvedValueOnce({ data: [{ id: "tr_payout", amount: 500, currency: "gbp", destination: "acct_driver", metadata: { rideId: "ride_1", driverId: "driver_1", type: "orchestrated_driver_payout" } }], has_more: true })
+        .mockResolvedValueOnce({ data: [{ id: "tr_subscription", amount: 999, currency: "gbp", destination: "acct_other", metadata: { type: "unrelated_subscription_transfer" } }], has_more: false }) },
     };
     const result = await collectFinancialReconciliationSnapshot(db as any, stripe as any, {
       pageSize: 1, stripePageSize: 1, maxDocumentsPerCollection: 20, maxJobs: 10, maxQuotes: 20,
@@ -55,12 +60,40 @@ describe("bounded read-only FIN-05 snapshot collector", () => {
     expect(result.coverage.complete).toBe(true);
     expect(result.coverage.firestore.payment_ledger.documents).toBe(3);
     expect(result.coverage.firestore.payment_ledger.pages).toBeGreaterThan(1);
-    expect(result.coverage.stripeTransferPages).toBe(2);
+    expect(result.coverage.stripeTransferPages).toBe(3);
     expect(stripe.transfers.list).toHaveBeenNthCalledWith(2, { limit: 1, starting_after: "tr_escrow" });
+    expect(stripe.transfers.list).toHaveBeenNthCalledWith(3, { limit: 1, starting_after: "tr_payout" });
+    expect(result.snapshot.transfers?.map(transfer => transfer.transferId)).toEqual(["tr_escrow", "tr_payout"]);
+    expect(stripe.paymentIntents.retrieve).toHaveBeenCalledTimes(1);
+    expect(stripe.paymentIntents.retrieve).toHaveBeenCalledWith("pi_123");
     expect(result.snapshot.escrows && result.snapshot.escrows[0]).toMatchObject({ transferExpected: true, releaseAmount: 8800, stripeTransferId: "tr_escrow" });
     expect(evaluateFinancialReconciliation(result.snapshot)).toEqual({ findingCount: 0, criticalCount: 0, findings: [] });
     expect((stripe as any).transfers.create).toBeUndefined();
     expect((stripe as any).refunds.create).toBeUndefined();
+  });
+
+
+  it("discovers a PaymentIntent from refund_records so a missing refund ledger entry is reported", async () => {
+    const db = fakeDb({
+      refund_records: [{ id: "re_orphan", value: { transactionId: "pi_refund_only" } }],
+    });
+    const stripe = {
+      paymentIntents: { retrieve: vi.fn().mockResolvedValue({
+        id: "pi_refund_only", status: "succeeded", amount_received: 1000, currency: "gbp",
+      }) },
+      refunds: { list: vi.fn().mockResolvedValue({
+        data: [{ id: "re_orphan", payment_intent: "pi_refund_only", amount: 100, currency: "gbp", status: "succeeded" }],
+        has_more: false,
+      }) },
+      transfers: { list: vi.fn().mockResolvedValue({ data: [], has_more: false }) },
+    };
+    const result = await collectFinancialReconciliationSnapshot(db as any, stripe as any, {
+      pageSize: 10, maxDocumentsPerCollection: 10, maxJobs: 10, maxQuotes: 10,
+      maxPaymentIntentLookups: 10, maxStripePages: 10,
+    });
+    const report = evaluateFinancialReconciliation(result.snapshot);
+    expect(stripe.paymentIntents.retrieve).toHaveBeenCalledWith("pi_refund_only");
+    expect(report.findings.map(item => item.code)).toContain("REFUND_ORPHANED");
   });
 
   it("refuses a partial snapshot when a Firestore source exceeds its document budget", async () => {

@@ -210,12 +210,13 @@ export async function collectFinancialReconciliationSnapshot(
     coverage.firestore[name] = { documents: result.docs.length, pages: result.pages };
     return result.docs;
   };
-  const [ledgerDocs, payoutDocs, paymentIntentDocs, refundTotalDocs, refundOperationDocs, jobDocs] = await Promise.all([
+  const [ledgerDocs, payoutDocs, paymentIntentDocs, refundTotalDocs, refundOperationDocs, refundRecordDocs, jobDocs] = await Promise.all([
     readCollection("payment_ledger"),
     readCollection("driver_payout_operations"),
     readCollection("payment_intents"),
     readCollection("payment_refund_totals"),
     readCollection("refund_operations"),
+    readCollection("refund_records"),
     readCollection("jobs", maxJobs),
   ]);
 
@@ -278,6 +279,9 @@ export async function collectFinancialReconciliationSnapshot(
   }
   for (const doc of refundTotalDocs) addPaymentIntentId(record(doc.data()).paymentIntentId);
   for (const doc of refundOperationDocs) addPaymentIntentId(record(doc.data()).paymentIntentId);
+  // refund_records are durable Stripe-refund evidence; they must still drive a
+  // Stripe lookup when a corresponding payment_ledger row is absent.
+  for (const doc of refundRecordDocs) addPaymentIntentId(record(doc.data()).transactionId);
   if (paymentIntentIds.size > maxPaymentIntents) {
     throw new Error("FIN-05 has " + paymentIntentIds.size + " PaymentIntents, exceeding the " + maxPaymentIntents + "-lookup budget; no partial report was returned.");
   }
