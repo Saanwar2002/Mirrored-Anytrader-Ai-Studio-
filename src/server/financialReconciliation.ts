@@ -12,13 +12,16 @@ export type ReconciliationFindingCode =
   | "CAPTURE_LEDGER_MISSING"
   | "CAPTURE_AMOUNT_MISMATCH"
   | "CAPTURE_CURRENCY_MISMATCH"
+  | "CAPTURE_LEDGER_NOT_COMPLETED"
   | "REFUND_ORPHANED"
+  | "REFUND_LEDGER_NOT_COMPLETED"
   | "REFUND_AMOUNT_MISMATCH"
   | "REFUND_TOTAL_OVER_CAPTURE"
   | "TRANSFER_ORPHANED"
   | "TRANSFER_AMOUNT_MISMATCH"
   | "TRANSFER_CURRENCY_MISMATCH"
   | "TRANSFER_DESTINATION_MISMATCH"
+  | "TRANSFER_METADATA_MISMATCH"
   | "ESCROW_RELEASE_TRANSFER_MISSING"
   | "PAYOUT_ALLOCATION_EXCEEDED";
 
@@ -48,7 +51,7 @@ export interface ReconciliationRefundSnapshot {
   paymentIntentId?: string;
   amount: number;
   currency: string;
-  status?: string;
+  status: string;
 }
 export interface ReconciliationTransferSnapshot {
   transferId: string;
@@ -60,6 +63,8 @@ export interface ReconciliationTransferSnapshot {
 export interface ReconciliationPayoutSnapshot {
   operationId: string;
   transferId?: string;
+  rideId?: string;
+  driverId?: string;
   amount: number;
   currency: string;
   destination?: string;
@@ -129,16 +134,22 @@ export function evaluateFinancialReconciliation(
 
   const captureLedger = ledger.filter(x => x.type === "ESCROW_DEPOSIT" || x.type === "RIDE_PAYMENT");
   for (const capture of captures) {
-    const rows = captureLedger.filter(x => x.transactionId === capture.paymentIntentId || x.stripePaymentIntentId === capture.paymentIntentId);
-    if (!rows.length) {
+    const candidates = captureLedger.filter(x => x.transactionId === capture.paymentIntentId || x.stripePaymentIntentId === capture.paymentIntentId);
+    if (!candidates.length) {
       add("CAPTURE_LEDGER_MISSING", "critical", capture.paymentIntentId, "Confirmed capture has no matching original payment ledger entry.", [capture.paymentIntentId]);
       continue;
     }
+    const rows = candidates.filter(x => x.status === "completed");
+    if (!rows.length) {
+      add("CAPTURE_LEDGER_NOT_COMPLETED", "critical", capture.paymentIntentId, "Matching capture ledger entries exist, but none is completed.", [capture.paymentIntentId, ...candidates.map(x=>x.entryId)]);
+      continue;
+    }
+    const amountsValid = rows.every(row => safeAmount(row.amount));
     const amount = rows.reduce((sum, row) => sum + (safeAmount(row.amount) ? row.amount : 0), 0);
-    if (amount !== capture.amount) add("CAPTURE_AMOUNT_MISMATCH", "critical", capture.paymentIntentId, "Capture amount differs from matching original ledger amount.", [capture.paymentIntentId, ...rows.map(x=>x.entryId)]);
+    if (!amountsValid || amount !== capture.amount) add("CAPTURE_AMOUNT_MISMATCH", "critical", capture.paymentIntentId, "Capture amount differs from matching completed ledger amount.", [capture.paymentIntentId, ...rows.map(x=>x.entryId)]);
     const currencies = new Set(rows.map(x=>normalizeCurrency(x.currency)));
     if (currencies.size !== 1 || !currencies.has(normalizeCurrency(capture.currency))) {
-      add("CAPTURE_CURRENCY_MISMATCH", "critical", capture.paymentIntentId, "Capture currency differs from matching original ledger currency.", [capture.paymentIntentId, ...rows.map(x=>x.entryId)]);
+      add("CAPTURE_CURRENCY_MISMATCH", "critical", capture.paymentIntentId, "Capture currency differs from matching completed ledger currency.", [capture.paymentIntentId, ...rows.map(x=>x.entryId)]);
     }
   }
 
@@ -151,16 +162,22 @@ export function evaluateFinancialReconciliation(
     add("DUPLICATE_REFUND_ID", "critical", id, "Stripe refund ID occurs more than once in the supplied snapshot.", [id]);
   }
   for (const refund of refunds) {
-    if (refund.status && refund.status !== "succeeded") continue;
-    const refundLedger = ledger.filter(x => x.type === "REFUND" && x.stripeRefundId === refund.refundId);
-    if (!refundLedger.length) {
+    if (refund.status !== "succeeded") continue;
+    const candidates = ledger.filter(x => x.type === "REFUND" && x.stripeRefundId === refund.refundId);
+    if (!candidates.length) {
       add("REFUND_ORPHANED", "critical", refund.refundId, "Succeeded Stripe refund has no matching refund ledger entry.", [refund.refundId, refund.paymentIntentId || ""]);
       continue;
     }
+    const refundLedger = candidates.filter(x => x.status === "completed");
+    if (!refundLedger.length) {
+      add("REFUND_LEDGER_NOT_COMPLETED", "critical", refund.refundId, "Matching refund ledger entries exist, but none is completed.", [refund.refundId, ...candidates.map(x=>x.entryId)]);
+      continue;
+    }
     if (refund.paymentIntentId && refundLedger.some(x => (x.stripePaymentIntentId || x.transactionId) !== refund.paymentIntentId)) add("REFUND_AMOUNT_MISMATCH", "critical", refund.refundId, "Refund ledger entry references a different payment intent.", [refund.refundId, ...refundLedger.map(x=>x.entryId)]);
+    const amountsValid = refundLedger.every(row => safeAmount(row.amount));
     const ledgerAmount = refundLedger.reduce((sum,row)=>sum+(safeAmount(row.amount)?row.amount:0),0);
-    if (ledgerAmount !== refund.amount) add("REFUND_AMOUNT_MISMATCH","critical",refund.refundId,"Stripe refund amount differs from refund ledger amount.",[refund.refundId,...refundLedger.map(x=>x.entryId)]);
-    if (refundLedger.some(x=>normalizeCurrency(x.currency)!==normalizeCurrency(refund.currency))) add("REFUND_AMOUNT_MISMATCH","critical",refund.refundId,"Stripe refund currency differs from refund ledger currency.",[refund.refundId,...refundLedger.map(x=>x.entryId)]);
+    if (!amountsValid || ledgerAmount !== refund.amount) add("REFUND_AMOUNT_MISMATCH","critical",refund.refundId,"Stripe refund amount differs from completed refund ledger amount.",[refund.refundId,...refundLedger.map(x=>x.entryId)]);
+    if (refundLedger.some(x=>normalizeCurrency(x.currency)!==normalizeCurrency(refund.currency))) add("REFUND_AMOUNT_MISMATCH","critical",refund.refundId,"Stripe refund currency differs from completed refund ledger currency.",[refund.refundId,...refundLedger.map(x=>x.entryId)]);
   }
   for (const total of totals) {
     const capture = captures.find(x=>x.paymentIntentId===total.paymentIntentId);
@@ -186,7 +203,17 @@ export function evaluateFinancialReconciliation(
     for(const transfer of candidates) {
       if(transfer.amount!==payout.amount) add("TRANSFER_AMOUNT_MISMATCH","critical",transfer.transferId,"Stripe transfer amount differs from payout operation amount.",[payout.operationId,transfer.transferId]);
       if(normalizeCurrency(transfer.currency)!==normalizeCurrency(payout.currency)) add("TRANSFER_CURRENCY_MISMATCH","critical",transfer.transferId,"Stripe transfer currency differs from payout operation currency.",[payout.operationId,transfer.transferId]);
-      if(payout.destination && transfer.destination && payout.destination!==transfer.destination) add("TRANSFER_DESTINATION_MISMATCH","critical",transfer.transferId,"Stripe transfer destination differs from payout operation destination.",[payout.operationId,transfer.transferId]);
+      if(payout.destination && payout.destination!==transfer.destination) add("TRANSFER_DESTINATION_MISMATCH","critical",transfer.transferId,"Stripe transfer destination is missing or differs from payout operation destination.",[payout.operationId,transfer.transferId]);
+      const payoutMetadataChecks: Array<[string, string | undefined]> = [
+        ["rideId", payout.rideId],
+        ["driverId", payout.driverId],
+        ["type", payout.rideId || payout.driverId ? "orchestrated_driver_payout" : undefined],
+      ];
+      for (const [key, expected] of payoutMetadataChecks) {
+        if (expected !== undefined && transfer.metadata?.[key] !== expected) {
+          add("TRANSFER_METADATA_MISMATCH", "critical", transfer.transferId, `Stripe transfer metadata ${key} is missing or differs from payout operation evidence.`, [payout.operationId, transfer.transferId]);
+        }
+      }
     }
   }
   for(const escrow of escrows) {
@@ -202,6 +229,18 @@ export function evaluateFinancialReconciliation(
     for(const transfer of rows) {
       if(typeof escrow.releaseAmount==="number" && transfer.amount!==escrow.releaseAmount) add("TRANSFER_AMOUNT_MISMATCH","critical",linkedId,"Stripe transfer amount differs from escrow release amount.",[escrow.milestoneId,linkedId]);
       if(escrow.currency && normalizeCurrency(transfer.currency)!==normalizeCurrency(escrow.currency)) add("TRANSFER_CURRENCY_MISMATCH","critical",linkedId,"Stripe transfer currency differs from escrow release currency.",[escrow.milestoneId,linkedId]);
+      const escrowMetadataChecks: Array<[string, string | undefined]> = [
+        ["jobId", escrow.jobId],
+        ["quoteId", escrow.quoteId],
+        ["milestoneId", escrow.milestoneId],
+        ["releaseOperationId", escrow.releaseOperationId],
+        ["operationType", "ANYTRADER_ESCROW_RELEASE"],
+      ];
+      for (const [key, expected] of escrowMetadataChecks) {
+        if (expected !== undefined && transfer.metadata?.[key] !== expected) {
+          add("TRANSFER_METADATA_MISMATCH", "critical", linkedId, `Stripe transfer metadata ${key} is missing or differs from released escrow evidence.`, [escrow.jobId, escrow.milestoneId, linkedId]);
+        }
+      }
     }
   }
   for(const transfer of transfers) {

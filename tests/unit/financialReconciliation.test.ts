@@ -10,9 +10,10 @@ const balanced: FinancialReconciliationSnapshot = {
   ],
   refunds: [{ refundId: "re_1", paymentIntentId: "pi_1", amount: 1000, currency: "gbp", status: "succeeded" }],
   refundedTotals: [{ paymentIntentId: "pi_1", amount: 1000 }],
-  transfers: [{ transferId: "tr_1", amount: 9000, currency: "gbp", destination: "acct_1" }],
+  transfers: [{ transferId: "tr_1", amount: 9000, currency: "gbp", destination: "acct_1",
+    metadata: { jobId: "job_1", quoteId: "quote_1", milestoneId: "milestone_1", releaseOperationId: "release_1", operationType: "ANYTRADER_ESCROW_RELEASE" } }],
   payouts: [],
-  escrows: [{ jobId: "job_1", quoteId: "quote_1", milestoneId: "milestone_1", released: true, stripeTransferId: "tr_1", releaseAmount: 9000, currency: "gbp" }],
+  escrows: [{ jobId: "job_1", quoteId: "quote_1", milestoneId: "milestone_1", released: true, releaseOperationId: "release_1", stripeTransferId: "tr_1", releaseAmount: 9000, currency: "gbp" }],
 };
 
 describe("FIN-05 pure financial reconciliation", () => {
@@ -24,9 +25,9 @@ describe("FIN-05 pure financial reconciliation", () => {
     const report = evaluateFinancialReconciliation({
       captures: [{ paymentIntentId: "pi_missing", amount: 100, currency: "usd" }],
       ledger: [
-        { entryId: "dup", transactionId: "pi_other", amount: 99, currency: "gbp", type: "ESCROW_DEPOSIT" },
-        { entryId: "dup", transactionId: "pi_other", amount: 99, currency: "gbp", type: "ESCROW_DEPOSIT" },
-        { entryId: "wrong", transactionId: "pi_mismatch", amount: 50, currency: "gbp", type: "ESCROW_DEPOSIT" },
+        { entryId: "dup", transactionId: "pi_other", amount: 99, currency: "gbp", type: "ESCROW_DEPOSIT", status: "completed" },
+        { entryId: "dup", transactionId: "pi_other", amount: 99, currency: "gbp", type: "ESCROW_DEPOSIT", status: "completed" },
+        { entryId: "wrong", transactionId: "pi_mismatch", amount: 50, currency: "gbp", type: "ESCROW_DEPOSIT", status: "completed" },
       ],
     });
     expect(report.findings.map(x => x.code)).toContain("CAPTURE_LEDGER_MISSING");
@@ -46,7 +47,7 @@ describe("FIN-05 pure financial reconciliation", () => {
         {refundId:"re_orphan",paymentIntentId:"pi_1",amount:200,currency:"gbp",status:"succeeded"},
         {refundId:"re_bad",paymentIntentId:"pi_1",amount:300,currency:"gbp",status:"succeeded"},
       ],
-      ledger:[{entryId:"refund_bad",stripeRefundId:"re_bad",amount:250,currency:"gbp",type:"REFUND"}],
+      ledger:[{entryId:"refund_bad",stripeRefundId:"re_bad",amount:250,currency:"gbp",type:"REFUND",status:"completed"}],
       refundedTotals:[{paymentIntentId:"pi_1",amount:1200}],
     });
     expect(report.findings.map(x=>x.code)).toContain("REFUND_ORPHANED");
@@ -78,7 +79,7 @@ describe("FIN-05 pure financial reconciliation", () => {
 
   it("flags duplicate Stripe transfer identities and refund ledger PI mislinkage", () => {
     const report=evaluateFinancialReconciliation({
-      ledger:[{entryId:"r1",stripeRefundId:"re_2",stripePaymentIntentId:"pi_wrong",amount:100,currency:"gbp",type:"REFUND"}],
+      ledger:[{entryId:"r1",stripeRefundId:"re_2",stripePaymentIntentId:"pi_wrong",amount:100,currency:"gbp",type:"REFUND",status:"completed"}],
       refunds:[{refundId:"re_2",paymentIntentId:"pi_expected",amount:100,currency:"gbp",status:"succeeded"}],
       transfers:[
         {transferId:"tr_dup",amount:50,currency:"gbp"},
@@ -87,6 +88,43 @@ describe("FIN-05 pure financial reconciliation", () => {
     });
     expect(report.findings.map(x=>x.code)).toContain("DUPLICATE_TRANSFER_ID");
     expect(report.findings.map(x=>x.code)).toContain("REFUND_AMOUNT_MISMATCH");
+  });
+
+
+  it("does not accept pending capture or refund ledger rows as completed financial evidence", () => {
+    const report = evaluateFinancialReconciliation({
+      captures: [{ paymentIntentId: "pi_pending", amount: 1000, currency: "gbp" }],
+      refunds: [{ refundId: "re_pending", paymentIntentId: "pi_pending", amount: 200, currency: "gbp", status: "succeeded" }],
+      ledger: [
+        { entryId: "capture_pending", transactionId: "pi_pending", amount: 1000, currency: "gbp", type: "ESCROW_DEPOSIT", status: "pending" },
+        { entryId: "refund_pending", transactionId: "pi_pending", stripeRefundId: "re_pending", amount: 200, currency: "gbp", type: "REFUND", status: "pending" },
+      ],
+    });
+    expect(report.findings.map(x => x.code)).toContain("CAPTURE_LEDGER_NOT_COMPLETED");
+    expect(report.findings.map(x => x.code)).toContain("REFUND_LEDGER_NOT_COMPLETED");
+    expect(report.findings.map(x => x.code)).not.toContain("CAPTURE_LEDGER_MISSING");
+    expect(report.findings.map(x => x.code)).not.toContain("REFUND_ORPHANED");
+  });
+
+  it("checks Stripe transfer metadata against payout and escrow identities", () => {
+    const payoutReport = evaluateFinancialReconciliation({
+      ledger: [],
+      payouts: [{ operationId: "payout_op", transferId: "tr_payout", rideId: "ride_1", driverId: "driver_1",
+        amount: 500, currency: "gbp", destination: "acct_1", status: "stripe_succeeded" }],
+      transfers: [{ transferId: "tr_payout", amount: 500, currency: "gbp", destination: "acct_1",
+        metadata: { rideId: "ride_other", driverId: "driver_1", type: "orchestrated_driver_payout" } }],
+    });
+    expect(payoutReport.findings.map(x => x.code)).toContain("TRANSFER_METADATA_MISMATCH");
+
+    const escrowReport = evaluateFinancialReconciliation({
+      ledger: [],
+      escrows: [{ jobId: "job_1", quoteId: "quote_1", milestoneId: "mile_1", released: true,
+        releaseOperationId: "release_1", stripeTransferId: "tr_escrow", releaseAmount: 900, currency: "gbp" }],
+      transfers: [{ transferId: "tr_escrow", amount: 900, currency: "gbp", destination: "acct_1",
+        metadata: { jobId: "job_other", quoteId: "quote_1", milestoneId: "mile_1",
+          releaseOperationId: "release_1", operationType: "ANYTRADER_ESCROW_RELEASE" } }],
+    });
+    expect(escrowReport.findings.map(x => x.code)).toContain("TRANSFER_METADATA_MISMATCH");
   });
 
   it("does not mutate any input snapshot", () => {
