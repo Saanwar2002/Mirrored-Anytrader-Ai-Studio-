@@ -75,7 +75,20 @@ describe("FIN-05 pure financial reconciliation", () => {
     expect(report.findings.map(x=>x.code)).toContain("PAYOUT_ALLOCATION_EXCEEDED");
   });
 
-  it("does not mutate any input snapshot", () => {
+
+  it("flags duplicate Stripe transfer identities and refund ledger PI mislinkage", () => {
+    const report=evaluateFinancialReconciliation({
+      ledger:[{entryId:"r1",stripeRefundId:"re_2",stripePaymentIntentId:"pi_wrong",amount:100,currency:"gbp",type:"REFUND"}],
+      refunds:[{refundId:"re_2",paymentIntentId:"pi_expected",amount:100,currency:"gbp",status:"succeeded"}],
+      transfers:[
+        {transferId:"tr_dup",amount:50,currency:"gbp"},
+        {transferId:"tr_dup",amount:50,currency:"gbp"},
+      ],
+    });
+    expect(report.findings.map(x=>x.code)).toContain("DUPLICATE_TRANSFER_ID");
+    expect(report.findings.map(x=>x.code)).toContain("REFUND_AMOUNT_MISMATCH");
+  });
+\n  it("does not mutate any input snapshot", () => {
     const snapshot=structuredClone(balanced);
     const before=JSON.stringify(snapshot);
     evaluateFinancialReconciliation(snapshot);
