@@ -127,6 +127,18 @@ describe("FIN-05 pure financial reconciliation", () => {
     expect(escrowReport.findings.map(x => x.code)).toContain("TRANSFER_METADATA_MISMATCH");
   });
 
+
+  it("reports a successful payout operation that has no Stripe transfer ID", () => {
+    const report = evaluateFinancialReconciliation({
+      ledger: [],
+      payouts: [{ operationId: "payout_missing_transfer", amount: 500, currency: "gbp",
+        destination: "acct_1", status: "stripe_succeeded" }],
+      transfers: [],
+    });
+    expect(report.findings.map(x => x.code)).toContain("PAYOUT_TRANSFER_ID_MISSING");
+    expect(report.criticalCount).toBe(1);
+  });
+
   it("does not mutate any input snapshot", () => {
     const snapshot=structuredClone(balanced);
     const before=JSON.stringify(snapshot);

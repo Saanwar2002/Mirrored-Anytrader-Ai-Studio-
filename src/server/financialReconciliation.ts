@@ -22,6 +22,7 @@ export type ReconciliationFindingCode =
   | "TRANSFER_CURRENCY_MISMATCH"
   | "TRANSFER_DESTINATION_MISMATCH"
   | "TRANSFER_METADATA_MISMATCH"
+  | "PAYOUT_TRANSFER_ID_MISSING"
   | "ESCROW_RELEASE_TRANSFER_MISSING"
   | "PAYOUT_ALLOCATION_EXCEEDED";
 
@@ -193,7 +194,12 @@ export function evaluateFinancialReconciliation(
   }
   const linkedTransferIds = new Set<string>();
   for (const payout of payouts) {
-    if (!payout.transferId) continue;
+    if (!payout.transferId || !payout.transferId.trim()) {
+      if (payout.status === "stripe_succeeded" || payout.status === "completed") {
+        add("PAYOUT_TRANSFER_ID_MISSING", "critical", payout.operationId, "Payout operation claims success but has no Stripe transfer identity.", [payout.operationId]);
+      }
+      continue;
+    }
     linkedTransferIds.add(payout.transferId);
     const candidates=transfersById.get(payout.transferId)||[];
     if (!candidates.length) {
