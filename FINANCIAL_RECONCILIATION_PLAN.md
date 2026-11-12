@@ -281,3 +281,10 @@ The evaluator does not access Firestore/Stripe, mutate supplied snapshots, infer
 Evaluator and tests extended to detect duplicate Stripe transfer identities and refund-ledger PaymentIntent cross-link mismatches. Commits: `88e545b`, `692e9cf`. CI at exact test commit SHA `692e9cf6a0ead3a035b2fb67b2432fd6dca9c6d1` is pending. Prior run #966 was at docs-only SHA `f65f971`; #967 at evaluator SHA `88e545b`. FIN-05 remains unvalidated pending complete exact-head CI.
 
 The pure evaluator is not a production runner: no Firestore/Stripe data collection, pagination, endpoint, mutation, repair, or money movement exists. Continue with bounded read-only collection only after schema and access review. FIN-01 route-level stale-worker test and durable domain-event delivery remain open.
+
+
+## CI failure + repair — FIN-05 (12 November 2026)
+
+Runs #968 (test commit `692e9cf`), #969 (docs), and #970 (docs) failed in Unit & Pen-Testing because `tests/unit/financialReconciliation.test.ts` contained literal `\\n` characters at line 91, causing esbuild syntax error. The evaluator code commit #967 (`88e545b`) passed its CI. CI output shows 1,264 existing tests passed; the FIN-05 test suite failed to parse and therefore did not execute.
+
+Corrected newline and committed `723475d38860444911554ead29b3d27d60c5705d`. Exact-head CI pending; keep FIN-05 status open until all stages pass.
