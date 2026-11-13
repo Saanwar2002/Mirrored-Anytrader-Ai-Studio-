@@ -125,7 +125,7 @@ This document serves as the master engineering roadmap to remediate all **58 sho
 
 - [x] **Task 2.2: Hardcoded Email Literal Purge**
   - **Audit Ref**: C-8
-  - **Objective**: Purge all hardcoded email references (`saanwar2002@gmail.com`) across rules and client components, replacing them with custom claims verification and dynamic role state.
+  - **Objective**: Purge all hardcoded email references (`[REDACTED_ADMIN_EMAIL]`) across rules and client components, replacing them with custom claims verification and dynamic role state.
   - **Affected Files**: `firestore.rules`, `server.ts`, `src/context/AuthProvider.tsx`, `src/components/Onboarding.tsx`, `src/components/admin/MasterAdminLayout.tsx`, `src/components/admin/AnyTraderAdmin.tsx`, `src/components/TermsAcceptancePrompt.tsx`, `src/services/traderOutreachAgentService.ts`, etc.
   - **Status**: `[x] Completed (2026-09-08)`
   - **Verification**: Hardcoded email strings purged in favor of dynamic admin config and custom claims checks.
@@ -133,12 +133,12 @@ This document serves as the master engineering roadmap to remediate all **58 sho
 - [x] **Task 2.3: Remove Client Master PIN & `sessionStorage` Bypasses**
   - **Audit Ref**: C-6, C-7
   - **Objective**:
-    - Remove hardcoded master PIN `362515` and `sessionStorage.admin_session_unlocked = "true"` logic from `adminAuthSecurityService.ts` and `MasterAdminLayout.tsx`.
+    - Remove hardcoded master PIN `[REDACTED_LEGACY_PIN]` and `sessionStorage.admin_session_unlocked = "true"` logic from `adminAuthSecurityService.ts` and `MasterAdminLayout.tsx`.
     - Remove `sessionStorage.is_test_admin === "true"` bypass from `Onboarding.tsx` and `AuthProvider.tsx`.
     - Rely strictly on Firebase Auth authentication + re-authentication (`auth_time < 10m`) for sensitive admin operations.
   - **Files**: `src/services/adminAuthSecurityService.ts`, `src/components/admin/MasterAdminLayout.tsx`, `src/components/Onboarding.tsx`, `src/context/AuthProvider.tsx`
   - **Status**: `[x] Completed (2026-09-08)`
-  - **Verification**: Purged static master PIN `362515` and unauthenticated session bypasses.
+  - **Verification**: Purged static master PIN `[REDACTED_LEGACY_PIN]` and unauthenticated session bypasses.
 
 - [x] **Task 2.4: Biometric & Plaintext Credential Storage Purge**
   - **Audit Ref**: H-3
@@ -413,7 +413,7 @@ This document serves as the master engineering roadmap to remediate all **58 sho
 | 1.9 | Secure SSO Token Generation | 2026-09-08 | Server-verified roles + 2m expiration | Verified ✅ |
 | 2.1 | Firebase Custom Claims Admin Script & Verification | 2026-09-08 | `scripts/set-admin-claim.ts` + claim checks | Verified ✅ |
 | 2.2 | Hardcoded Email Literal Purge | 2026-09-08 | Dynamic role state + custom claims | Verified ✅ |
-| 2.3 | Remove Client Master PIN & `sessionStorage` Bypasses | 2026-09-08 | Purged static PIN `362515` and bypasses | Verified ✅ |
+| 2.3 | Remove Client Master PIN & `sessionStorage` Bypasses | 2026-09-08 | Purged static PIN `[REDACTED_LEGACY_PIN]` and bypasses | Verified ✅ |
 | 2.4 | Biometric & Plaintext Credential Storage Purge | 2026-09-08 | Removed plaintext storage in `biometricService.ts` | Verified ✅ |
 | 2.5 | Sanitize Client Error Logs (PII Leak Prevention) | 2026-09-08 | Stripped PII/emails from `handleFirestoreError` | Verified ✅ |
 | 2.6 | Remove `@google/genai` & API Keys from Browser Bundles | 2026-09-08 | 100% backend isolation via proxy tasks | Verified ✅ |

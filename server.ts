@@ -7740,6 +7740,27 @@ Limit your response to just the text of the tip. Do not use quotes.`;
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    app.use((req, res, next) => {
+      let decodedPath: string;
+      try {
+        decodedPath = decodeURIComponent(req.path);
+      } catch {
+        return res.status(404).end();
+      }
+      if (decodedPath.includes("\0")) {
+        return res.status(404).end();
+      }
+      const collapsedPath = decodedPath.replace(/\\+/g, "/").replace(/\/+/g, "/");
+      const normalizedPath = (path.posix.normalize(collapsedPath).replace(/\/+$/, "")) || "/";
+      if (
+        /^\/server\.cjs(\.map)?(\/|$)/i.test(normalizedPath) ||
+        /^\/assets\/aistudio(\/|$)/i.test(normalizedPath) ||
+        /\.map$/i.test(normalizedPath)
+      ) {
+        return res.status(404).end();
+      }
+      next();
+    });
     app.use(express.static(distPath, {
       setHeaders: (res, filePath) => {
         if (filePath.endsWith('sw.js') || filePath.endsWith('registerSW.js') || filePath.endsWith('manifest.webmanifest') || filePath.endsWith('manifest.json') || filePath.endsWith('index.html')) {

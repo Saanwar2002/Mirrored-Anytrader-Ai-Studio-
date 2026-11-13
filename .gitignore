@@ -36,3 +36,7 @@ yarn-error.log*
 .DS_Store
 .idea/
 .vscode/
+
+# Local Workspace Backups & AI Studio Upload Artifacts
+_workspace_backup/
+public/assets/aistudio/

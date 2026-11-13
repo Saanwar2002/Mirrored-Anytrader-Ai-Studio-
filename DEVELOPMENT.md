@@ -3356,7 +3356,7 @@ PASS / FAIL
     *   *User Directives*: "Can we also have option to change admin email as well in admin settings if needed. Also Can we create a alert Notification to be sent to admin email each time admin credentials are used to login as admin"
 *   **Architectural Upgrades Implemented**:
     1.  **Dedicated Admin Auth Security Service (`src/services/adminAuthSecurityService.ts`)**:
-        - Created unified security service managing primary/secondary admin emails, 6-digit master PIN (`362515`), and login alert configurations.
+        - Created unified security service managing primary/secondary admin emails, 6-digit master PIN (`[REDACTED_LEGACY_PIN]`), and login alert configurations.
         - Persists configuration to Firestore (`/system_settings/master_admin_auth`) with local storage fallback caching for ultra-fast auth resolution.
         - Dispatches real-time email alerts via `/api/admin/send-email-alert` containing detailed device metadata, browser user agent, IP address, and timestamp upon successful PIN verification.
         - Records an immutable session log in the `/admin_login_audits` collection for end-to-end security compliance.
@@ -3377,13 +3377,13 @@ PASS / FAIL
     *   *User Directives*: "How this will work, how can we make it secure so only admin can log in if someone find out admin email address... Yes do them . also remove guest login as we will be doing live app testing"
 *   **Security Protections Implemented**:
     1.  **Strict Firestore Rules Server-Side Enforcement (`firestore.rules`)**:
-        - Updated `isAdmin()` helper to strictly check `request.auth.token.email.lower() == 'saanwar2002@gmail.com'` or existence in `/admins/{adminId}`.
+        - Updated `isAdmin()` helper to strictly check `request.auth.token.email.lower() == '[REDACTED_ADMIN_EMAIL]'` or existence in `/admins/{adminId}`.
         - Hardened `/users/{userId}` create and update rules: ordinary users are strictly forbidden from writing `role: 'admin'`, `role: 'ecosystem_manager'`, or `isAdmin: true` to the database.
         - All paid subscription tier keys (`tierId`, `subscriptionStatus`, `hasExclusiveAddon`, `gothamSubscription`) are locked against client-side tampering.
     2.  **Master Admin 2FA PIN Security Gate & Cloud Sync (`MasterAdminLayout.tsx`)**:
         - Non-authorized accounts navigating to `/admin` are greeted with a locked security wall ("Access Restricted").
-        - For the verified admin (`saanwar2002@gmail.com`), a 6-digit Master PIN security gate blocks access to the management console until the master PIN is provided.
-        - The Master Admin PIN is set to `362515` and synced to Firestore `/system_settings/master_admin_auth` so it persists across all devices.
+        - For the verified admin (`[REDACTED_ADMIN_EMAIL]`), a 6-digit Master PIN security gate blocks access to the management console until the master PIN is provided.
+        - The Master Admin PIN is set to `[REDACTED_LEGACY_PIN]` and synced to Firestore `/system_settings/master_admin_auth` so it persists across all devices.
         - Integrated a "Change PIN" management modal in the top navigation bar of the Admin Console allowing the admin to update the 6-digit code at any time.
         - Added an instant "Lock Console" action button in the top navigation bar to lock down session access immediately when stepping away.
     3.  **Removal of Guest/Test Admin Bypasses**:
@@ -4070,10 +4070,10 @@ PASS / FAIL
 *   **Context & User Request**: Fixed Firestore "Missing or insufficient permissions" errors occurring on `audit_logs`, `invitations`, `broadcasts`, and `search_logs` collections.
 *   **Root Cause**:
     *   The `isAdmin()` security rule helper in `firestore.rules` previously relied exclusively on Firestore document lookup (`admins/{uid}` or `users/{uid}.role in ['admin', 'ecosystem_manager']`).
-    *   When the platform owner (`saanwar2002@gmail.com`) logged in, initial role synchronizations and admin dashboard snapshot listeners (`audit_logs`, `broadcasts`, `search_logs`) failed validation before the user profile document could be updated, and `invitations` collection write rules were overly restrictive for team invitations.
+    *   When the platform owner (`[REDACTED_ADMIN_EMAIL]`) logged in, initial role synchronizations and admin dashboard snapshot listeners (`audit_logs`, `broadcasts`, `search_logs`) failed validation before the user profile document could be updated, and `invitations` collection write rules were overly restrictive for team invitations.
 *   **Key Architecture & Changes**:
     1.  **Direct Platform Owner & Token Match in `isAdmin()` (`firestore.rules`)**:
-        *   Updated `isAdmin()` to check `(request.auth.token.email != null && request.auth.token.email.lower() == 'saanwar2002@gmail.com')` in addition to Firestore admin records.
+        *   Updated `isAdmin()` to check `(request.auth.token.email != null && request.auth.token.email.lower() == '[REDACTED_ADMIN_EMAIL]')` in addition to Firestore admin records.
     2.  **Invitations & Team Member Permissions (`firestore.rules`)**:
         *   Allowed authenticated team inviters and recipients to get, list, create, update, and delete invitation records for their own email/user ID.
     3.  **Broadcasts & Search Logs Access (`firestore.rules`)**:
