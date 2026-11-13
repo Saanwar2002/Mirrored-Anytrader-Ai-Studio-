@@ -85,7 +85,7 @@ export class InternalServerError extends HttpError {
  */
 export function sendHttpError(res: Response, err: unknown, req?: Request): void {
   const isProd = process.env.NODE_ENV === "production";
-  
+
   if (err instanceof HttpError) {
     const responsePayload: Record<string, any> = {
       success: false,
@@ -96,14 +96,14 @@ export function sendHttpError(res: Response, err: unknown, req?: Request): void 
     if (err.details && (err.isPublicSafe || !isProd)) {
       responsePayload.details = err.details;
     }
-    
+
     console.error(`[HttpError ${err.statusCode} - ${err.errorCode}] Correlation: ${err.correlationId}`, {
       path: req?.originalUrl,
       method: req?.method,
       message: err.message,
       stack: !isProd ? err.stack : undefined,
     });
-    
+
     res.status(err.statusCode).json(responsePayload);
     return;
   }
@@ -112,7 +112,7 @@ export function sendHttpError(res: Response, err: unknown, req?: Request): void 
   const genericCorrelationId = `err_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const rawCode = (err as any)?.code;
   const rawMessage = err instanceof Error ? err.message : String(err);
-  
+
   if (
     rawCode === 7 ||
     rawMessage.includes("7 PERMISSION_DENIED") ||

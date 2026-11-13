@@ -34,3 +34,28 @@ Use the reconciliation candidate as the starting point for Gemini-assisted proje
 - Branch HEAD 38b417309fa8b44ed0cbd3c2724a05dea10b6768 passed Actions run #990 exactly.
 - PR #5 stays draft/unmerged; main is untouched.
 - No AI Studio Pull/Push, Firebase production read/write, deployment, or Stripe financial action has been performed by this hand-off.
+
+---
+
+## Unified AI Studio + Main Reconciliation Status (2026-11-13)
+- **Workspace Root**: `/app/applet`
+- **Target Repository**: `Saanwar2002/AnyTrader`
+- **Preserved Backup File**: `_workspace_backup/anytrader_workspace_backup_20261112_015500.tar.gz` (SHA-256 `5cecd20e38b781d25542b3185a90d802bb1bb8e629b040f050b284545920a549`)
+- **Source Sync**: Merged all 34 repo-only files and 41 improved repo files from `AnyTrader-main` (`38b417309fa8b44ed0cbd3c2724a05dea10b6768` archive) into `/app/applet` while preserving all 11 Task-616 files:
+  - `src/server/stripeWebhookHandler.ts` (unified with `claimToken` fencing)
+  - `src/server/escrowRecovery.ts`
+  - `src/server/reconciliationReport.ts`
+  - `server.ts` (preserving FIN-01 webhook lease fencing, FIN-03 safeguards, FIN-05 `/api/admin/financial-reconciliation/report` route, plus all `main` checkout/quota/mediation/subscription/refund improvements)
+  - `tests/unit/task6StripeWebhookTakeover.test.ts` (5 tests)
+  - `tests/unit/task6EscrowRecoveryEvidence.test.ts` (7 tests)
+  - `tests/unit/task6ReconciliationReport.test.ts` (10 tests)
+  - `tests/unit/task6ReconciliationReportRoute.test.ts` (4 tests)
+  - `DEVELOPMENT.md`
+  - `FINANCIAL_RECONCILIATION_PLAN.md`
+  - `GEMINI_AI_STUDIO_RECONCILIATION_HANDOFF.md`
+- **Unified Verification Evidence**:
+  - `npm test`: **1,313 / 1,313 tests passing across 86 test files**
+  - `npx tsc --noEmit`: **0 errors**
+  - `npm run build` (`compile_applet`): **Succeeded**
+  - `node scripts/final-release-audit.mjs`: **0 Critical Failures, 6 Warnings**
+- **Pending Operator Action**: Review `git status` / `git diff` (note `public/assets/aistudio/*.zip` and `_workspace_backup/` should stay out of `main` commits if untracked/ignored), push to the target branch from an authenticated workstation, and verify GitHub Actions CI (including `npm run test:security-rules` against the Firebase emulator) on the resulting commit SHA.

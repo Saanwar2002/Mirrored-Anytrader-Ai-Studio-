@@ -1,5 +1,40 @@
 # AnyTrader Platform Maintenance & Multi-Portal Development Guide
 
+## 🔄 Unified Repository & Task-616 Financial Reconciliation (November 13, 2026)
+- **Unified Codebase Sync**: Merged all improvements from `AnyTrader-main` (`AnyTrader-main_be48a8f2.zip`) into `/app/applet` while preserving all 11 Task-616 files, `_workspace_backup/*`, and workspace config (`android/app/google-services.json`).
+- **FIN-01 + Main Webhook Fencing Unification (`src/server/stripeWebhookHandler.ts`, `src/server/stripeWebhookIdempotency.ts`, `server.ts`)**:
+  - Unified `claimStripeEventLease`, `markStripeEventCompleted`, and `markStripeEventFailed` with `claimToken` ownership fencing (`ownsStripeWebhookClaim`) inside `/api/webhook` in `server.ts`.
+  - Active leases (`< 5 min`) return HTTP 200 without duplicate processing; stale leases (`> 5 min`) are atomically reclaimed with `takeoverFromStaleWorker: true` and `previousWorkerId` audit metadata.
+  - Both `workerId` and `claimToken` fencing reject stale/zombie worker completion or failure writes (`staleRejected: true`) and block mid-flight mutations.
+- **FIN-03 Read-Only Escrow Recovery (`src/server/escrowRecovery.ts`)**:
+  - Preserved strictly read-only `EscrowRecoveryEngine.inspectTransferEvidence()` (0 Firestore writes, 0 Stripe transfer creation calls; `moneyMovementAttempted: false`).
+  - Separated from `applyLedgerEvidenceRepair()`, which requires `RESOLVED_EXACT_MATCH` and explicit authorization.
+- **FIN-05 Operator Financial Reconciliation Report (`src/server/reconciliationReport.ts`, `server.ts`)**:
+  - Preserved `GET /api/admin/financial-reconciliation/report` with `requireAdmin`, strict parameter validation (`1 <= limit <= 100`, integer `offset >= 0`), V6/V7/V8 schema normalization, and Stripe transfer ID masking.
+  - Unified alongside `main`'s `src/server/financialReconciliation.ts` and `src/server/financialReconciliationCollector.ts`.
+- **Verification**:
+  - `npm test`: **1,313 / 1,313 tests passing across 86 test files**.
+  - `npx tsc --noEmit`: **0 errors**.
+  - `npm run build` (`vite build` + `esbuild server.ts`): **succeeded cleanly**.
+  - `node scripts/final-release-audit.mjs`: **0 critical failures, 6 environment warnings (GO WITH EXPLICIT ACCEPTED RISKS)**.
+
+## 🛠️ AnyTrader — Financial Reconciliation & Route Defense (November 12, 2026)
+- **1. Route-Level Stripe Webhook Stale-Worker Takeover & Worker Fencing (FIN-01)**:
+  - Created `src/server/stripeWebhookHandler.ts` with `claimStripeEventLease`, `markStripeEventCompleted`, and `markStripeEventFailed`.
+  - Wired into `/api/webhook` in `server.ts`. Active leases (< 5 min) return 200 without duplicate processing; stale leases (> 5 min) are safely reclaimed with `takeoverFromStaleWorker: true` tracking.
+  - Worker fencing prevents zombie/stale workers from overwriting successor worker status (`staleRejected: true`).
+  - Covered by 5 dedicated route tests in `tests/unit/task6StripeWebhookTakeover.test.ts`.
+- **2. Read-Only Escrow Recovery & Evidence Inspection (FIN-03)**:
+  - Created `src/server/escrowRecovery.ts` with `EscrowRecoveryEngine.inspectTransferEvidence` and `EscrowRecoveryEngine.applyLedgerEvidenceRepair`.
+  - Strictly enforces **Zero Money Movement**: never creates replacement Stripe transfers or retries money movement.
+  - Handles `RESOLVED_EXACT_MATCH`, `UNRESOLVED_ZERO_MATCH`, `AMBIGUOUS_MULTIPLE_MATCH`, `LEGACY_INCOMPLETE_METADATA`, and `RETRIEVAL_ERROR`.
+  - Covered by 7 dedicated tests in `tests/unit/task6EscrowRecoveryEvidence.test.ts`.
+- **3. Bounded Read-Only Operator Financial Reconciliation Report (FIN-05)**:
+  - Created `src/server/reconciliationReport.ts` with `generateFinancialReconciliationReport`.
+  - Mounted on Express at `/api/admin/financial-reconciliation/report` with strict `requireAdmin` middleware.
+  - Enforces fail-closed bounds (`limit <= 100`, positive integer check), normalizes V6, V7, and V8 historical ledger schemas, and masks sensitive Stripe transfer IDs.
+  - Covered by 10 tests in `tests/unit/task6ReconciliationReport.test.ts` and 4 route tests in `tests/unit/task6ReconciliationReportRoute.test.ts`.
+
 
 ## 🏘️ Gotham Subscription Lifecycle & Server-Authoritative Property Creation (November 10, 2026)
 

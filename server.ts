@@ -2,7 +2,9 @@ import express from "express";
 import { decrementGothamPropertyUsage, evaluateGothamPropertyQuota } from "./src/server/gothamPropertyQuota.ts";
 import { getSubscriptionIdForProduct, isExplicitMockSubscriptionAllowed, isMockSubscriptionId } from "./src/server/stripeSubscriptionGuards.ts";
 import { buildLandlordCheckoutFulfillmentPatch, buildSubscriptionLifecyclePatch, extractInvoiceSubscriptionId, isStripeSubscriptionLifecycleEventType, resolveSubscriptionProductMatch } from "./src/server/subscriptionLifecycle.ts";
-import { completeStripeWebhookClaim, failStripeWebhookClaimIfOwned, ownsStripeWebhookClaim, shouldClaimStripeWebhookEvent } from "./src/server/stripeWebhookIdempotency.ts";
+import { ownsStripeWebhookClaim } from "./src/server/stripeWebhookIdempotency.ts";
+import { claimStripeEventLease, markStripeEventCompleted, markStripeEventFailed } from "./src/server/stripeWebhookHandler.ts";
+import { generateFinancialReconciliationReport } from "./src/server/reconciliationReport.ts";
 import { createMediationStakePaymentIntent, confirmMediationStakePayment, recordMediationStakePaymentFailure } from "./src/server/mediationStake.ts";
 import { getRefundEventReconciliationStatus, recordConfirmedRefund } from "./src/server/refundReconciliation.ts";
 import { listAllChargeRefunds } from "./src/server/stripeRefundPagination.ts";
@@ -1680,6 +1682,7 @@ async function startServer() {
   app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     let event: Stripe.Event | undefined;
     let claimToken: string | null = null;
+    let assignedWorkerId: string | undefined;
     try {
       let stripeClient;
       try {
@@ -1710,26 +1713,17 @@ async function startServer() {
          return res.json({received: true});
       }
 
-      // Idempotency: Use a transaction to atomically claim 'processing' state
+      // Idempotency: Use a transaction to atomically claim 'processing' state with stale-worker lease takeover
       const eventRef = db.collection("processed_stripe_events").doc(event.id);
+      assignedWorkerId = `worker_${Math.random().toString(36).substring(7)}`;
+      claimToken = crypto.randomUUID();
       try {
-        claimToken = await db.runTransaction(async (t: admin.firestore.Transaction) => {
-          const existing = await t.get(eventRef);
-          const existingData = existing.exists ? existing.data() : undefined;
-          if (!shouldClaimStripeWebhookEvent(existingData, Date.now())) {
-            return null;
-          }
-          const claimToken = crypto.randomUUID();
-          t.set(eventRef, {
-            status: 'processing',
-            claimedAt: admin.firestore.FieldValue.serverTimestamp(),
-            workerId: `worker_${Math.random().toString(36).substring(7)}`,
-            claimToken
-          });
-          return claimToken;
+        const claimResult = await claimStripeEventLease(db, event.id, {
+          workerId: assignedWorkerId,
+          claimToken,
         });
 
-        if (!claimToken) {
+        if (!claimResult.claimed) {
            return res.status(200).send("Already processed or currently processing");
         }
       } catch (txErr) {
@@ -2319,7 +2313,10 @@ async function startServer() {
       }
 
       // Completion is fenced: an expired worker cannot complete a successor's claim.
-      await completeStripeWebhookClaim(db, eventRef, claimToken, admin.firestore.FieldValue.delete());
+      const completionResult = await markStripeEventCompleted(db, event.id, assignedWorkerId, claimToken);
+      if (!completionResult.success) {
+        throw new Error("Webhook claim lost before completion; reconciliation required.");
+      }
       res.status(200).json({ received: true });
     } catch (err: any) {
       console.error("Webhook processing error:", err.message);
@@ -2332,16 +2329,32 @@ async function startServer() {
           } catch (_) {}
         }
         if (rawEventId) {
-          const failedRef = db.collection("processed_stripe_events").doc(rawEventId);
-          await failStripeWebhookClaimIfOwned(
-            db, failedRef, claimToken, err.message,
-            admin.firestore.FieldValue.serverTimestamp(), admin.firestore.FieldValue.delete()
-          ).catch(e => console.error("Could not update failed status", e));
+          await markStripeEventFailed(db, rawEventId, err.message, assignedWorkerId, claimToken)
+            .catch(e => console.error("Could not update failed status", e));
         }
       }
       res.status(500).json({ error: 'Webhook processing failed' });
     }
-  })
+  });
+
+  app.use("/api/gemini/call", express.json({ limit: "10mb" }));
+  app.use(express.json({ limit: "1mb" }));
+
+  // API Routes
+  app.get("/api/health", (req, res) => {
+    if (!isApplicationReady) {
+      if (bootstrapError) {
+        console.warn("[/api/health] Degraded readiness notice:", bootstrapError);
+      }
+      return res.status(200).json({
+        status: "degraded",
+        ready: true,
+        bootstrapReady: false,
+        message: "TradeQuote UK API running (client SPA mode active)"
+      });
+    }
+    res.json({ status: "ok", ready: true, bootstrapReady: true, message: "TradeQuote UK API is running and ready" });
+  });
 
   // Free membership selection is server-authoritative; clients cannot write subscription entitlements.
   app.post("/api/select-free-tier", requireAuth, paymentLimiter, async (req, res) => {
@@ -6777,6 +6790,20 @@ Limit your response to just the text of the tip. Do not use quotes.`;
     try {
       const auditReport = runProductionChecks(process.env, db);
       res.json({ success: true, ...auditReport });
+    } catch (err: any) {
+      sendHttpError(res, err, req);
+    }
+  });
+
+  // FIN-05: Bounded Read-Only Operator Financial Reconciliation Report Endpoint
+  app.get("/api/admin/financial-reconciliation/report", requireAdmin, async (req, res) => {
+    try {
+      const caller = (req as any).user;
+      const report = await generateFinancialReconciliationReport(db, req.query, {
+        uid: caller.uid,
+        isAdmin: true,
+      });
+      res.json({ success: true, ...report });
     } catch (err: any) {
       sendHttpError(res, err, req);
     }

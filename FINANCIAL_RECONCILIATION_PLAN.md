@@ -325,3 +325,27 @@ Schema mapping is confirmed for current write paths, not every historical docume
 ## Promotion and Gemini hand-off gate
 
 This branch is the reconciliation candidate, not an instruction to merge or overwrite main. Use GEMINI_AI_STUDIO_RECONCILIATION_HANDOFF.md before any AI Studio Pull/Push. Preserve AI Studio-only edits, pull only after comparing the workspace against this exact branch, and push Gemini edits to integration first. Main promotion requires explicit owner approval, full diff review and exact-head CI green; no direct push to main is authorized by this plan.
+
+---
+
+## Task-616 & Unified Workspace Reconciliation Status (12–13 November 2026)
+
+This section records the unified integration in `/app/applet` combining `AnyTrader-main` (`AnyTrader-main_be48a8f2.zip`, baseline `38b417309fa8b44ed0cbd3c2724a05dea10b6768`) with the Task-616 workspace deliverables:
+
+### Preserved & Unified Task-616 Components
+1. **FIN-01 (`src/server/stripeWebhookHandler.ts`, `server.ts`, `tests/unit/task6StripeWebhookTakeover.test.ts` — 5/5 passing)**:
+   - `claimStripeEventLease`, `markStripeEventCompleted`, and `markStripeEventFailed` now coordinate both `workerId` and `claimToken` fencing (`ownsStripeWebhookClaim` from `src/server/stripeWebhookIdempotency.ts`) inside `/api/webhook` in `server.ts`.
+   - Active leases (`< 5 min`) return HTTP 200 without duplicate side effects; stale leases (`> 5 min`) are atomically reclaimed with `takeoverFromStaleWorker: true` and `previousWorkerId` logging; stale zombie workers are rejected (`staleRejected: true`).
+2. **FIN-03 (`src/server/escrowRecovery.ts`, `tests/unit/task6EscrowRecoveryEvidence.test.ts` — 7/7 passing)**:
+   - `EscrowRecoveryEngine.inspectTransferEvidence()` remains 100% strictly read-only (`moneyMovementAttempted: false`, `ledgerUpdated: false`, zero Firestore writes, zero Stripe transfer creation calls).
+   - `applyLedgerEvidenceRepair()` remains explicitly separated and requires `RESOLVED_EXACT_MATCH`.
+3. **FIN-05 (`src/server/reconciliationReport.ts`, `server.ts`, `tests/unit/task6ReconciliationReport.test.ts` — 10/10 passing, `tests/unit/task6ReconciliationReportRoute.test.ts` — 4/4 passing)**:
+   - Mounted at `GET /api/admin/financial-reconciliation/report` behind `requireAdmin`, enforcing `1 <= limit <= 100`, integer `offset >= 0`, V6/V7/V8 schema normalization, and Stripe transfer ID masking (`tr_s...7890`).
+   - Complements `main`'s pure evaluator (`src/server/financialReconciliation.ts`) and bounded collector (`src/server/financialReconciliationCollector.ts`).
+
+### Unified Verification Baseline (13 November 2026)
+- **`npm test`**: **1,313 / 1,313 tests passing across 86 test files** (including all 26/26 Task-616 tests and all new `main` financial/quota/subscription/command tests).
+- **`npx tsc --noEmit`**: **0 errors**.
+- **Applet Build (`vite build` + `esbuild server.ts`)**: **Succeeded**.
+- **Release Audit (`node scripts/final-release-audit.mjs`)**: **0 Critical Failures, 6 Environment Warnings (GO WITH EXPLICIT ACCEPTED RISKS)**.
+- **Safety Boundaries**: No production Firebase mutation, no deployment, and no live Stripe transfer or ledger mutation was performed.
