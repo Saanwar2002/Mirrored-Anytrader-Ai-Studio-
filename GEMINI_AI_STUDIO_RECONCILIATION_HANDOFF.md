@@ -24,9 +24,9 @@ Use the reconciliation candidate as the starting point for Gemini-assisted proje
 - After every push, wait for Actions on that exact SHA. A prior green run does not validate Gemini's new commit. Require security/emulator, tests, typecheck/lint, build and release audit to pass; fix failures on integration and rerun.
 
 ## Reconciliation residuals before promotion
-- FIN-01 route-level webhook lease takeover test (helper/handler fence exists; no full two-request integration proof yet).
-- FIN-03 read-only Stripe transfer lookup/recovery evidence for ambiguous/legacy outcomes (never create replacement transfer during audit).
-- FIN-05 safe operator-only report runner and historical schema coverage; production audit remains unperformed and needs explicit authorization/credentials in a controlled environment.
+- FIN-01 route-level webhook lease takeover test: **CLOSED IN MOCKED CONCURRENT INTEGRATION** (`tests/unit/task6StripeWebhookTakeover.test.ts` — 8/8 passing with deterministic clock & deferred promise barriers covering Worker A pause, >5m lease expiry, Worker B reclaim with new `claimToken`/`workerId`, Worker B completion, stale Worker A completion & failure rejection, duplicate acknowledgement, and transient failure retry). Residual note: `createStripeWebhookHandler` relies on per-request `workerId` without forwarding `claimResult.claimToken` to terminal calls, whereas `server.ts` `/api/webhook` enforces explicit `claimToken` + `ownsStripeWebhookClaim` on every mutation and throws on `completionResult.success === false`; real Firestore emulator security/concurrency tests still require Java in CI.
+- FIN-03 read-only Stripe transfer lookup/recovery evidence for ambiguous/legacy outcomes (automated inspection implemented in `src/server/escrowRecovery.ts`; live production audit unperformed).
+- FIN-05 safe operator-only report runner (`GET /api/admin/financial-reconciliation/report`) and historical schema coverage; production audit remains unperformed and needs explicit authorization/credentials in a controlled environment.
 - Review full diff and all AI Studio-only changes; confirm live Firebase project/database/rules/indexes/secrets/backup/rollback separately.
 - Supplementary durable domain-event consumer retries are separate from FIN acceptance.
 
@@ -37,7 +37,7 @@ Use the reconciliation candidate as the starting point for Gemini-assisted proje
 
 ---
 
-## Unified AI Studio + Main Reconciliation Status (2026-11-13)
+## Unified AI Studio + Main Reconciliation Status (2026-11-14)
 - **Workspace Root**: `/app/applet`
 - **Target Repository**: `Saanwar2002/AnyTrader`
 - **Preserved Backup File**: `_workspace_backup/anytrader_workspace_backup_20261112_015500.tar.gz` (SHA-256 `5cecd20e38b781d25542b3185a90d802bb1bb8e629b040f050b284545920a549`)
@@ -45,17 +45,12 @@ Use the reconciliation candidate as the starting point for Gemini-assisted proje
   - `src/server/stripeWebhookHandler.ts` (unified with `claimToken` fencing)
   - `src/server/escrowRecovery.ts`
   - `src/server/reconciliationReport.ts`
-  - `server.ts` (preserving FIN-01 webhook lease fencing, FIN-03 safeguards, FIN-05 `/api/admin/financial-reconciliation/report` route, plus all `main` checkout/quota/mediation/subscription/refund improvements)
-  - `tests/unit/task6StripeWebhookTakeover.test.ts` (5 tests)
+  - `server.ts` (preserving FIN-01 webhook lease fencing, FIN-03 safeguards, FIN-05 `/api/admin/financial-reconciliation/report` route, static artifact/source-map hardening, plus all `main` checkout/quota/mediation/subscription/refund improvements)
+  - `tests/unit/task6StripeWebhookTakeover.test.ts` (8 tests: 5 takeover scenarios + 3 concurrent two-worker integration scenarios)
   - `tests/unit/task6EscrowRecoveryEvidence.test.ts` (7 tests)
   - `tests/unit/task6ReconciliationReport.test.ts` (10 tests)
   - `tests/unit/task6ReconciliationReportRoute.test.ts` (4 tests)
   - `DEVELOPMENT.md`
   - `FINANCIAL_RECONCILIATION_PLAN.md`
   - `GEMINI_AI_STUDIO_RECONCILIATION_HANDOFF.md`
-- **Unified Verification Evidence**:
-  - `npm test`: **1,313 / 1,313 tests passing across 86 test files**
-  - `npx tsc --noEmit`: **0 errors**
-  - `npm run build` (`compile_applet`): **Succeeded**
-  - `node scripts/final-release-audit.mjs`: **0 Critical Failures, 6 Warnings**
-- **Pending Operator Action**: Review `git status` / `git diff` (note `public/assets/aistudio/*.zip` and `_workspace_backup/` should stay out of `main` commits if untracked/ignored), push to the target branch from an authenticated workstation, and verify GitHub Actions CI (including `npm run test:security-rules` against the Firebase emulator) on the resulting commit SHA.
+- **Pending Operator Action**: Review workspace diff (`.gitignore` excludes `_workspace_backup/` and `public/assets/aistudio/`), follow repository migration & workspace preservation runbooks under `docs/migration/`, push from an authenticated workstation, and verify GitHub Actions CI (`npm run test:security-rules` against the Java-backed Firebase emulator) on the resulting commit SHA.

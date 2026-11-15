@@ -333,9 +333,15 @@ This branch is the reconciliation candidate, not an instruction to merge or over
 This section records the unified integration in `/app/applet` combining `AnyTrader-main` (`AnyTrader-main_be48a8f2.zip`, baseline `38b417309fa8b44ed0cbd3c2724a05dea10b6768`) with the Task-616 workspace deliverables:
 
 ### Preserved & Unified Task-616 Components
-1. **FIN-01 (`src/server/stripeWebhookHandler.ts`, `server.ts`, `tests/unit/task6StripeWebhookTakeover.test.ts` — 5/5 passing)**:
+1. **FIN-01 (`src/server/stripeWebhookHandler.ts`, `server.ts`, `tests/unit/task6StripeWebhookTakeover.test.ts` — 8/8 passing)**:
    - `claimStripeEventLease`, `markStripeEventCompleted`, and `markStripeEventFailed` now coordinate both `workerId` and `claimToken` fencing (`ownsStripeWebhookClaim` from `src/server/stripeWebhookIdempotency.ts`) inside `/api/webhook` in `server.ts`.
    - Active leases (`< 5 min`) return HTTP 200 without duplicate side effects; stale leases (`> 5 min`) are atomically reclaimed with `takeoverFromStaleWorker: true` and `previousWorkerId` logging; stale zombie workers are rejected (`staleRejected: true`).
+   - Concurrent two-worker integration suite (`FIN-01: Concurrent Two-Worker Webhook Lease & Fencing Integration Verification`) deterministically verifies via controlled promise barriers and `vi.useFakeTimers()` (`STALE_LEASE_THRESHOLD_MS = 300000` preserved):
+     - Worker A claims lease and pauses; fresh duplicate delivery is suppressed without invoking side effects.
+     - After fake-clock advance past 5 minutes, Worker B reclaims the stale lease with a fresh `workerId` + `claimToken` and completes cleanly (`status: "completed"`).
+     - Worker A resuming (on both completion path and timeout/error failure path) receives `{ success: false, staleRejected: true }` without overwriting Worker B's active or completed terminal state.
+     - Explicit `claimToken`-only transaction fencing rejects stale tokens; post-completion duplicates return HTTP 200 with zero repeat side effects; transient failures transition to `"failed"` and remain immediately retryable.
+   - **Honest Implementation / Environment Note**: `createStripeWebhookHandler` relies on per-request `assignedWorkerId` for stale rejection and ignores `{ staleRejected: true }` when returning HTTP 200, whereas `server.ts` `/api/webhook` explicitly forwards `claimToken` to `claimStripeEventLease`, `markStripeEventCompleted`, and `markStripeEventFailed`, enforces `ownsStripeWebhookClaim` inside mid-flight transactions, and throws (returning HTTP 500) if completion fencing fails. Real Firestore emulator verification (`npm run test:security-rules`) requires Java (`temurin` 21 in GitHub Actions CI) and was not executed in the Java-less container.
 2. **FIN-03 (`src/server/escrowRecovery.ts`, `tests/unit/task6EscrowRecoveryEvidence.test.ts` — 7/7 passing)**:
    - `EscrowRecoveryEngine.inspectTransferEvidence()` remains 100% strictly read-only (`moneyMovementAttempted: false`, `ledgerUpdated: false`, zero Firestore writes, zero Stripe transfer creation calls).
    - `applyLedgerEvidenceRepair()` remains explicitly separated and requires `RESOLVED_EXACT_MATCH`.
@@ -343,9 +349,6 @@ This section records the unified integration in `/app/applet` combining `AnyTrad
    - Mounted at `GET /api/admin/financial-reconciliation/report` behind `requireAdmin`, enforcing `1 <= limit <= 100`, integer `offset >= 0`, V6/V7/V8 schema normalization, and Stripe transfer ID masking (`tr_s...7890`).
    - Complements `main`'s pure evaluator (`src/server/financialReconciliation.ts`) and bounded collector (`src/server/financialReconciliationCollector.ts`).
 
-### Unified Verification Baseline (13 November 2026)
-- **`npm test`**: **1,313 / 1,313 tests passing across 86 test files** (including all 26/26 Task-616 tests and all new `main` financial/quota/subscription/command tests).
-- **`npx tsc --noEmit`**: **0 errors**.
-- **Applet Build (`vite build` + `esbuild server.ts`)**: **Succeeded**.
-- **Release Audit (`node scripts/final-release-audit.mjs`)**: **0 Critical Failures, 6 Environment Warnings (GO WITH EXPLICIT ACCEPTED RISKS)**.
-- **Safety Boundaries**: No production Firebase mutation, no deployment, and no live Stripe transfer or ledger mutation was performed.
+### Unified Verification Baseline (14 November 2026)
+- **Focused FIN-01 Suite (`npx vitest run tests/unit/task6StripeWebhookTakeover.test.ts`)**: **8 / 8 passing** (5 takeover scenarios + 3 concurrent two-worker integration scenarios).
+- **Safety Boundaries**: No production Firebase mutation, no deployment, no live Stripe transfer or ledger mutation, and no GitHub push was performed.
